@@ -8,6 +8,7 @@ void glfwPollEvents(void);
 void glfwSwapBuffers(GLFWwindow* window);
 void glfwMakeContextCurrent(GLFWwindow* window);
 GLFWwindow* glfwCreateWindow(int width, int height, const char* title, void* monitor, void* share);
+int glfwWindowShouldClose(GLFWwindow* window);
 ]]
 
 local glfw = ffi.load("glfw3")
