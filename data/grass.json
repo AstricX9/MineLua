@@ -1,0 +1,12 @@
+{
+  "name": "Grass",
+  "texture": {
+    "top": "./textures/blocks/grass_top.png",
+    "side": "./textures/blocks/grass_side.png",
+    "bottom": "./textures/blocks/dirt.png"
+  },
+  "colormap": "./textures/colormap/grass.png",
+  "properties": {
+    "solid": true
+  }
+}

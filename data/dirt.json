@@ -1,0 +1,7 @@
+{
+    "name": "Dirt",
+    "texture": "./textures/blocks/dirt.png",
+    "properties": {
+        "solid": true
+    }
+}

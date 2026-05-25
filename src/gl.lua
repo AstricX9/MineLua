@@ -13,6 +13,13 @@ typedef unsigned char GLchar;
 void glClearColor(float r, float g, float b, float a);
 void glClear(int mask);
 void glViewport(GLint x, GLint y, GLint w, GLint h);
+void glGenTextures(int n, GLuint *textures);
+void glBindTexture(GLenum target, GLuint texture);
+void glTexParameteri(GLenum target, GLenum pname, GLint param);
+void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels);
+void glEnable(GLenum cap);
+void glDepthFunc(GLenum func);
+void glDrawArrays(GLenum mode, GLint first, GLsizei count);
 ]]
 
 -- Load legacy OpenGL (1.1) from Windows
@@ -34,6 +41,16 @@ GLuint glCreateProgram(void);
 void glAttachShader(GLuint program, GLuint shader);
 void glLinkProgram(GLuint program);
 void glUseProgram(GLuint program);
+
+// Uniforms
+GLint glGetUniformLocation(GLuint program, const char* name);
+void glUniform3f(GLint location, float v0, float v1, float v2);
+void glUniform1i(GLint location, GLint v0);
+  void glUniformMatrix4fv(GLint location, GLsizei count, unsigned char transpose, const float* value);
+  const unsigned char* glGetString(GLenum name);
+  void glEnable(GLenum cap);
+  void glDepthFunc(GLenum func);
+  void glActiveTexture(GLenum texture);
 
 // Buffers
 void glGenBuffers(GLsizei n, GLuint* buffers);
@@ -63,6 +80,16 @@ void glBindVertexArray(GLuint array);
   gl.glLinkProgram = loader.load("glLinkProgram", "void", "GLuint")
   gl.glUseProgram = loader.load("glUseProgram", "void", "GLuint")
 
+  -- Uniforms
+  gl.glGetUniformLocation = loader.load("glGetUniformLocation", "GLint", "GLuint", "const char*")
+  gl.glUniform3f = loader.load("glUniform3f", "void", "GLint", "float", "float", "float")
+  gl.glUniform1i = loader.load("glUniform1i", "void", "GLint", "GLint")
+  gl.glUniformMatrix4fv = loader.load("glUniformMatrix4fv", "void", "GLint", "GLsizei", "unsigned char", "const float*")
+  gl.glGetString = loader.load("glGetString", "const unsigned char*", "unsigned int")
+  gl.glEnable = loader.load("glEnable", "void", "unsigned int")
+  gl.glDepthFunc = loader.load("glDepthFunc", "void", "unsigned int")
+  gl.glActiveTexture = loader.load("glActiveTexture", "void", "unsigned int")
+
   -- Buffers
   gl.glGenBuffers = loader.load("glGenBuffers", "void", "GLsizei", "GLuint*")
   gl.glBindBuffer = loader.load("glBindBuffer", "void", "GLenum", "GLuint")
@@ -72,10 +99,10 @@ void glBindVertexArray(GLuint array);
   gl.glVertexAttribPointer = loader.load("glVertexAttribPointer", "void", "GLuint", "GLint", "GLenum", "unsigned char", "GLint", "const void*")
   gl.glEnableVertexAttribArray = loader.load("glEnableVertexAttribArray", "void", "GLuint")
 
-  -- Draw
+  -- Draw call
   gl.glDrawArrays = loader.load("glDrawArrays", "void", "GLenum", "GLint", "GLsizei")
 
-  -- VAOs (THE FIX)
+  -- VAOs
   gl.glGenVertexArrays = loader.load("glGenVertexArrays", "void", "GLsizei", "GLuint*")
   gl.glBindVertexArray = loader.load("glBindVertexArray", "void", "GLuint")
 end
