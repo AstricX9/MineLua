@@ -3,6 +3,66 @@ local glfw = require("glfw")
 local voxel = require("voxel")
 local character = require("character")
 local terrain = require("terrain")
+local camera = require("camera")
+local shader = require("shader")
+local rendering = require("rendering")
+
+-- Initialize camera
+local cam = camera
+
+-- Load shaders
+local shaderProgram = shader.load("path/to/vertex_shader.glsl", "path/to/fragment_shader.glsl")
+
+-- Main game loop
+local success, err = pcall(function()
+    while true do
+        local dt = glfw.glfwGetTime() - lastTime
+        lastTime = glfw.glfwGetTime()
+
+        camera.update(dt, window)
+
+        gl.glClearColor(0.53, 0.81, 0.92, 1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT + gl.GL_DEPTH_BUFFER_BIT)
+
+        -- Draw terrain
+        rendering.draw(vao[0], vcount)
+
+        -- Draw character
+        rendering.draw(vao2[0], char_count)
+
+        glfw.glfwSwapBuffers(window)
+        glfw.glfwPollEvents()
+    end
+end)
+
+if not success then
+    print("Error: " .. err)
+end
+
+-- Clean up
+ glfw.glfwTerminate()
+
+-- Pause to read any output
+print("Press Enter to exit...")
+io.read()
+local debugger = require("debugger")
+local game = require("game")
+
+debugger.addIssue("Game started. Initializing...")
+debugger.printIssues()
+
+-- Call the game logic
+local success, err = pcall(game.mainLoop)
+if not success then
+    print("Error: " .. err)
+end
+
+-- Pause to read any output
+print("Press Enter to exit...")
+io.read()
+
+debugger.addIssue("Game started. Initializing...")
+debugger.printIssues()
 
 local GL_COLOR_BUFFER_BIT = 0x00004000
 local GL_DEPTH_BUFFER_BIT = 0x00000100
@@ -355,4 +415,21 @@ while glfw.glfwWindowShouldClose(window) == 0 do
   glfw.glfwPollEvents()
 end
 
+local success, err = pcall(function()
+    -- Your main game loop code here
+end)
+
+if not success then
+    print("Error: " .. err)
+end
+
+-- Clean up
 glfw.glfwTerminate()
+
+-- Pause to read any output
+print("Press Enter to exit...")
+io.read()
+
+-- Pause to read any output
+print("Press Enter to exit...")
+io.read()
