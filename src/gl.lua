@@ -18,6 +18,7 @@ void glBindTexture(GLenum target, GLuint texture);
 void glTexParameteri(GLenum target, GLenum pname, GLint param);
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels);
 void glEnable(GLenum cap);
+void glDisable(GLenum cap);
 void glDepthFunc(GLenum func);
 void glDrawArrays(GLenum mode, GLint first, GLsizei count);
 ]]

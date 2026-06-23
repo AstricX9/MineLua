@@ -1,0 +1,17 @@
+{
+  "name": "Player",
+  "components": {
+    "transform": {
+      "position": [8, 6, 8],
+      "rotation": [0, 0, 0]
+    },
+    "physics": {
+      "velocity": [0, 0, 0]
+    },
+    "render": {
+      "mesh": "box",
+      "size": [0.8, 0.8, 0.8],
+      "color": [0.8, 0.5, 0.3]
+    }
+  }
+}

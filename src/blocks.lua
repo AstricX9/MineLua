@@ -1,6 +1,7 @@
 local json = require("json")
 local texture = require("texture")
 local ffi = require("ffi")
+local modApi = require("mod_api")
 
 -- Small helper to sample center pixel from a PNG
 local function sampleCenterColor(path)
@@ -19,8 +20,8 @@ local function sampleCenterColor(path)
 end
 
 local M = {
-  mapping = {},
-  list = {}
+  mapping = modApi.blocks.byName,
+  list = modApi.blocks.byId
 }
 
 local function loadDataFile(name)
@@ -38,14 +39,25 @@ for i, bname in ipairs(blockList) do
   local def = loadDataFile(bname .. ".json")
   if def then
     def.id = i - 1
-    M.mapping[bname] = def
-    M.list[def.id] = def
-    M[bname] = def.id -- alias for blocks.grass etc
+    M[bname] = modApi.registerBlock(bname, def)
   end
 end
 
 -- Fallbacks just in case
-if not M.air then M.air = 0; M.list[0] = {id=0, name="Air", texture=nil, properties={solid=false}} end
+if not M.air then
+  M.air = modApi.registerBlock("air", {
+    id = 0,
+    name = "Air",
+    texture = nil,
+    properties = {solid = false}
+  })
+end
+
+function M.register(name, definition)
+  local id = modApi.registerBlock(name, definition)
+  M[name] = id
+  return id
+end
 
 function M.initTextures(atlas)
   for _, def in pairs(M.list) do

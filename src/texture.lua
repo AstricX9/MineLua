@@ -30,6 +30,24 @@ local function load_png(path)
   return { w = width, h = height, data = rgba }
 end
 
+local function create_missing_texture()
+  local img = { w = 16, h = 16, data = ffi.new("uint8_t[?]", 16 * 16 * 4) }
+
+  for y = 0, 15 do
+    for x = 0, 15 do
+      local idx = (y * 16 + x) * 4
+      local magenta = (x < 8 and y < 8) or (x >= 8 and y >= 8)
+
+      img.data[idx + 0] = magenta and 255 or 20
+      img.data[idx + 1] = magenta and 0 or 20
+      img.data[idx + 2] = magenta and 255 or 20
+      img.data[idx + 3] = 255
+    end
+  end
+
+  return img
+end
+
 function M.createAtlas()
   local self = {
     w = 256,
@@ -52,14 +70,8 @@ function M.createAtlas()
   function self:addTexture(name, path)
     local img = load_png(path)
     if not img then
-      -- create fallback 16x16
-      img = { w = 16, h = 16, data = ffi.new("uint8_t[?]", 16 * 16 * 4) }
-      for i = 0, 16*16-1 do
-        img.data[i*4 + 0] = math.random(100, 255)
-        img.data[i*4 + 1] = math.random(100, 255)
-        img.data[i*4 + 2] = math.random(100, 255)
-        img.data[i*4 + 3] = 255
-      end
+      print("Missing texture: " .. tostring(path))
+      img = create_missing_texture()
     end
 
     if self.current_x + img.w > self.w then

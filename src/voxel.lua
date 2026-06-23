@@ -75,7 +75,9 @@ local function append_face(verts, x, y, z, nx, ny, nz, r, g, b, uv)
   end
 end
 
-function M.meshChunk(chunk, maxh)
+function M.meshChunk(chunk, maxh, offsetX, offsetZ)
+  offsetX = offsetX or 0
+  offsetZ = offsetZ or 0
   local verts = {}
 
   local function is_solid(x, y, z)
@@ -86,7 +88,7 @@ function M.meshChunk(chunk, maxh)
   end
 
   for x = 0, 15 do
-    for y = 0, maxh - 1 do
+    for y = 0, maxh do
       for z = 0, 15 do
         local id = chunk:getBlock(x, y, z)
         if id ~= 0 then
@@ -97,12 +99,14 @@ function M.meshChunk(chunk, maxh)
           local ao = 1.0 - (y / (maxh + 1)) * 0.35
           r, g, b = r * ao, g * ao, b * ao
 
-          if not is_solid(x+1, y, z) then append_face(verts, x, y, z,  1, 0, 0, r,g,b, def.uvs.side) end
-          if not is_solid(x-1, y, z) then append_face(verts, x, y, z, -1, 0, 0, r,g,b, def.uvs.side) end
-          if not is_solid(x, y+1, z) then append_face(verts, x, y, z,  0,  1, 0, r,g,b, def.uvs.top) end
-          if not is_solid(x, y-1, z) then append_face(verts, x, y, z,  0, -1, 0, r,g,b, def.uvs.bottom) end
-          if not is_solid(x, y, z+1) then append_face(verts, x, y, z,  0, 0,  1, r,g,b, def.uvs.side) end
-          if not is_solid(x, y, z-1) then append_face(verts, x, y, z,  0, 0, -1, r,g,b, def.uvs.side) end
+          local wx = x + offsetX
+          local wz = z + offsetZ
+          if not is_solid(x+1, y, z) then append_face(verts, wx, y, wz,  1, 0, 0, r,g,b, def.uvs.side) end
+          if not is_solid(x-1, y, z) then append_face(verts, wx, y, wz, -1, 0, 0, r,g,b, def.uvs.side) end
+          if not is_solid(x, y+1, z) then append_face(verts, wx, y, wz,  0,  1, 0, r,g,b, def.uvs.top) end
+          if not is_solid(x, y-1, z) then append_face(verts, wx, y, wz,  0, -1, 0, r,g,b, def.uvs.bottom) end
+          if not is_solid(x, y, z+1) then append_face(verts, wx, y, wz,  0, 0,  1, r,g,b, def.uvs.side) end
+          if not is_solid(x, y, z-1) then append_face(verts, wx, y, wz,  0, 0, -1, r,g,b, def.uvs.side) end
         end
       end
     end

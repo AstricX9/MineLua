@@ -1,46 +1,53 @@
+local ffi = require("ffi")
+local GL = require("gl")
+
 local shader = {}
 
+local gl = GL.gl
+
+local GL_VERTEX_SHADER = 0x8B31
+local GL_FRAGMENT_SHADER = 0x8B30
+local GL_COMPILE_STATUS = 0x8B81
+
+local function readFile(path)
+  local file = assert(io.open(path, "r"))
+  local content = file:read("*a")
+  file:close()
+  return content
+end
+
+local function compile(shaderType, source)
+  local id = gl.glCreateShader(shaderType)
+  local sourcePtr = ffi.new("const char*[1]", {[0] = source})
+
+  gl.glShaderSource(id, 1, sourcePtr, nil)
+  gl.glCompileShader(id)
+
+  local status = ffi.new("int[1]")
+  gl.glGetShaderiv(id, GL_COMPILE_STATUS, status)
+  if status[0] == 0 then
+    local log = ffi.new("char[512]")
+    gl.glGetShaderInfoLog(id, 512, nil, log)
+    error("Shader compilation failed: " .. ffi.string(log))
+  end
+
+  return id
+end
+
+function shader.fromSource(vertexSource, fragmentSource)
+  local vertexShader = compile(GL_VERTEX_SHADER, vertexSource)
+  local fragmentShader = compile(GL_FRAGMENT_SHADER, fragmentSource)
+
+  local program = gl.glCreateProgram()
+  gl.glAttachShader(program, vertexShader)
+  gl.glAttachShader(program, fragmentShader)
+  gl.glLinkProgram(program)
+
+  return program
+end
+
 function shader.load(vertexPath, fragmentPath)
-    -- Load and compile shaders from the given paths
-    local vertexShader = gl.glCreateShader(gl.GL_VERTEX_SHADER)
-    local fragmentShader = gl.glCreateShader(gl.GL_FRAGMENT_SHADER)
-
-    -- Read shader source code from files
-    local vertexCode = io.open(vertexPath, "r"):read("*a")
-    local fragmentCode = io.open(fragmentPath, "r"):read("*a")
-
-    -- Compile vertex shader
-    gl.glShaderSource(vertexShader, 1, ffi.new("const char*[1]", vertexCode), nil)
-    gl.glCompileShader(vertexShader)
-
-    -- Check for compilation errors
-    local success = ffi.new("int[1]")
-    gl.glGetShaderiv(vertexShader, gl.GL_COMPILE_STATUS, success)
-    if success[0] == gl.GL_FALSE then
-        error("Vertex shader compilation failed")
-    end
-
-    -- Compile fragment shader
-    gl.glShaderSource(fragmentShader, 1, ffi.new("const char*[1]", fragmentCode), nil)
-    gl.glCompileShader(fragmentShader)
-
-    -- Check for compilation errors
-    gl.glGetShaderiv(fragmentShader, gl.GL_COMPILE_STATUS, success)
-    if success[0] == gl.GL_FALSE then
-        error("Fragment shader compilation failed")
-    end
-
-    -- Create shader program
-    local shaderProgram = gl.glCreateProgram()
-    gl.glAttachShader(shaderProgram, vertexShader)
-    gl.glAttachShader(shaderProgram, fragmentShader)
-    gl.glLinkProgram(shaderProgram)
-
-    -- Delete shaders as they're linked into the program now and no longer necessary
-    gl.glDeleteShader(vertexShader)
-    gl.glDeleteShader(fragmentShader)
-
-    return shaderProgram
+  return shader.fromSource(readFile(vertexPath), readFile(fragmentPath))
 end
 
 return shader
