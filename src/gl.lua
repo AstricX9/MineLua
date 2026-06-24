@@ -21,6 +21,12 @@ void glEnable(GLenum cap);
 void glDisable(GLenum cap);
 void glDepthFunc(GLenum func);
 void glDrawArrays(GLenum mode, GLint first, GLsizei count);
+void glDrawBuffer(GLenum buf);
+void glReadBuffer(GLenum src);
+void glCullFace(GLenum mode);
+void glPolygonOffset(GLfloat factor, GLfloat units);
+void glBlendFunc(GLenum sfactor, GLenum dfactor);
+void glDepthMask(unsigned char flag);
 ]]
 
 -- Load legacy OpenGL (1.1) from Windows
@@ -46,12 +52,26 @@ void glUseProgram(GLuint program);
 // Uniforms
 GLint glGetUniformLocation(GLuint program, const char* name);
 void glUniform3f(GLint location, float v0, float v1, float v2);
+void glUniform1f(GLint location, float v0);
 void glUniform1i(GLint location, GLint v0);
   void glUniformMatrix4fv(GLint location, GLsizei count, unsigned char transpose, const float* value);
   const unsigned char* glGetString(GLenum name);
   void glEnable(GLenum cap);
+  void glDisable(GLenum cap);
   void glDepthFunc(GLenum func);
   void glActiveTexture(GLenum texture);
+  void glDrawBuffer(GLenum buf);
+  void glReadBuffer(GLenum src);
+  void glCullFace(GLenum mode);
+  void glPolygonOffset(GLfloat factor, GLfloat units);
+  void glBlendFunc(GLenum sfactor, GLenum dfactor);
+  void glDepthMask(unsigned char flag);
+
+// Framebuffers
+void glGenFramebuffers(GLsizei n, GLuint* ids);
+void glBindFramebuffer(GLenum target, GLuint framebuffer);
+void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+GLenum glCheckFramebufferStatus(GLenum target);
 
 // Buffers
 void glGenBuffers(GLsizei n, GLuint* buffers);
@@ -84,12 +104,26 @@ void glBindVertexArray(GLuint array);
   -- Uniforms
   gl.glGetUniformLocation = loader.load("glGetUniformLocation", "GLint", "GLuint", "const char*")
   gl.glUniform3f = loader.load("glUniform3f", "void", "GLint", "float", "float", "float")
+  gl.glUniform1f = loader.load("glUniform1f", "void", "GLint", "float")
   gl.glUniform1i = loader.load("glUniform1i", "void", "GLint", "GLint")
   gl.glUniformMatrix4fv = loader.load("glUniformMatrix4fv", "void", "GLint", "GLsizei", "unsigned char", "const float*")
   gl.glGetString = loader.load("glGetString", "const unsigned char*", "unsigned int")
   gl.glEnable = loader.load("glEnable", "void", "unsigned int")
+  gl.glDisable = loader.load("glDisable", "void", "unsigned int")
   gl.glDepthFunc = loader.load("glDepthFunc", "void", "unsigned int")
   gl.glActiveTexture = loader.load("glActiveTexture", "void", "unsigned int")
+  gl.glDrawBuffer = loader.load("glDrawBuffer", "void", "GLenum")
+  gl.glReadBuffer = loader.load("glReadBuffer", "void", "GLenum")
+  gl.glCullFace = loader.load("glCullFace", "void", "GLenum")
+  gl.glPolygonOffset = loader.load("glPolygonOffset", "void", "GLfloat", "GLfloat")
+  gl.glBlendFunc = loader.load("glBlendFunc", "void", "GLenum", "GLenum")
+  gl.glDepthMask = loader.load("glDepthMask", "void", "unsigned char")
+
+  -- Framebuffers
+  gl.glGenFramebuffers = loader.load("glGenFramebuffers", "void", "GLsizei", "GLuint*")
+  gl.glBindFramebuffer = loader.load("glBindFramebuffer", "void", "GLenum", "GLuint")
+  gl.glFramebufferTexture2D = loader.load("glFramebufferTexture2D", "void", "GLenum", "GLenum", "GLenum", "GLuint", "GLint")
+  gl.glCheckFramebufferStatus = loader.load("glCheckFramebufferStatus", "GLenum", "GLenum")
 
   -- Buffers
   gl.glGenBuffers = loader.load("glGenBuffers", "void", "GLsizei", "GLuint*")

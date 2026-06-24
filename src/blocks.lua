@@ -19,6 +19,22 @@ local function sampleCenterColor(path)
   return load_png(path)
 end
 
+local function colorToUnit(color)
+  return {color[1] / 255, color[2] / 255, color[3] / 255}
+end
+
+local function isLayeredTexture(value)
+  return type(value) == "table" and #value > 0
+end
+
+local function addFaceTexture(atlas, name, value, tint)
+  if isLayeredTexture(value) then
+    return atlas:addLayeredTexture(name, value, tint)
+  end
+
+  return atlas:addTexture(name, value)
+end
+
 local M = {
   mapping = modApi.blocks.byName,
   list = modApi.blocks.byId
@@ -63,19 +79,37 @@ function M.initTextures(atlas)
   for _, def in pairs(M.list) do
     def.uvs = { top = nil, bottom = nil, side = nil }
     def.color = {1.0, 1.0, 1.0}
+    def.colors = {
+      top = {1.0, 1.0, 1.0},
+      bottom = {1.0, 1.0, 1.0},
+      side = {1.0, 1.0, 1.0}
+    }
 
+    local colormapColor = nil
     if def.colormap then
       local col = sampleCenterColor(def.colormap)
-      def.color = {col[1]/255, col[2]/255, col[3]/255}
+      colormapColor = colorToUnit(col)
+      def.color = colormapColor
     end
 
     if type(def.texture) == "string" then
       local uv = atlas:addTexture(def.name, def.texture)
       def.uvs.top = uv; def.uvs.bottom = uv; def.uvs.side = uv
+      if colormapColor then
+        def.colors.top = colormapColor
+        def.colors.bottom = colormapColor
+        def.colors.side = colormapColor
+      end
     elseif type(def.texture) == "table" then
-      def.uvs.top = atlas:addTexture(def.name .. "_top", def.texture.top)
-      def.uvs.bottom = atlas:addTexture(def.name .. "_bottom", def.texture.bottom)
-      def.uvs.side = atlas:addTexture(def.name .. "_side", def.texture.side)
+      def.uvs.top = addFaceTexture(atlas, def.name .. "_top", def.texture.top, colormapColor)
+      def.uvs.bottom = addFaceTexture(atlas, def.name .. "_bottom", def.texture.bottom, colormapColor)
+      def.uvs.side = addFaceTexture(atlas, def.name .. "_side", def.texture.side, colormapColor)
+
+      if colormapColor then
+        def.colors.top = isLayeredTexture(def.texture.top) and {1.0, 1.0, 1.0} or colormapColor
+        def.colors.bottom = isLayeredTexture(def.texture.bottom) and {1.0, 1.0, 1.0} or colormapColor
+        def.colors.side = isLayeredTexture(def.texture.side) and {1.0, 1.0, 1.0} or colormapColor
+      end
     else
       -- air, etc
     end

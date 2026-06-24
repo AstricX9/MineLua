@@ -93,20 +93,21 @@ function M.meshChunk(chunk, maxh, offsetX, offsetZ)
         local id = chunk:getBlock(x, y, z)
         if id ~= 0 then
           local def = blocks.list[id]
-          local r, g, b = def.color[1], def.color[2], def.color[3]
-          
           -- approximate ambient occlusion
           local ao = 1.0 - (y / (maxh + 1)) * 0.35
-          r, g, b = r * ao, g * ao, b * ao
+          local function faceColor(face)
+            local color = def.colors and def.colors[face] or def.color
+            return color[1] * ao, color[2] * ao, color[3] * ao
+          end
 
           local wx = x + offsetX
           local wz = z + offsetZ
-          if not is_solid(x+1, y, z) then append_face(verts, wx, y, wz,  1, 0, 0, r,g,b, def.uvs.side) end
-          if not is_solid(x-1, y, z) then append_face(verts, wx, y, wz, -1, 0, 0, r,g,b, def.uvs.side) end
-          if not is_solid(x, y+1, z) then append_face(verts, wx, y, wz,  0,  1, 0, r,g,b, def.uvs.top) end
-          if not is_solid(x, y-1, z) then append_face(verts, wx, y, wz,  0, -1, 0, r,g,b, def.uvs.bottom) end
-          if not is_solid(x, y, z+1) then append_face(verts, wx, y, wz,  0, 0,  1, r,g,b, def.uvs.side) end
-          if not is_solid(x, y, z-1) then append_face(verts, wx, y, wz,  0, 0, -1, r,g,b, def.uvs.side) end
+          if not is_solid(x+1, y, z) then local r,g,b = faceColor("side"); append_face(verts, wx, y, wz,  1, 0, 0, r,g,b, def.uvs.side) end
+          if not is_solid(x-1, y, z) then local r,g,b = faceColor("side"); append_face(verts, wx, y, wz, -1, 0, 0, r,g,b, def.uvs.side) end
+          if not is_solid(x, y+1, z) then local r,g,b = faceColor("top"); append_face(verts, wx, y, wz,  0,  1, 0, r,g,b, def.uvs.top) end
+          if not is_solid(x, y-1, z) then local r,g,b = faceColor("bottom"); append_face(verts, wx, y, wz,  0, -1, 0, r,g,b, def.uvs.bottom) end
+          if not is_solid(x, y, z+1) then local r,g,b = faceColor("side"); append_face(verts, wx, y, wz,  0, 0,  1, r,g,b, def.uvs.side) end
+          if not is_solid(x, y, z-1) then local r,g,b = faceColor("side"); append_face(verts, wx, y, wz,  0, 0, -1, r,g,b, def.uvs.side) end
         end
       end
     end

@@ -2,7 +2,8 @@
   "name": "Grass",
   "texture": {
     "top": "./textures/blocks/grass_top.png",
-    "side": "./textures/blocks/grass_side.png",
+    "side": "./textures/blocks/grass_side_overlay.png",
+    "side": "./textures/blocks/dirt.png",
     "bottom": "./textures/blocks/dirt.png"
   },
   "colormap": "./textures/colormap/grass.png",

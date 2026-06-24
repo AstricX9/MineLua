@@ -78,7 +78,15 @@ local function decode_value(str, idx)
             if str:sub(idx, idx) ~= ':' then decode_error(str, idx, "Expected ':'") end
             local val
             val, idx = decode_value(str, idx + 1)
-            res[key] = val
+            if res[key] ~= nil then
+                if type(res[key]) == "table" and res[key].__json_duplicate_keys then
+                    res[key][#res[key] + 1] = val
+                else
+                    res[key] = {res[key], val, __json_duplicate_keys = true}
+                end
+            else
+                res[key] = val
+            end
             idx = skip_spaces(str, idx)
             local next_c = str:sub(idx, idx)
             if next_c == '}' then

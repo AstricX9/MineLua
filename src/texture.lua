@@ -48,6 +48,34 @@ local function create_missing_texture()
   return img
 end
 
+local function copy_image(img)
+  local copy = { w = img.w, h = img.h, data = ffi.new("uint8_t[?]", img.w * img.h * 4) }
+  ffi.copy(copy.data, img.data, img.w * img.h * 4)
+  return copy
+end
+
+local function blend_layer(dst, src, tint)
+  local tintR = tint and tint[1] or 1.0
+  local tintG = tint and tint[2] or 1.0
+  local tintB = tint and tint[3] or 1.0
+  local width = math.min(dst.w, src.w)
+  local height = math.min(dst.h, src.h)
+
+  for y = 0, height - 1 do
+    for x = 0, width - 1 do
+      local idx = (y * dst.w + x) * 4
+      local srcIdx = (y * src.w + x) * 4
+      local alpha = src.data[srcIdx + 3] / 255
+      local invAlpha = 1.0 - alpha
+
+      dst.data[idx + 0] = math.floor(dst.data[idx + 0] * invAlpha + src.data[srcIdx + 0] * tintR * alpha + 0.5)
+      dst.data[idx + 1] = math.floor(dst.data[idx + 1] * invAlpha + src.data[srcIdx + 1] * tintG * alpha + 0.5)
+      dst.data[idx + 2] = math.floor(dst.data[idx + 2] * invAlpha + src.data[srcIdx + 2] * tintB * alpha + 0.5)
+      dst.data[idx + 3] = math.floor((alpha + dst.data[idx + 3] / 255 * invAlpha) * 255 + 0.5)
+    end
+  end
+end
+
 function M.createAtlas()
   local self = {
     w = 256,
@@ -73,6 +101,30 @@ function M.createAtlas()
       print("Missing texture: " .. tostring(path))
       img = create_missing_texture()
     end
+
+    return self:addImage(name, img)
+  end
+
+  function self:addLayeredTexture(name, paths, tint)
+    local images = {}
+    for i = 1, #paths do
+      local img = load_png(paths[i])
+      if not img then
+        print("Missing texture: " .. tostring(paths[i]))
+        img = create_missing_texture()
+      end
+      images[i] = img
+    end
+
+    local img = copy_image(images[#images])
+    for i = #images - 1, 1, -1 do
+      blend_layer(img, images[i], tint)
+    end
+
+    return self:addImage(name, img)
+  end
+
+  function self:addImage(name, img)
 
     if self.current_x + img.w > self.w then
       self.current_x = 0

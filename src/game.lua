@@ -1,9 +1,12 @@
 local ffi = require("ffi")
 local glfw = require("glfw")
 local GL = require("gl")
+local atmosphere = require("atmosphere")
 local blocks = require("blocks")
 local camera = require("camera")
 local character = require("character")
+local effects = require("render_effects")
+local math3d = require("math3d")
 local rendering = require("rendering")
 local shaderModule = require("shader")
 local texture = require("texture")
@@ -27,6 +30,8 @@ local GL_UNSIGNED_BYTE = 0x1401
 local GL_ARRAY_BUFFER = 0x8892
 local GL_STATIC_DRAW = 0x88E4
 local GL_FLOAT = 0x1406
+local GL_TEXTURE0 = 0x84C0
+local GL_TEXTURE1 = 0x84C1
 
 local WINDOW_W = 1280
 local WINDOW_H = 720
@@ -40,46 +45,12 @@ local SKY_COLOR = {0.53, 0.81, 0.92}
 local FOG_START = 42.0
 local FOG_END = 78.0
 local SUN_CYCLE_SPEED = 0.02
-
-local function perspective(fov, aspect, near, far)
-  local f = 1.0 / math.tan(fov / 2)
-  local nf = 1 / (near - far)
-
-  return {
-    f / aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, (2 * far * near) * nf, 0
-  }
-end
-
-local function lookAt(eye, center, up)
-  local fx = center[1] - eye[1]
-  local fy = center[2] - eye[2]
-  local fz = center[3] - eye[3]
-  local rlf = 1 / math.sqrt(fx * fx + fy * fy + fz * fz)
-  fx, fy, fz = fx * rlf, fy * rlf, fz * rlf
-
-  local sx = fy * up[3] - fz * up[2]
-  local sy = fz * up[1] - fx * up[3]
-  local sz = fx * up[2] - fy * up[1]
-  local rls = 1 / math.sqrt(sx * sx + sy * sy + sz * sz)
-  sx, sy, sz = sx * rls, sy * rls, sz * rls
-
-  local ux = sy * fz - sz * fy
-  local uy = sz * fx - sx * fz
-  local uz = sx * fy - sy * fx
-
-  return {
-    sx, ux, -fx, 0,
-    sy, uy, -fy, 0,
-    sz, uz, -fz, 0,
-    -(sx * eye[1] + sy * eye[2] + sz * eye[3]),
-    -(ux * eye[1] + uy * eye[2] + uz * eye[3]),
-    fx * eye[1] + fy * eye[2] + fz * eye[3],
-    1
-  }
-end
+local SHADOW_MAP_SIZE = 2048
+local SHADOW_DISTANCE = 60.0
+local SHADOW_NEAR = 8.0
+local SHADOW_FAR = 132.0
+local WATER_LEVEL = 6.15
+local WATER_RADIUS = 136.0
 
 local function createShaderProgram()
   local vertSource = [[
@@ -114,26 +85,60 @@ out vec4 FragColor;
 uniform vec3 lightDir;
 uniform vec3 viewPos;
 uniform sampler2D tex0;
+uniform sampler2D shadowMap;
 uniform vec3 fogColor;
 uniform vec3 fogParams;
+uniform vec3 ambientColor;
+uniform vec3 lightColor;
+uniform float shadowStrength;
+uniform mat4 lightSpaceMatrix;
+
+vec3 tonemap(vec3 color) {
+  color = color / (color + vec3(1.0));
+  return pow(color, vec3(1.0 / 2.2));
+}
+
+float shadowAt(vec3 normal, vec3 light, float diff) {
+  vec4 lightSpacePos = lightSpaceMatrix * vec4(vFragPos, 1.0);
+  vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
+  projCoords = projCoords * 0.5 + 0.5;
+
+  if (projCoords.z > 1.0 || projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0) {
+    return 0.0;
+  }
+
+  float bias = max(0.0025 * (1.0 - dot(normal, light)), 0.0007);
+  vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+  float shadow = 0.0;
+  for (int x = -1; x <= 1; ++x) {
+    for (int y = -1; y <= 1; ++y) {
+      float closestDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+      shadow += projCoords.z - bias > closestDepth ? 1.0 : 0.0;
+    }
+  }
+
+  return shadow / 9.0 * smoothstep(0.02, 0.18, diff);
+}
+
 void main() {
   vec3 norm = normalize(vNormal);
   vec3 light = normalize(-lightDir);
   float diff = max(dot(norm, light), 0.0);
   vec3 viewDir = normalize(viewPos - vFragPos);
   vec3 reflectDir = reflect(-light, norm);
-  float spec = pow(max(dot(viewDir, reflectDir), 0.0), 16.0);
+  float spec = pow(max(dot(viewDir, reflectDir), 0.0), 20.0);
   vec4 texColor = texture(tex0, vTexCoord);
   vec3 baseColor = vColor * texColor.rgb;
   if(texColor.a < 0.1) discard;
-  vec3 ambient = 0.38 * baseColor;
-  vec3 diffuse = diff * baseColor * 0.72;
-  vec3 specular = vec3(0.18) * spec;
+  float shadow = shadowAt(norm, light, diff) * shadowStrength;
+  vec3 ambient = ambientColor * baseColor;
+  vec3 diffuse = diff * baseColor * lightColor * (1.0 - shadow);
+  vec3 specular = lightColor * spec * 0.12 * (1.0 - shadow);
   vec3 litColor = ambient + diffuse + specular;
   float fogDistance = length(viewPos - vFragPos);
   float fogAmount = smoothstep(fogParams.x, fogParams.y, fogDistance);
   vec3 result = mix(litColor, fogColor, fogAmount);
-  FragColor = vec4(result, texColor.a);
+  FragColor = vec4(tonemap(result * 1.16), texColor.a);
 }
 ]]
 
@@ -210,6 +215,33 @@ float fbm(vec3 p) {
   return f;
 }
 
+float hash2(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+float stars(vec3 dir) {
+  vec2 uv = vec2(atan(dir.z, dir.x) * 0.1591549 + 0.5, asin(clamp(dir.y, -1.0, 1.0)) * 0.3183099 + 0.5);
+  vec2 grid = floor(uv * vec2(360.0, 160.0));
+  vec2 cell = fract(uv * vec2(360.0, 160.0)) - 0.5;
+  float rnd = hash2(grid);
+  float star = 1.0 - smoothstep(0.0, 0.030, length(cell - vec2(hash2(grid + 17.0), hash2(grid + 41.0)) * 0.72 + 0.14));
+  return star * step(0.986, rnd) * mix(0.45, 1.35, hash2(grid + 91.0));
+}
+
+vec3 moonTexture(vec2 uv) {
+  float r = length(uv);
+  float shade = 1.0 - smoothstep(0.72, 1.0, r);
+  float craters = 0.0;
+  craters += (1.0 - smoothstep(0.02, 0.22, length(uv - vec2(-0.24, 0.20)))) * 0.35;
+  craters += (1.0 - smoothstep(0.03, 0.18, length(uv - vec2(0.30, -0.12)))) * 0.28;
+  craters += (1.0 - smoothstep(0.02, 0.12, length(uv - vec2(0.08, 0.34)))) * 0.20;
+  craters += (1.0 - smoothstep(0.02, 0.10, length(uv - vec2(-0.12, -0.30)))) * 0.18;
+  float grain = fbm(vec3(uv * 5.0, 2.5)) * 0.22;
+  return vec3(0.78, 0.80, 0.76) * (shade + grain - craters);
+}
+
 void main() {
   vec2 p = vUv * 2.0 - 1.0;
   vec3 pos = normalize(
@@ -218,6 +250,10 @@ void main() {
     cameraUp * p.y * cameraProjection.y
   );
   vec3 sun = normalize(sunDir);
+  vec3 moon = -sun;
+  float dayAmount = smoothstep(-0.08, 0.22, sun.y);
+  float nightAmount = 1.0 - smoothstep(-0.18, 0.08, sun.y);
+  float horizonWarmth = 1.0 - smoothstep(-0.03, 0.34, abs(sun.y));
   float skyMask = smoothstep(-0.08, 0.08, pos.y);
   vec3 skyPos = normalize(vec3(pos.x, max(pos.y, 0.015), pos.z));
 
@@ -240,9 +276,22 @@ void main() {
   }
 
   float sunAmount = max(dot(skyPos, sun), 0.0);
-  float disc = smoothstep(0.9990, 0.9997, sunAmount);
-  color += vec3(1.0, 0.78, 0.35) * pow(sunAmount, 96.0) * 0.35;
-  color = mix(color, vec3(1.0, 0.92, 0.62), disc);
+  float sunDisc = smoothstep(0.99982, 0.99994, sunAmount);
+  vec3 sunTint = mix(vec3(1.0, 0.58, 0.28), vec3(1.0, 0.96, 0.82), dayAmount);
+  color += sunTint * pow(sunAmount, 420.0) * 0.16 * max(dayAmount, 0.15);
+  color = mix(color, sunTint * 1.12, sunDisc * smoothstep(-0.06, 0.08, sun.y));
+
+  float moonAmount = max(dot(skyPos, moon), 0.0);
+  float moonDisc = smoothstep(0.99935, 0.99972, moonAmount) * nightAmount;
+  vec3 moonRight = normalize(cross(vec3(0.0, 1.0, 0.0), moon));
+  vec3 moonUp = normalize(cross(moon, moonRight));
+  vec2 moonUv = vec2(dot(skyPos, moonRight), dot(skyPos, moonUp)) / 0.035;
+  vec3 moonColor = moonTexture(moonUv);
+  float moonPhase = clamp(dot(normalize(vec3(0.65, 0.2, 0.35)), normalize(vec3(moonUv, 0.35))) * 0.75 + 0.55, 0.0, 1.0);
+  color = mix(color, moonColor * moonPhase, moonDisc);
+
+  color += vec3(0.82, 0.88, 1.0) * stars(pos) * nightAmount * smoothstep(0.0, 0.18, pos.y);
+  color = mix(color, vec3(0.98, 0.38, 0.18), horizonWarmth * smoothstep(0.0, 0.12, skyPos.y) * 0.15);
   color += noise(skyPos * 1000.0) * 0.006;
   color = mix(vec3(0.53, 0.81, 0.92), color, skyMask);
   FragColor = vec4(color, 1.0);
@@ -336,36 +385,11 @@ local function createCharacterMesh()
   return uploadMesh(player:createMesh())
 end
 
-local function sunDirection(time)
-  return {
-    -0.28,
-    math.sin(time * SUN_CYCLE_SPEED) * 0.85,
-    math.cos(time * SUN_CYCLE_SPEED) * 0.85
-  }
-end
-
-local function cross(a, b)
-  return {
-    a[2] * b[3] - a[3] * b[2],
-    a[3] * b[1] - a[1] * b[3],
-    a[1] * b[2] - a[2] * b[1]
-  }
-end
-
-local function normalize(v)
-  local length = math.sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3])
-  if length == 0 then
-    return {0.0, 1.0, 0.0}
-  end
-
-  return {v[1] / length, v[2] / length, v[3] / length}
-end
-
 local function drawSky(skyShader, skyMesh, locations, playerCamera, sunDir, time)
   local forward = playerCamera:getFront()
   local worldUp = {0.0, 1.0, 0.0}
-  local right = normalize(cross(forward, worldUp))
-  local up = normalize(cross(right, forward))
+  local right = math3d.normalize(math3d.cross(forward, worldUp))
+  local up = math3d.normalize(math3d.cross(right, forward))
 
   gl.glDisable(GL_DEPTH_TEST)
   gl.glUseProgram(skyShader)
@@ -381,7 +405,7 @@ end
 
 local function updateViewportAndProjection(locP)
   gl.glViewport(0, 0, windowWidth, windowHeight)
-  local projection = perspective(CAMERA_FOV, windowWidth / windowHeight, 0.1, 160.0)
+  local projection = math3d.perspective(CAMERA_FOV, windowWidth / windowHeight, 0.1, 160.0)
   gl.glUniformMatrix4fv(locP, 1, 0, ffi.new("float[16]", projection))
 end
 
@@ -476,7 +500,7 @@ function game.run()
     gl.glEnable(GL_DEPTH_TEST)
     gl.glDepthFunc(GL_LESS)
 
-    createTextureAtlas()
+    local atlasTex = createTextureAtlas()
     local world = World.new({
       chunkRadius = CHUNK_RENDER_RADIUS,
       maxHeight = TERRAIN_MAX_H
@@ -484,9 +508,13 @@ function game.run()
     local terrainMeshes = createTerrainMeshes(world)
     local characterMesh = createCharacterMesh()
     local skyMesh = uploadSkyMesh()
+    local waterMesh = uploadMesh(effects.waterVertices(WATER_RADIUS))
+    local shadowMap = effects.createShadowMap(SHADOW_MAP_SIZE)
 
     local shader = createShaderProgram()
+    local shadowShader = effects.createShadowShader()
     local skyShader = createSkyShaderProgram()
+    local waterShader = effects.createWaterShader()
     gl.glUseProgram(shader)
 
     local locP = gl.glGetUniformLocation(shader, "uProjection")
@@ -498,6 +526,15 @@ function game.run()
 
     local locFogColor = gl.glGetUniformLocation(shader, "fogColor")
     local locFogParams = gl.glGetUniformLocation(shader, "fogParams")
+    local locShadowMap = gl.glGetUniformLocation(shader, "shadowMap")
+    local locAmbientColor = gl.glGetUniformLocation(shader, "ambientColor")
+    local locLightColor = gl.glGetUniformLocation(shader, "lightColor")
+    local locShadowStrength = gl.glGetUniformLocation(shader, "shadowStrength")
+    local locLightSpaceMatrix = gl.glGetUniformLocation(shader, "lightSpaceMatrix")
+    local shadowLocations = {
+      model = gl.glGetUniformLocation(shadowShader, "uModel"),
+      lightSpaceMatrix = gl.glGetUniformLocation(shadowShader, "lightSpaceMatrix")
+    }
     local skyLocations = {
       sunDir = gl.glGetUniformLocation(skyShader, "sunDir"),
       time = gl.glGetUniformLocation(skyShader, "time"),
@@ -506,12 +543,26 @@ function game.run()
       cameraUp = gl.glGetUniformLocation(skyShader, "cameraUp"),
       cameraProjection = gl.glGetUniformLocation(skyShader, "cameraProjection")
     }
+    local waterLocations = {
+      projection = gl.glGetUniformLocation(waterShader, "uProjection"),
+      view = gl.glGetUniformLocation(waterShader, "uView"),
+      waterCenter = gl.glGetUniformLocation(waterShader, "waterCenter"),
+      waterLevel = gl.glGetUniformLocation(waterShader, "waterLevel"),
+      viewPos = gl.glGetUniformLocation(waterShader, "viewPos"),
+      sunDir = gl.glGetUniformLocation(waterShader, "sunDir"),
+      fogColor = gl.glGetUniformLocation(waterShader, "fogColor"),
+      fogParams = gl.glGetUniformLocation(waterShader, "fogParams"),
+      lightColor = gl.glGetUniformLocation(waterShader, "lightColor"),
+      skyZenithColor = gl.glGetUniformLocation(waterShader, "skyZenithColor"),
+      time = gl.glGetUniformLocation(waterShader, "time")
+    }
 
     local model = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
 
     updateViewportAndProjection(locP)
     gl.glUniformMatrix4fv(locM, 1, 0, ffi.new("float[16]", model))
     gl.glUniform1i(locTex, 0)
+    gl.glUniform1i(locShadowMap, 1)
     gl.glUniform3f(locFogColor, SKY_COLOR[1], SKY_COLOR[2], SKY_COLOR[3])
     gl.glUniform3f(locFogParams, FOG_START, FOG_END, 0.0)
 
@@ -527,23 +578,41 @@ function game.run()
       updateFullscreenInput(window, displayState, locP)
       ensureTerrainMeshes(world, terrainMeshes, playerCamera.position[1], playerCamera.position[3])
       playerCamera:update(dt, window, world)
-      local sunDir = sunDirection(currentTime)
-      local view = lookAt(playerCamera.position, playerCamera:getCenter(), {0, 1, 0})
+      local sunDir = math3d.normalize(atmosphere.sunDirection(currentTime, SUN_CYCLE_SPEED))
+      local sky = atmosphere.forSun(sunDir, FOG_START, FOG_END)
+      local lightSpaceMatrix = effects.lightSpaceMatrix(playerCamera.position, sunDir, TERRAIN_MAX_H, SHADOW_DISTANCE, SHADOW_NEAR, SHADOW_FAR)
+      effects.renderShadowPass(shadowShader, shadowMap, shadowLocations, terrainMeshes, characterMesh, lightSpaceMatrix, model, SHADOW_MAP_SIZE, windowWidth, windowHeight)
+
+      local projection = math3d.perspective(CAMERA_FOV, windowWidth / windowHeight, 0.1, 160.0)
+      local view = math3d.lookAt(playerCamera.position, playerCamera:getCenter(), {0, 1, 0})
       gl.glUseProgram(shader)
+      gl.glUniformMatrix4fv(locP, 1, 0, ffi.new("float[16]", projection))
       gl.glUniformMatrix4fv(locV, 1, 0, ffi.new("float[16]", view))
+      gl.glUniformMatrix4fv(locLightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
       gl.glUniform3f(locViewPos, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
       gl.glUniform3f(locLight, -sunDir[1], -sunDir[2], -sunDir[3])
+      gl.glUniform3f(locFogColor, sky.fogColor[1], sky.fogColor[2], sky.fogColor[3])
+      gl.glUniform3f(locFogParams, sky.fogStart, sky.fogEnd, 0.0)
+      gl.glUniform3f(locAmbientColor, sky.ambient[1], sky.ambient[2], sky.ambient[3])
+      gl.glUniform3f(locLightColor, sky.lightColor[1], sky.lightColor[2], sky.lightColor[3])
+      gl.glUniform1f(locShadowStrength, sky.shadowStrength)
 
-      gl.glClearColor(SKY_COLOR[1], SKY_COLOR[2], SKY_COLOR[3], 1.0)
+      gl.glClearColor(sky.fogColor[1], sky.fogColor[2], sky.fogColor[3], 1.0)
       gl.glClear(GL_COLOR_BUFFER_BIT + GL_DEPTH_BUFFER_BIT)
       drawSky(skyShader, skyMesh, skyLocations, playerCamera, sunDir, currentTime)
       gl.glClear(GL_DEPTH_BUFFER_BIT)
 
       gl.glUseProgram(shader)
+      gl.glActiveTexture(GL_TEXTURE0)
+      gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
+      gl.glActiveTexture(GL_TEXTURE1)
+      gl.glBindTexture(GL_TEXTURE_2D, shadowMap.depthTexture[0])
+      gl.glActiveTexture(GL_TEXTURE0)
       for _, mesh in pairs(terrainMeshes) do
         rendering.draw(mesh)
       end
       rendering.draw(characterMesh)
+      effects.drawWater(waterShader, waterMesh, waterLocations, playerCamera, view, projection, sunDir, sky, currentTime, WATER_LEVEL)
 
       glfw.glfwSwapBuffers(window)
       glfw.glfwPollEvents()
