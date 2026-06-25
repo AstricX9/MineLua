@@ -6,6 +6,7 @@ local blocks = require("blocks")
 local camera = require("camera")
 local character = require("character")
 local effects = require("render_effects")
+local graphics = require("graphics_settings")
 local math3d = require("math3d")
 local rendering = require("rendering")
 local shaderModule = require("shader")
@@ -33,24 +34,24 @@ local GL_FLOAT = 0x1406
 local GL_TEXTURE0 = 0x84C0
 local GL_TEXTURE1 = 0x84C1
 
-local WINDOW_W = 1280
-local WINDOW_H = 720
+local WINDOW_W = graphics.window.width
+local WINDOW_H = graphics.window.height
 local windowWidth = WINDOW_W
 local windowHeight = WINDOW_H
-local CAMERA_FOV = math.rad(45)
-local TERRAIN_MAX_H = 16
-local CHUNK_RENDER_RADIUS = 4
+local CAMERA_FOV = math.rad(graphics.window.fovDegrees)
+local TERRAIN_MAX_H = graphics.world.terrainMaxHeight
+local CHUNK_RENDER_RADIUS = graphics.world.chunkRenderRadius
 local VERTEX_STRIDE_FLOATS = 11
-local SKY_COLOR = {0.53, 0.81, 0.92}
-local FOG_START = 42.0
-local FOG_END = 78.0
-local SUN_CYCLE_SPEED = 0.02
-local SHADOW_MAP_SIZE = 2048
-local SHADOW_DISTANCE = 60.0
-local SHADOW_NEAR = 8.0
-local SHADOW_FAR = 132.0
-local WATER_LEVEL = 6.15
-local WATER_RADIUS = 136.0
+local SKY_COLOR = graphics.atmosphere.skyColor
+local FOG_START = graphics.atmosphere.fogStart
+local FOG_END = graphics.atmosphere.fogEnd
+local SUN_CYCLE_SPEED = graphics.atmosphere.sunCycleSpeed
+local SHADOW_MAP_SIZE = graphics.shadows.mapSize
+local SHADOW_DISTANCE = graphics.shadows.distance
+local SHADOW_NEAR = graphics.shadows.near
+local SHADOW_FAR = graphics.shadows.far
+local WATER_LEVEL = graphics.water.level
+local WATER_RADIUS = graphics.water.radius
 
 local function createShaderProgram()
   local vertSource = [[
@@ -90,6 +91,8 @@ uniform vec3 fogColor;
 uniform vec3 fogParams;
 uniform vec3 ambientColor;
 uniform vec3 lightColor;
+uniform vec3 faceLight;
+uniform float exposure;
 uniform float shadowStrength;
 uniform mat4 lightSpaceMatrix;
 
@@ -130,6 +133,10 @@ void main() {
   vec4 texColor = texture(tex0, vTexCoord);
   vec3 baseColor = vColor * texColor.rgb;
   if(texColor.a < 0.1) discard;
+  float faceShade = faceLight.y;
+  faceShade = mix(faceShade, faceLight.x, max(norm.y, 0.0));
+  faceShade = mix(faceShade, faceLight.z, max(-norm.y, 0.0));
+  baseColor *= faceShade;
   float shadow = shadowAt(norm, light, diff) * shadowStrength;
   vec3 ambient = ambientColor * baseColor;
   vec3 diffuse = diff * baseColor * lightColor * (1.0 - shadow);
@@ -138,7 +145,7 @@ void main() {
   float fogDistance = length(viewPos - vFragPos);
   float fogAmount = smoothstep(fogParams.x, fogParams.y, fogDistance);
   vec3 result = mix(litColor, fogColor, fogAmount);
-  FragColor = vec4(tonemap(result * 1.16), texColor.a);
+  FragColor = vec4(tonemap(result * exposure), texColor.a);
 }
 ]]
 
@@ -166,6 +173,7 @@ uniform vec3 cameraForward;
 uniform vec3 cameraRight;
 uniform vec3 cameraUp;
 uniform vec3 cameraProjection;
+uniform vec3 skyTuning;
 
 const float Br = 0.0025;
 const float Bm = 0.0003;
@@ -257,32 +265,35 @@ void main() {
   float skyMask = smoothstep(-0.08, 0.08, pos.y);
   vec3 skyPos = normalize(vec3(pos.x, max(pos.y, 0.015), pos.z));
 
-  float mu = dot(skyPos, sun);
+  float altitude = smoothstep(0.0, 0.92, skyPos.y);
+  float twilightAmount = 1.0 - smoothstep(0.08, 0.44, abs(sun.y));
+  vec3 nightSky = mix(vec3(0.050, 0.085, 0.135), vec3(0.018, 0.030, 0.080), altitude);
+  vec3 daySky = mix(vec3(0.67, 0.86, 0.98), vec3(0.22, 0.49, 0.88), altitude);
+  vec3 twilightSky = mix(vec3(0.86, 0.42, 0.24), vec3(0.17, 0.15, 0.34), altitude);
+  vec3 color = mix(nightSky, daySky, dayAmount);
+  color = mix(color, twilightSky, twilightAmount * smoothstep(0.0, 0.72, skyPos.y) * 0.62);
+
+  float mu = max(dot(skyPos, sun), 0.0);
   float rayleigh = 3.0 / (8.0 * 3.14159) * (1.0 + mu * mu);
-  vec3 mie = (Kr + Km * (1.0 - g * g) / (2.0 + g * g) / pow(1.0 + g * g - 2.0 * g * mu, 1.5)) / (Br + Bm);
-  vec3 dayExtinction = exp(-exp(-((skyPos.y + sun.y * 4.0) * (exp(-skyPos.y * 16.0) + 0.1) / 80.0) / Br) * (exp(-skyPos.y * 16.0) + 0.1) * Kr / Br) * exp(-skyPos.y * exp(-skyPos.y * 8.0) * 4.0) * exp(-skyPos.y * 2.0) * 4.0;
-  vec3 nightExtinction = vec3(1.0 - exp(sun.y)) * 0.2;
-  vec3 extinction = mix(dayExtinction, nightExtinction, -sun.y * 0.2 + 0.5);
-  vec3 color = rayleigh * mie * extinction;
+  vec3 mie = (Kr + Km * (1.0 - g * g) / (2.0 + g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 0.02), 1.5)) / (Br + Bm);
+  vec3 scatter = rayleigh * mie * 0.045 * dayAmount;
+  color += scatter;
 
   float cloudFade = smoothstep(0.10, 0.34, skyPos.y);
   float cloudHeight = max(skyPos.y, 0.24);
-  float cirrus = smoothstep(0.35, 1.0, fbm(skyPos / cloudHeight * 2.0 + time.x * 0.008)) * 0.14 * cloudFade;
-  color = mix(color, extinction * 2.6, cirrus);
+  float cirrus = smoothstep(0.35, 1.0, fbm(skyPos / cloudHeight * 2.0 + time.x * 0.008)) * 0.14 * cloudFade * skyTuning.y;
+  vec3 cloudColor = mix(vec3(0.24, 0.28, 0.36), vec3(0.88, 0.92, 0.94), dayAmount);
+  cloudColor = mix(cloudColor, vec3(0.98, 0.62, 0.40), twilightAmount * 0.32);
+  color = mix(color, cloudColor, cirrus * 0.48);
 
   for (int i = 0; i < 3; i++) {
     float density = smoothstep(0.62, 1.0, fbm((0.7 + float(i) * 0.01) * skyPos / cloudHeight + time.x * 0.025));
-    color = mix(color, extinction * density * 2.8, min(density, 1.0) * cloudFade * 0.22);
+    color = mix(color, cloudColor, min(density, 1.0) * cloudFade * 0.24 * skyTuning.y);
   }
 
-  float sunAmount = max(dot(skyPos, sun), 0.0);
-  float sunDisc = smoothstep(0.99982, 0.99994, sunAmount);
-  vec3 sunTint = mix(vec3(1.0, 0.58, 0.28), vec3(1.0, 0.96, 0.82), dayAmount);
-  color += sunTint * pow(sunAmount, 420.0) * 0.16 * max(dayAmount, 0.15);
-  color = mix(color, sunTint * 1.12, sunDisc * smoothstep(-0.06, 0.08, sun.y));
-
   float moonAmount = max(dot(skyPos, moon), 0.0);
-  float moonDisc = smoothstep(0.99935, 0.99972, moonAmount) * nightAmount;
+  float moonVisible = smoothstep(0.12, 0.28, -sun.y) * step(0.06, moon.y) * (1.0 - smoothstep(0.94, 0.985, dot(skyPos, sun)));
+  float moonDisc = smoothstep(0.99935, 0.99972, moonAmount) * moonVisible;
   vec3 moonRight = normalize(cross(vec3(0.0, 1.0, 0.0), moon));
   vec3 moonUp = normalize(cross(moon, moonRight));
   vec2 moonUv = vec2(dot(skyPos, moonRight), dot(skyPos, moonUp)) / 0.035;
@@ -290,9 +301,18 @@ void main() {
   float moonPhase = clamp(dot(normalize(vec3(0.65, 0.2, 0.35)), normalize(vec3(moonUv, 0.35))) * 0.75 + 0.55, 0.0, 1.0);
   color = mix(color, moonColor * moonPhase, moonDisc);
 
+  float sunAmount = max(dot(skyPos, sun), 0.0);
+  float sunDisc = smoothstep(0.99982, 0.99994, sunAmount);
+  vec3 sunTint = mix(vec3(1.0, 0.58, 0.28), vec3(1.0, 0.96, 0.82), dayAmount);
+  color += sunTint * pow(sunAmount, 420.0) * 0.16 * max(dayAmount, 0.15) * skyTuning.z;
+  color = mix(color, sunTint * 1.02, sunDisc * smoothstep(-0.06, 0.08, sun.y) * skyTuning.z);
+
   color += vec3(0.82, 0.88, 1.0) * stars(pos) * nightAmount * smoothstep(0.0, 0.18, pos.y);
   color = mix(color, vec3(0.98, 0.38, 0.18), horizonWarmth * smoothstep(0.0, 0.12, skyPos.y) * 0.15);
   color += noise(skyPos * 1000.0) * 0.006;
+  color = vec3(1.0) - exp(-color * skyTuning.x);
+  color = pow(color, vec3(1.08));
+  color = mix(color, sunTint, sunDisc * smoothstep(-0.02, 0.08, sun.y));
   color = mix(vec3(0.53, 0.81, 0.92), color, skyMask);
   FragColor = vec4(color, 1.0);
 }
@@ -399,6 +419,7 @@ local function drawSky(skyShader, skyMesh, locations, playerCamera, sunDir, time
   gl.glUniform3f(locations.cameraRight, right[1], right[2], right[3])
   gl.glUniform3f(locations.cameraUp, up[1], up[2], up[3])
   gl.glUniform3f(locations.cameraProjection, windowWidth / windowHeight * math.tan(CAMERA_FOV / 2), math.tan(CAMERA_FOV / 2), 0.0)
+  gl.glUniform3f(locations.skyTuning, graphics.atmosphere.skyExposure, graphics.atmosphere.cloudDensity, graphics.atmosphere.sunGlare)
   rendering.draw(skyMesh)
   gl.glEnable(GL_DEPTH_TEST)
 end
@@ -529,6 +550,8 @@ function game.run()
     local locShadowMap = gl.glGetUniformLocation(shader, "shadowMap")
     local locAmbientColor = gl.glGetUniformLocation(shader, "ambientColor")
     local locLightColor = gl.glGetUniformLocation(shader, "lightColor")
+    local locFaceLight = gl.glGetUniformLocation(shader, "faceLight")
+    local locExposure = gl.glGetUniformLocation(shader, "exposure")
     local locShadowStrength = gl.glGetUniformLocation(shader, "shadowStrength")
     local locLightSpaceMatrix = gl.glGetUniformLocation(shader, "lightSpaceMatrix")
     local shadowLocations = {
@@ -541,7 +564,8 @@ function game.run()
       cameraForward = gl.glGetUniformLocation(skyShader, "cameraForward"),
       cameraRight = gl.glGetUniformLocation(skyShader, "cameraRight"),
       cameraUp = gl.glGetUniformLocation(skyShader, "cameraUp"),
-      cameraProjection = gl.glGetUniformLocation(skyShader, "cameraProjection")
+      cameraProjection = gl.glGetUniformLocation(skyShader, "cameraProjection"),
+      skyTuning = gl.glGetUniformLocation(skyShader, "skyTuning")
     }
     local waterLocations = {
       projection = gl.glGetUniformLocation(waterShader, "uProjection"),
@@ -565,6 +589,8 @@ function game.run()
     gl.glUniform1i(locShadowMap, 1)
     gl.glUniform3f(locFogColor, SKY_COLOR[1], SKY_COLOR[2], SKY_COLOR[3])
     gl.glUniform3f(locFogParams, FOG_START, FOG_END, 0.0)
+    gl.glUniform3f(locFaceLight, graphics.terrain.topLight, graphics.terrain.sideLight, graphics.terrain.bottomLight)
+    gl.glUniform1f(locExposure, graphics.terrain.exposure)
 
     local playerCamera = camera.new()
     local displayState = createDisplayState()
