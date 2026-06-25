@@ -4,12 +4,36 @@ local glfw = require("glfw")
 local Camera = {}
 Camera.__index = Camera
 
+local function clamp(value, minValue, maxValue)
+  if value < minValue then
+    return minValue
+  end
+  if value > maxValue then
+    return maxValue
+  end
+  return value
+end
+
 local function normalize(v)
   local length = math.sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3])
   if length == 0 then
     return {0, 0, 0}
   end
   return {v[1] / length, v[2] / length, v[3] / length}
+end
+
+local function moveToward(current, target, amount)
+  if current < target then
+    return math.min(current + amount, target)
+  end
+  if current > target then
+    return math.max(current - amount, target)
+  end
+  return current
+end
+
+local function isDown(window, key)
+  return glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
 end
 
 function Camera.new(options)
@@ -22,10 +46,35 @@ function Camera.new(options)
     lastX = options.lastX or 640.0,
     lastY = options.lastY or 360.0,
     firstMouse = true,
+    velocity = options.velocity or {0.0, 0.0, 0.0},
     velocityY = 0.0,
+    grounded = false,
+    flying = options.flying or false,
+    flightToggleWasDown = false,
+    jumpWasDown = false,
+    jumpBuffer = 0.0,
+    coyoteTimer = 0.0,
     eyeHeight = options.eyeHeight or 1.62,
-    moveSpeed = options.moveSpeed or 6.0,
-    mouseSensitivity = options.mouseSensitivity or 0.1
+    standEyeHeight = options.eyeHeight or 1.62,
+    crouchEyeHeight = options.crouchEyeHeight or 1.24,
+    bodyRadius = options.radius or 0.34,
+    walkSpeed = options.walkSpeed or 5.1,
+    sprintSpeed = options.sprintSpeed or 7.2,
+    crouchSpeed = options.crouchSpeed or 2.4,
+    flySpeed = options.flySpeed or 9.5,
+    acceleration = options.acceleration or 34.0,
+    airAcceleration = options.airAcceleration or 8.0,
+    flyAcceleration = options.flyAcceleration or 24.0,
+    groundFriction = options.groundFriction or 38.0,
+    airFriction = options.airFriction or 2.0,
+    flyFriction = options.flyFriction or 18.0,
+    gravity = options.gravity or 19.5,
+    jumpSpeed = options.jumpSpeed or 6.4,
+    stepHeight = options.stepHeight or 1.08,
+    groundSnap = options.groundSnap or 0.36,
+    coyoteTime = options.coyoteTime or 0.10,
+    jumpBufferTime = options.jumpBufferTime or 0.12,
+    mouseSensitivity = options.mouseSensitivity or 0.085
   }, Camera)
 end
 
@@ -40,13 +89,14 @@ function Camera:getFront()
   })
 end
 
+function Camera:getHorizontalFront()
+  local front = self:getFront()
+  return normalize({front[1], 0.0, front[3]})
+end
+
 function Camera:getRight(front)
-  local up = {0, 1, 0}
-  return normalize({
-    front[3] * up[2] - front[2] * up[3],
-    front[1] * up[3] - front[3] * up[1],
-    front[2] * up[1] - front[1] * up[2]
-  })
+  front = front or self:getHorizontalFront()
+  return normalize({-front[3], 0.0, front[1]})
 end
 
 function Camera:updateMouse(window)
@@ -69,67 +119,223 @@ function Camera:updateMouse(window)
   self.lastY = y
 
   self.yaw = self.yaw + xoffset
-  self.pitch = self.pitch + yoffset
-
-  if self.pitch > 89.0 then self.pitch = 89.0 end
-  if self.pitch < -89.0 then self.pitch = -89.0 end
+  self.pitch = clamp(self.pitch + yoffset, -88.0, 88.0)
 end
 
-function Camera:updateMovement(dt, window, world)
-  local front = self:getFront()
+function Camera:getSupportY(world, x, z)
+  local radius = self.bodyRadius
+  local samples = {
+    {x, z},
+    {x + radius, z},
+    {x - radius, z},
+    {x, z + radius},
+    {x, z - radius}
+  }
+
+  local surfaceY = nil
+  for i = 1, #samples do
+    local sampleX = math.floor(samples[i][1] + 0.5)
+    local sampleZ = math.floor(samples[i][2] + 0.5)
+    local sampleY = world:surfaceYAt(sampleX, sampleZ)
+    if not sampleY then
+      return nil
+    end
+    if not surfaceY or sampleY > surfaceY then
+      surfaceY = sampleY
+    end
+  end
+
+  return surfaceY
+end
+
+function Camera:getGroundYAt(world, x, z)
+  local surfaceY = self:getSupportY(world, x, z)
+  if not surfaceY then
+    return nil
+  end
+
+  return surfaceY + self.eyeHeight
+end
+
+function Camera:getGroundY(world)
+  return self:getGroundYAt(world, self.position[1], self.position[3]) or self.position[2]
+end
+
+function Camera:canStandAt(world, x, z)
+  local groundY = self:getGroundYAt(world, x, z)
+  if not groundY then
+    return false
+  end
+
+  if groundY > self.position[2] + self.stepHeight then
+    return false
+  end
+
+  return true
+end
+
+function Camera:applyHorizontalInput(dt, window)
+  local front = self:getHorizontalFront()
   local right = self:getRight(front)
-  local speed = self.moveSpeed * dt
+  local inputX = 0.0
+  local inputZ = 0.0
+  local forwardInput = 0.0
+
+  if isDown(window, glfw.GLFW_KEY_W) then
+    inputX = inputX + front[1]
+    inputZ = inputZ + front[3]
+    forwardInput = forwardInput + 1.0
+  end
+  if isDown(window, glfw.GLFW_KEY_S) then
+    inputX = inputX - front[1]
+    inputZ = inputZ - front[3]
+    forwardInput = forwardInput - 1.0
+  end
+  if isDown(window, glfw.GLFW_KEY_D) then
+    inputX = inputX + right[1]
+    inputZ = inputZ + right[3]
+  end
+  if isDown(window, glfw.GLFW_KEY_A) then
+    inputX = inputX - right[1]
+    inputZ = inputZ - right[3]
+  end
+
+  local inputLength = math.sqrt(inputX * inputX + inputZ * inputZ)
+  if inputLength > 0.0 then
+    inputX = inputX / inputLength
+    inputZ = inputZ / inputLength
+  end
+
+  local crouching = (isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) or isDown(window, glfw.GLFW_KEY_C)) and not self.flying
+  local sprinting = isDown(window, glfw.GLFW_KEY_LEFT_SHIFT) and forwardInput > 0.0 and not crouching
+  local targetEyeHeight = crouching and self.crouchEyeHeight or self.standEyeHeight
+  self.eyeHeight = moveToward(self.eyeHeight, targetEyeHeight, 5.5 * dt)
+
+  local maxSpeed = self.flying and self.flySpeed or self.walkSpeed
+  if self.flying and sprinting then
+    maxSpeed = self.flySpeed * 1.65
+  elseif crouching then
+    maxSpeed = self.crouchSpeed
+  elseif sprinting then
+    maxSpeed = self.sprintSpeed
+  end
+
+  local targetX = inputX * maxSpeed
+  local targetZ = inputZ * maxSpeed
+  local accel = self.flying and self.flyAcceleration or (self.grounded and self.acceleration or self.airAcceleration)
+
+  if inputLength == 0.0 then
+    accel = self.flying and self.flyFriction or (self.grounded and self.groundFriction or self.airFriction)
+  end
+
+  self.velocity[1] = moveToward(self.velocity[1], targetX, accel * dt)
+  self.velocity[3] = moveToward(self.velocity[3], targetZ, accel * dt)
+end
+
+function Camera:updateFlightToggle(window)
+  local flightDown = isDown(window, glfw.GLFW_KEY_F)
+  if flightDown and not self.flightToggleWasDown then
+    self.flying = not self.flying
+    self.grounded = false
+    self.velocityY = 0.0
+    self.velocity[2] = 0.0
+    self.jumpBuffer = 0.0
+    self.coyoteTimer = 0.0
+  end
+
+  self.flightToggleWasDown = flightDown
+end
+
+function Camera:moveHorizontally(dt, world)
   local pos = self.position
-  local oldX = pos[1]
-  local oldZ = pos[3]
+  local nextX = pos[1] + self.velocity[1] * dt
 
-  if glfw.glfwGetKey(window, glfw.GLFW_KEY_W) == glfw.GLFW_PRESS then
-    pos[1] = pos[1] + front[1] * speed
-    pos[3] = pos[3] + front[3] * speed
-  end
-  if glfw.glfwGetKey(window, glfw.GLFW_KEY_S) == glfw.GLFW_PRESS then
-    pos[1] = pos[1] - front[1] * speed
-    pos[3] = pos[3] - front[3] * speed
-  end
-  if glfw.glfwGetKey(window, glfw.GLFW_KEY_A) == glfw.GLFW_PRESS then
-    pos[1] = pos[1] + right[1] * speed
-    pos[3] = pos[3] + right[3] * speed
-  end
-  if glfw.glfwGetKey(window, glfw.GLFW_KEY_D) == glfw.GLFW_PRESS then
-    pos[1] = pos[1] - right[1] * speed
-    pos[3] = pos[3] - right[3] * speed
+  if self:canStandAt(world, nextX, pos[3]) then
+    pos[1] = nextX
+  else
+    self.velocity[1] = 0.0
   end
 
-  if not world:containsBlock(math.floor(pos[1] + 0.5), math.floor(pos[3] + 0.5)) then
-    pos[1] = oldX
-    pos[3] = oldZ
+  local nextZ = pos[3] + self.velocity[3] * dt
+  if self:canStandAt(world, pos[1], nextZ) then
+    pos[3] = nextZ
+  else
+    self.velocity[3] = 0.0
+  end
+end
+
+function Camera:applyVerticalMovement(dt, window, world)
+  if self.flying then
+    local verticalInput = 0.0
+    if isDown(window, glfw.GLFW_KEY_SPACE) then
+      verticalInput = verticalInput + 1.0
+    end
+    if isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) or isDown(window, glfw.GLFW_KEY_C) then
+      verticalInput = verticalInput - 1.0
+    end
+
+    local targetY = verticalInput * self.flySpeed
+    local accel = verticalInput == 0.0 and self.flyFriction or self.flyAcceleration
+    self.velocityY = moveToward(self.velocityY, targetY, accel * dt)
+    self.velocity[2] = self.velocityY
+    self.position[2] = self.position[2] + self.velocityY * dt
+    self.grounded = false
+    self.jumpWasDown = isDown(window, glfw.GLFW_KEY_SPACE)
+    return
   end
 
+  local pos = self.position
   local groundY = self:getGroundY(world)
-  if glfw.glfwGetKey(window, glfw.GLFW_KEY_SPACE) == glfw.GLFW_PRESS and pos[2] <= groundY + 0.05 then
-    self.velocityY = 5.0
+  local distanceToGround = pos[2] - groundY
+  local onGround = distanceToGround <= self.groundSnap and self.velocityY <= 0.0
+
+  if onGround then
+    self.grounded = true
+    self.coyoteTimer = self.coyoteTime
+    if distanceToGround ~= 0.0 then
+      pos[2] = moveToward(pos[2], groundY, math.max(18.0 * dt, math.abs(distanceToGround)))
+    end
+    self.velocityY = 0.0
+  else
+    self.grounded = false
+    self.coyoteTimer = math.max(0.0, self.coyoteTimer - dt)
   end
 
-  self.velocityY = self.velocityY - 9.8 * dt
+  local jumpDown = isDown(window, glfw.GLFW_KEY_SPACE)
+  if jumpDown and not self.jumpWasDown then
+    self.jumpBuffer = self.jumpBufferTime
+  else
+    self.jumpBuffer = math.max(0.0, self.jumpBuffer - dt)
+  end
+  self.jumpWasDown = jumpDown
+
+  if self.jumpBuffer > 0.0 and self.coyoteTimer > 0.0 then
+    self.velocityY = self.jumpSpeed
+    self.grounded = false
+    self.coyoteTimer = 0.0
+    self.jumpBuffer = 0.0
+  end
+
+  self.velocity[2] = self.velocityY
+  self.velocityY = self.velocityY - self.gravity * dt
   pos[2] = pos[2] + self.velocityY * dt
 
   groundY = self:getGroundY(world)
   if pos[2] < groundY then
     pos[2] = groundY
     self.velocityY = 0.0
+    self.velocity[2] = 0.0
+    self.grounded = true
+    self.coyoteTimer = self.coyoteTime
   end
 end
 
-function Camera:getGroundY(world)
-  local x = math.floor(self.position[1] + 0.5)
-  local z = math.floor(self.position[3] + 0.5)
-  local surfaceY = world:surfaceYAt(x, z)
-
-  if not surfaceY then
-    return self.position[2]
-  end
-
-  return surfaceY + self.eyeHeight
+function Camera:updateMovement(dt, window, world)
+  dt = math.min(dt, 0.05)
+  self:updateFlightToggle(window)
+  self:applyHorizontalInput(dt, window)
+  self:moveHorizontally(dt, world)
+  self:applyVerticalMovement(dt, window, world)
 end
 
 function Camera:update(dt, window, world)

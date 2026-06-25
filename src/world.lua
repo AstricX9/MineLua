@@ -1,4 +1,5 @@
 local Chunk = require("chunk")
+local blocks = require("blocks")
 local terrain = require("terrain")
 
 local World = {}
@@ -76,16 +77,106 @@ function World:getChunkAtBlock(x, z)
   return self.chunks[World.chunkKey(chunkX, chunkZ)]
 end
 
+function World:localBlockCoord(x, z)
+  local chunkX = World.chunkCoord(x)
+  local chunkZ = World.chunkCoord(z)
+
+  return x - chunkX * CHUNK_SIZE, z - chunkZ * CHUNK_SIZE, chunkX, chunkZ
+end
+
 function World:containsBlock(x, z)
   return self:getChunkAtBlock(x, z) ~= nil
 end
 
-function World:surfaceYAt(x, z)
-  if not self:containsBlock(x, z) then
+function World:blockAt(x, y, z)
+  if y < 0 or y > 255 then
     return nil
   end
 
-  return terrain.heightAt(x, z, self.maxHeight) + 1.0
+  local entry = self:getChunkAtBlock(x, z)
+  if not entry then
+    return nil
+  end
+
+  local localX, localZ = self:localBlockCoord(x, z)
+  return entry.chunk:getBlock(localX, y, localZ)
+end
+
+function World:setBlock(x, y, z, id)
+  if y < 0 or y > 255 then
+    return nil
+  end
+
+  local entry = self:getChunkAtBlock(x, z)
+  if not entry then
+    return nil
+  end
+
+  local localX, localZ = self:localBlockCoord(x, z)
+  entry.chunk:setBlock(localX, y, localZ, id)
+  return entry
+end
+
+function World:isSolidBlock(x, y, z)
+  local id = self:blockAt(x, y, z)
+  if not id or id == 0 then
+    return false
+  end
+
+  local def = blocks.list[id]
+  return def and def.properties and def.properties.solid
+end
+
+function World:raycast(origin, direction, maxDistance, step)
+  step = step or 0.08
+  maxDistance = maxDistance or 6.0
+
+  local previous = nil
+  local distance = 0.0
+  while distance <= maxDistance do
+    local x = origin[1] + direction[1] * distance
+    local y = origin[2] + direction[2] * distance
+    local z = origin[3] + direction[3] * distance
+    local blockX = math.floor(x)
+    local blockY = math.floor(y)
+    local blockZ = math.floor(z)
+
+    if self:isSolidBlock(blockX, blockY, blockZ) then
+      return {
+        x = blockX,
+        y = blockY,
+        z = blockZ,
+        id = self:blockAt(blockX, blockY, blockZ),
+        previous = previous,
+        distance = distance
+      }
+    end
+
+    previous = {x = blockX, y = blockY, z = blockZ}
+    distance = distance + step
+  end
+
+  return nil
+end
+
+function World:surfaceYAt(x, z)
+  local entry = self:getChunkAtBlock(x, z)
+  if not entry then
+    return nil
+  end
+
+  local localX, localZ = self:localBlockCoord(x, z)
+  for y = self.maxHeight, 0, -1 do
+    local id = entry.chunk:getBlock(localX, y, localZ)
+    if id and id ~= 0 then
+      local def = blocks.list[id]
+      if def and def.properties and def.properties.solid then
+        return y + 1.0
+      end
+    end
+  end
+
+  return nil
 end
 
 return World

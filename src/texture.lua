@@ -30,6 +30,10 @@ local function load_png(path)
   return { w = width, h = height, data = rgba }
 end
 
+function M.loadPng(path)
+  return load_png(path)
+end
+
 local function create_missing_texture()
   local img = { w = 16, h = 16, data = ffi.new("uint8_t[?]", 16 * 16 * 4) }
 

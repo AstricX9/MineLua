@@ -20,6 +20,7 @@ GLFWwindow* glfwCreateWindow(int width, int height, const char* title, void* mon
 int glfwWindowShouldClose(GLFWwindow* window);
 void glfwWindowHint(int hint, int value);
 int glfwGetKey(GLFWwindow* window, int key);
+int glfwGetMouseButton(GLFWwindow* window, int button);
 void glfwSetInputMode(GLFWwindow* window, int mode, int value);
 void glfwGetCursorPos(GLFWwindow* window, double* xpos, double* ypos);
 void glfwGetWindowPos(GLFWwindow* window, int* xpos, int* ypos);
@@ -47,10 +48,14 @@ local glfw = setmetatable({
 	GLFW_KEY_A = 65,
 	GLFW_KEY_S = 83,
 	GLFW_KEY_D = 68,
+	GLFW_KEY_F = 70,
 	GLFW_KEY_SPACE = 32,
+	GLFW_KEY_C = 67,
 	GLFW_KEY_ESCAPE = 256,
 	GLFW_KEY_F11 = 300,
 	GLFW_KEY_LEFT_SHIFT = 340,
+	GLFW_KEY_LEFT_CONTROL = 341,
+	GLFW_MOUSE_BUTTON_LEFT = 0,
 }, { __index = _lib })
 
 return glfw
