@@ -77,6 +77,7 @@ GLenum glCheckFramebufferStatus(GLenum target);
 void glGenBuffers(GLsizei n, GLuint* buffers);
 void glBindBuffer(GLenum target, GLuint buffer);
 void glBufferData(GLenum target, GLint size, const void* data, GLenum usage);
+void glDeleteBuffers(GLsizei n, const GLuint* buffers);
 
 // Vertex Attributes
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type, unsigned char normalized, GLint stride, const void* pointer);
@@ -88,6 +89,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count);
 // VAOs (REQUIRED in core profile)
 void glGenVertexArrays(GLsizei n, GLuint* arrays);
 void glBindVertexArray(GLuint array);
+void glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
   ]]
 
   -- Shader
@@ -129,6 +131,7 @@ void glBindVertexArray(GLuint array);
   gl.glGenBuffers = loader.load("glGenBuffers", "void", "GLsizei", "GLuint*")
   gl.glBindBuffer = loader.load("glBindBuffer", "void", "GLenum", "GLuint")
   gl.glBufferData = loader.load("glBufferData", "void", "GLenum", "GLint", "const void*", "GLenum")
+  gl.glDeleteBuffers = loader.load("glDeleteBuffers", "void", "GLsizei", "const GLuint*")
 
   -- Vertex attribs
   gl.glVertexAttribPointer = loader.load("glVertexAttribPointer", "void", "GLuint", "GLint", "GLenum", "unsigned char", "GLint", "const void*")
@@ -140,6 +143,7 @@ void glBindVertexArray(GLuint array);
   -- VAOs
   gl.glGenVertexArrays = loader.load("glGenVertexArrays", "void", "GLsizei", "GLuint*")
   gl.glBindVertexArray = loader.load("glBindVertexArray", "void", "GLuint")
+  gl.glDeleteVertexArrays = loader.load("glDeleteVertexArrays", "void", "GLsizei", "const GLuint*")
 end
 
 return {

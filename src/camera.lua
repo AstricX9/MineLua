@@ -36,11 +36,13 @@ local function isDown(window, key)
   return glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
 end
 
+local EPSILON = 0.0001
+
 function Camera.new(options)
   options = options or {}
 
   return setmetatable({
-    position = options.position or {16.0, 30.0, 16.0},
+    position = options.position or {16.5, 30.0, 16.5},
     yaw = options.yaw or -90.0,
     pitch = options.pitch or 0.0,
     lastX = options.lastX or 640.0,
@@ -50,6 +52,7 @@ function Camera.new(options)
     velocityY = 0.0,
     grounded = false,
     flying = options.flying or false,
+    allowFlight = options.allowFlight or options.flying or false,
     flightToggleWasDown = false,
     jumpWasDown = false,
     jumpBuffer = 0.0,
@@ -57,7 +60,7 @@ function Camera.new(options)
     eyeHeight = options.eyeHeight or 1.62,
     standEyeHeight = options.eyeHeight or 1.62,
     crouchEyeHeight = options.crouchEyeHeight or 1.24,
-    bodyRadius = options.radius or 0.34,
+    bodyRadius = options.radius or 0.30,
     walkSpeed = options.walkSpeed or 5.1,
     sprintSpeed = options.sprintSpeed or 7.2,
     crouchSpeed = options.crouchSpeed or 2.4,
@@ -70,6 +73,7 @@ function Camera.new(options)
     flyFriction = options.flyFriction or 18.0,
     gravity = options.gravity or 19.5,
     jumpSpeed = options.jumpSpeed or 6.4,
+    reach = options.reach or 6.0,
     stepHeight = options.stepHeight or 1.08,
     groundSnap = options.groundSnap or 0.36,
     coyoteTime = options.coyoteTime or 0.10,
@@ -122,27 +126,90 @@ function Camera:updateMouse(window)
   self.pitch = clamp(self.pitch + yoffset, -88.0, 88.0)
 end
 
-function Camera:getSupportY(world, x, z)
+function Camera:getBodyHeight()
+  return self.eyeHeight + 0.18
+end
+
+function Camera:getCollisionSamples(x, z)
   local radius = self.bodyRadius
-  local samples = {
+  return {
     {x, z},
     {x + radius, z},
     {x - radius, z},
     {x, z + radius},
     {x, z - radius}
   }
+end
 
+function Camera:getAabbBlockRange(x, z, feetY)
+  local radius = self.bodyRadius
+  return {
+    minX = math.floor(x - radius + EPSILON),
+    maxX = math.floor(x + radius - EPSILON),
+    minY = math.floor(feetY + EPSILON),
+    maxY = math.floor(feetY + self:getBodyHeight() - EPSILON),
+    minZ = math.floor(z - radius + EPSILON),
+    maxZ = math.floor(z + radius - EPSILON)
+  }
+end
+
+function Camera:hasCollisionData(world, blockX, blockZ)
+  if world.hasCollisionAtBlock then
+    return world:hasCollisionAtBlock(blockX, blockZ)
+  end
+  return world:containsBlock(blockX, blockZ)
+end
+
+function Camera:hasBodyClearance(world, x, z, feetY, allowMissingCollision)
+  local range = self:getAabbBlockRange(x, z, feetY)
+
+  for blockX = range.minX, range.maxX do
+    for blockZ = range.minZ, range.maxZ do
+      if not allowMissingCollision and not self:hasCollisionData(world, blockX, blockZ) then
+        return false
+      end
+
+      if self:hasCollisionData(world, blockX, blockZ) then
+        for y = range.minY, range.maxY do
+          if world:isSolidBlock(blockX, y, blockZ) then
+            return false
+          end
+        end
+      end
+    end
+  end
+  return true
+end
+
+function Camera:getSupportY(world, x, z)
+  local feetY = self.position[2] - self.eyeHeight
+  local range = self:getAabbBlockRange(x, z, feetY)
+  local searchTop = math.floor(feetY + self.stepHeight)
+  local searchBottom = 0
   local surfaceY = nil
-  for i = 1, #samples do
-    local sampleX = math.floor(samples[i][1] + 0.5)
-    local sampleZ = math.floor(samples[i][2] + 0.5)
-    local sampleY = world:surfaceYAt(sampleX, sampleZ)
-    if not sampleY then
-      return nil
+
+  for blockX = range.minX, range.maxX do
+    for blockZ = range.minZ, range.maxZ do
+      if not self:hasCollisionData(world, blockX, blockZ) then
+        return nil
+      end
+
+      local sampleY = nil
+      for y = searchTop, searchBottom, -1 do
+        if world:isSolidBlock(blockX, y, blockZ) then
+          sampleY = y + 1.0
+          break
+        end
+      end
+
+      if sampleY and (not surfaceY or sampleY > surfaceY) then
+        surfaceY = sampleY
+      end
     end
-    if not surfaceY or sampleY > surfaceY then
-      surfaceY = sampleY
-    end
+  end
+
+  if surfaceY and not self:hasBodyClearance(world, x, z, surfaceY, false) then
+    return nil
   end
 
   return surfaceY
@@ -161,6 +228,53 @@ function Camera:getGroundY(world)
   return self:getGroundYAt(world, self.position[1], self.position[3]) or self.position[2]
 end
 
+function Camera:findSpawnY(world, x, z)
+  local range = self:getAabbBlockRange(x, z, 0.0)
+  local maxHeight = world.maxHeight or 255
+
+  for blockX = range.minX, range.maxX do
+    for blockZ = range.minZ, range.maxZ do
+      if not self:hasCollisionData(world, blockX, blockZ) then
+        return nil
+      end
+    end
+  end
+
+  for y = maxHeight, 0, -1 do
+    local hasSupport = false
+    for blockX = range.minX, range.maxX do
+      for blockZ = range.minZ, range.maxZ do
+        if world:isSolidBlock(blockX, y, blockZ) then
+          hasSupport = true
+          break
+        end
+      end
+      if hasSupport then
+        break
+      end
+    end
+
+    if hasSupport then
+      local feetY = y + 1.0
+      if self:hasBodyClearance(world, x, z, feetY, false) then
+        return feetY + self.eyeHeight
+      end
+    end
+  end
+
+  return nil
+end
+
+function Camera:placeAtSpawn(world, x, z)
+  self.position[1] = x or self.position[1]
+  self.position[3] = z or self.position[3]
+  self.position[2] = self:findSpawnY(world, self.position[1], self.position[3]) or self.position[2]
+  self.velocityY = 0.0
+  self.velocity[2] = 0.0
+  self.grounded = false
+  self.coyoteTimer = 0.0
+end
+
 function Camera:canStandAt(world, x, z)
   local groundY = self:getGroundYAt(world, x, z)
   if not groundY then
@@ -172,6 +286,10 @@ function Camera:canStandAt(world, x, z)
   end
 
   return true
+end
+
+function Camera:canOccupyAt(world, x, z, eyeY, allowMissingCollision)
+  return self:hasBodyClearance(world, x, z, eyeY - self.eyeHeight, allowMissingCollision)
 end
 
 function Camera:applyHorizontalInput(dt, window)
@@ -233,6 +351,12 @@ function Camera:applyHorizontalInput(dt, window)
 end
 
 function Camera:updateFlightToggle(window)
+  if not self.allowFlight then
+    self.flying = false
+    self.flightToggleWasDown = isDown(window, glfw.GLFW_KEY_F)
+    return
+  end
+
   local flightDown = isDown(window, glfw.GLFW_KEY_F)
   if flightDown and not self.flightToggleWasDown then
     self.flying = not self.flying
@@ -250,14 +374,18 @@ function Camera:moveHorizontally(dt, world)
   local pos = self.position
   local nextX = pos[1] + self.velocity[1] * dt
 
-  if self:canStandAt(world, nextX, pos[3]) then
+  if self.flying and self:canOccupyAt(world, nextX, pos[3], pos[2], true) then
+    pos[1] = nextX
+  elseif not self.flying and self:canStandAt(world, nextX, pos[3]) then
     pos[1] = nextX
   else
     self.velocity[1] = 0.0
   end
 
   local nextZ = pos[3] + self.velocity[3] * dt
-  if self:canStandAt(world, pos[1], nextZ) then
+  if self.flying and self:canOccupyAt(world, pos[1], nextZ, pos[2], true) then
+    pos[3] = nextZ
+  elseif not self.flying and self:canStandAt(world, pos[1], nextZ) then
     pos[3] = nextZ
   else
     self.velocity[3] = 0.0
@@ -278,7 +406,13 @@ function Camera:applyVerticalMovement(dt, window, world)
     local accel = verticalInput == 0.0 and self.flyFriction or self.flyAcceleration
     self.velocityY = moveToward(self.velocityY, targetY, accel * dt)
     self.velocity[2] = self.velocityY
-    self.position[2] = self.position[2] + self.velocityY * dt
+    local nextY = self.position[2] + self.velocityY * dt
+    if self:canOccupyAt(world, self.position[1], self.position[3], nextY, true) then
+      self.position[2] = nextY
+    else
+      self.velocityY = 0.0
+      self.velocity[2] = 0.0
+    end
     self.grounded = false
     self.jumpWasDown = isDown(window, glfw.GLFW_KEY_SPACE)
     return
@@ -302,7 +436,7 @@ function Camera:applyVerticalMovement(dt, window, world)
   end
 
   local jumpDown = isDown(window, glfw.GLFW_KEY_SPACE)
-  if jumpDown and not self.jumpWasDown then
+  if jumpDown then
     self.jumpBuffer = self.jumpBufferTime
   else
     self.jumpBuffer = math.max(0.0, self.jumpBuffer - dt)

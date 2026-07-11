@@ -1,0 +1,38 @@
+{
+  "window": {
+    "width": 1280,
+    "height": 720,
+    "fovDegrees": 70
+  },
+  "world": {
+    "terrainMaxHeight": 127,
+    "chunkRenderRadius": 4,
+    "visualDistance": 192.0
+  },
+  "terrainGeneration": {
+    "seed": 1,
+    "seaLevel": 63,
+    "continentScale": 0.00036,
+    "biomeScale": 0.00092,
+    "regionScale": 0.00125,
+    "mountainScale": 0.00078,
+    "riverScale": 0.00115,
+    "forestScale": 0.00165,
+    "macroWarpScale": 0.00062,
+    "macroWarpAmount": 360.0,
+    "detailScale": 0.026,
+    "grassTintStrength": 0.92,
+    "treeDensity": 0.78
+  },
+  "atmosphere": {
+    "sunCycleSpeed": 0.005235987755982989,
+    "cloudDensity": 1.35,
+    "cloudBottom": 132.0,
+    "cloudTop": 136.0,
+    "sunGlare": 0.58
+  },
+  "water": {
+    "level": 62.65,
+    "radius": 1024.0
+  }
+}

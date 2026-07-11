@@ -1,0 +1,7 @@
+{
+  "name": "Redstone Ore",
+  "texture": "./textures/blocks/redstone_ore.png",
+  "properties": {
+    "solid": true
+  }
+}

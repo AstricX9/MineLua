@@ -5,6 +5,7 @@ local modApi = require("mod_api")
 
 -- Small helper to sample center pixel from a PNG
 local function sampleCenterColor(path)
+  path = texture.resolvePath(path)
   local stbi = ffi.load("lib/stb_image.dll")
   local load_png = function(p)
     local w, h, channels = ffi.new("int[1]"), ffi.new("int[1]"), ffi.new("int[1]")
@@ -92,20 +93,22 @@ function M.initTextures(atlas)
       def.color = colormapColor
     end
 
+    local atlasTint = def.biomeTint and nil or colormapColor
+
     if type(def.texture) == "string" then
       local uv = atlas:addTexture(def.name, def.texture)
       def.uvs.top = uv; def.uvs.bottom = uv; def.uvs.side = uv
-      if colormapColor then
+      if colormapColor and not def.biomeTint then
         def.colors.top = colormapColor
         def.colors.bottom = colormapColor
         def.colors.side = colormapColor
       end
     elseif type(def.texture) == "table" then
-      def.uvs.top = addFaceTexture(atlas, def.name .. "_top", def.texture.top, colormapColor)
-      def.uvs.bottom = addFaceTexture(atlas, def.name .. "_bottom", def.texture.bottom, colormapColor)
-      def.uvs.side = addFaceTexture(atlas, def.name .. "_side", def.texture.side, colormapColor)
+      def.uvs.top = addFaceTexture(atlas, def.name .. "_top", def.texture.top, atlasTint)
+      def.uvs.bottom = addFaceTexture(atlas, def.name .. "_bottom", def.texture.bottom, atlasTint)
+      def.uvs.side = addFaceTexture(atlas, def.name .. "_side", def.texture.side, atlasTint)
 
-      if colormapColor then
+      if colormapColor and not def.biomeTint then
         def.colors.top = isLayeredTexture(def.texture.top) and {1.0, 1.0, 1.0} or colormapColor
         def.colors.bottom = isLayeredTexture(def.texture.bottom) and {1.0, 1.0, 1.0} or colormapColor
         def.colors.side = isLayeredTexture(def.texture.side) and {1.0, 1.0, 1.0} or colormapColor

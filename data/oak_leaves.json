@@ -1,0 +1,10 @@
+{
+  "name": "Oak Leaves",
+  "texture": "./textures/blocks/leaves_oak.png",
+  "colormap": "./textures/colormap/foliage.png",
+  "properties": {
+    "solid": true,
+    "cutout": true,
+    "leaves": true
+  }
+}

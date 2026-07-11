@@ -1,0 +1,7 @@
+{
+  "name": "Iron Ore",
+  "texture": "./textures/blocks/iron_ore.png",
+  "properties": {
+    "solid": true
+  }
+}

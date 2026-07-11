@@ -1,0 +1,9 @@
+{
+  "name": "Spruce Leaves",
+  "texture": "./textures/blocks/leaves_spruce.png",
+  "properties": {
+    "solid": true,
+    "cutout": true,
+    "leaves": true
+  }
+}

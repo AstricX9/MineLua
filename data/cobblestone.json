@@ -1,0 +1,7 @@
+{
+  "name": "Cobblestone",
+  "texture": "./textures/blocks/cobblestone.png",
+  "properties": {
+    "solid": true
+  }
+}

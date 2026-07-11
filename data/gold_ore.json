@@ -1,0 +1,7 @@
+{
+  "name": "Gold Ore",
+  "texture": "./textures/blocks/gold_ore.png",
+  "properties": {
+    "solid": true
+  }
+}

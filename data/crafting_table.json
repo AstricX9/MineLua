@@ -1,0 +1,11 @@
+{
+  "name": "Crafting Table",
+  "texture": {
+    "top": "./textures/blocks/crafting_table_top.png",
+    "bottom": "./textures/blocks/planks_oak.png",
+    "side": "./textures/blocks/crafting_table_side.png"
+  },
+  "properties": {
+    "solid": true
+  }
+}

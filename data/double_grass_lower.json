@@ -1,0 +1,17 @@
+{
+  "name": "Double Grass Lower",
+  "texture": "./textures/blocks/double_plant_grass_bottom.png",
+  "colormap": "./textures/colormap/grass.png",
+  "biomeTint": true,
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "cross": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true,
+    "doublePlant": true,
+    "half": "lower"
+  }
+}

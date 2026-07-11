@@ -1,0 +1,7 @@
+{
+  "name": "Emerald Ore",
+  "texture": "./textures/blocks/emerald_ore.png",
+  "properties": {
+    "solid": true
+  }
+}

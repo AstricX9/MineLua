@@ -66,6 +66,43 @@ function math3d.multiplyMat4(a, b)
   return result
 end
 
+function math3d.frustumPlanes(matrix)
+  local function plane(a, b, c, d)
+    local length = math.sqrt(a * a + b * b + c * c)
+    if length == 0 then
+      return {a = 0.0, b = 1.0, c = 0.0, d = 0.0}
+    end
+    return {a = a / length, b = b / length, c = c / length, d = d / length}
+  end
+
+  local r1 = {matrix[1], matrix[5], matrix[9], matrix[13]}
+  local r2 = {matrix[2], matrix[6], matrix[10], matrix[14]}
+  local r3 = {matrix[3], matrix[7], matrix[11], matrix[15]}
+  local r4 = {matrix[4], matrix[8], matrix[12], matrix[16]}
+
+  return {
+    plane(r4[1] + r1[1], r4[2] + r1[2], r4[3] + r1[3], r4[4] + r1[4]),
+    plane(r4[1] - r1[1], r4[2] - r1[2], r4[3] - r1[3], r4[4] - r1[4]),
+    plane(r4[1] + r2[1], r4[2] + r2[2], r4[3] + r2[3], r4[4] + r2[4]),
+    plane(r4[1] - r2[1], r4[2] - r2[2], r4[3] - r2[3], r4[4] - r2[4]),
+    plane(r4[1] + r3[1], r4[2] + r3[2], r4[3] + r3[3], r4[4] + r3[4]),
+    plane(r4[1] - r3[1], r4[2] - r3[2], r4[3] - r3[3], r4[4] - r3[4])
+  }
+end
+
+function math3d.aabbInFrustum(planes, bounds)
+  for i = 1, #planes do
+    local p = planes[i]
+    local x = p.a >= 0 and bounds.maxX or bounds.minX
+    local y = p.b >= 0 and bounds.maxY or bounds.minY
+    local z = p.c >= 0 and bounds.maxZ or bounds.minZ
+    if p.a * x + p.b * y + p.c * z + p.d < 0 then
+      return false
+    end
+  end
+  return true
+end
+
 function math3d.cross(a, b)
   return {
     a[2] * b[3] - a[3] * b[2],

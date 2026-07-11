@@ -18,6 +18,7 @@ void glfwSwapBuffers(GLFWwindow* window);
 void glfwMakeContextCurrent(GLFWwindow* window);
 GLFWwindow* glfwCreateWindow(int width, int height, const char* title, void* monitor, void* share);
 int glfwWindowShouldClose(GLFWwindow* window);
+void glfwSetWindowShouldClose(GLFWwindow* window, int value);
 void glfwWindowHint(int hint, int value);
 int glfwGetKey(GLFWwindow* window, int key);
 int glfwGetMouseButton(GLFWwindow* window, int button);
@@ -25,6 +26,7 @@ void glfwSetInputMode(GLFWwindow* window, int mode, int value);
 void glfwGetCursorPos(GLFWwindow* window, double* xpos, double* ypos);
 void glfwGetWindowPos(GLFWwindow* window, int* xpos, int* ypos);
 void glfwGetWindowSize(GLFWwindow* window, int* width, int* height);
+void glfwGetFramebufferSize(GLFWwindow* window, int* width, int* height);
 void glfwSetWindowMonitor(GLFWwindow* window, GLFWmonitor* monitor, int xpos, int ypos, int width, int height, int refreshRate);
 GLFWmonitor* glfwGetPrimaryMonitor(void);
 const GLFWvidmode* glfwGetVideoMode(GLFWmonitor* monitor);
@@ -49,13 +51,24 @@ local glfw = setmetatable({
 	GLFW_KEY_S = 83,
 	GLFW_KEY_D = 68,
 	GLFW_KEY_F = 70,
+	GLFW_KEY_1 = 49,
+	GLFW_KEY_2 = 50,
+	GLFW_KEY_3 = 51,
+	GLFW_KEY_4 = 52,
+	GLFW_KEY_5 = 53,
+	GLFW_KEY_6 = 54,
+	GLFW_KEY_7 = 55,
+	GLFW_KEY_8 = 56,
+	GLFW_KEY_9 = 57,
 	GLFW_KEY_SPACE = 32,
 	GLFW_KEY_C = 67,
 	GLFW_KEY_ESCAPE = 256,
+	GLFW_KEY_F3 = 292,
 	GLFW_KEY_F11 = 300,
 	GLFW_KEY_LEFT_SHIFT = 340,
 	GLFW_KEY_LEFT_CONTROL = 341,
 	GLFW_MOUSE_BUTTON_LEFT = 0,
+	GLFW_MOUSE_BUTTON_RIGHT = 1,
 }, { __index = _lib })
 
 return glfw

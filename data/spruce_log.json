@@ -1,0 +1,11 @@
+{
+  "name": "Spruce Log",
+  "texture": {
+    "top": "./textures/blocks/log_spruce_top.png",
+    "bottom": "./textures/blocks/log_spruce_top.png",
+    "side": "./textures/blocks/log_spruce.png"
+  },
+  "properties": {
+    "solid": true
+  }
+}

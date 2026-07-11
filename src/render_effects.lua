@@ -11,6 +11,7 @@ local gl = GL.gl
 local GL_DEPTH_BUFFER_BIT = 0x00000100
 local GL_TEXTURE0 = 0x84C0
 local GL_TEXTURE1 = 0x84C1
+local GL_TEXTURE2 = 0x84C2
 local GL_TEXTURE_2D = 0x0DE1
 local GL_TEXTURE_MIN_FILTER = 0x2801
 local GL_TEXTURE_MAG_FILTER = 0x2800
@@ -38,16 +39,22 @@ function effects.createShadowShader()
   local vertSource = [[
 #version 330 core
 layout (location = 0) in vec3 aPos;
+layout (location = 3) in vec2 aTexCoord;
+out vec2 vTexCoord;
 uniform mat4 uModel;
 uniform mat4 lightSpaceMatrix;
 void main() {
+  vTexCoord = aTexCoord;
   gl_Position = lightSpaceMatrix * uModel * vec4(aPos, 1.0);
 }
 ]]
 
   local fragSource = [[
 #version 330 core
+in vec2 vTexCoord;
+uniform sampler2D tex0;
 void main() {
+  if (texture(tex0, vTexCoord).a < 0.5) discard;
 }
 ]]
 
@@ -67,7 +74,7 @@ uniform float waterLevel;
 void main() {
   vec3 worldPos = vec3(aPos.x + waterCenter.x, waterLevel, aPos.z + waterCenter.z);
   vWorldPos = worldPos;
-  vUv = aPos.xz * 0.045 + waterCenter.xz * 0.003;
+  vUv = worldPos.xz;
   gl_Position = uProjection * uView * vec4(worldPos, 1.0);
 }
 ]]
@@ -84,69 +91,42 @@ uniform vec3 fogParams;
 uniform vec3 lightColor;
 uniform vec3 skyZenithColor;
 uniform float time;
+uniform sampler2D waterTex;
 
-float hash(vec2 p) {
-  p = fract(p * vec2(123.34, 345.45));
-  p += dot(p, p + 34.345);
-  return fract(p.x * p.y);
-}
-
-float noise(vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  vec2 u = f * f * (3.0 - 2.0 * f);
-  return mix(
-    mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
-    u.y
-  );
-}
-
-float waveHeight(vec2 p) {
-  float waves = sin(p.x * 3.4 + time * 0.85) * 0.055;
-  waves += sin((p.x + p.y) * 2.1 - time * 0.62) * 0.040;
-  waves += (noise(p * 1.8 + time * 0.035) - 0.5) * 0.075;
-  return waves;
-}
-
-vec3 tonemap(vec3 color) {
-  color = color / (color + vec3(1.0));
-  return pow(color, vec3(1.0 / 2.2));
+float waterSignal(vec2 p) {
+  vec2 uv0 = fract(p / 16.0 + vec2(time * 0.018, time * 0.006));
+  vec2 uv1 = fract(p / 9.0 + vec2(-time * 0.011, time * 0.014));
+  float caustic = texture(waterTex, uv0).b * 0.72 + texture(waterTex, uv1).g * 0.28;
+  float ripple = sin((uv0.x + time * 0.035) * 6.28318) * 0.12;
+  ripple += sin((uv1.y - time * 0.025) * 6.28318) * 0.10;
+  return clamp(caustic * 0.72 + ripple + 0.16, 0.0, 1.0);
 }
 
 void main() {
   vec2 p = vUv;
-  float h = waveHeight(p);
-  float hx = waveHeight(p + vec2(0.035, 0.0)) - h;
-  float hz = waveHeight(p + vec2(0.0, 0.035)) - h;
-  vec3 normal = normalize(vec3(-hx * 16.0, 1.0, -hz * 16.0));
+  float signal = waterSignal(p);
+  float signal2 = signal * signal;
   vec3 viewDir = normalize(viewPos - vWorldPos);
-  vec3 sun = normalize(sunDir);
-
-  float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 4.5);
-  vec3 reflectionDir = reflect(-viewDir, normal);
-  float skyFactor = clamp(reflectionDir.y * 0.5 + 0.5, 0.0, 1.0);
-  vec3 reflectedSky = mix(fogColor * 0.75, skyZenithColor * 1.35, skyFactor);
-  vec3 shallowWater = vec3(0.13, 0.48, 0.50);
-  vec3 deepWater = vec3(0.015, 0.13, 0.22);
-  vec3 waterColor = mix(deepWater, shallowWater, 0.42 + noise(p * 0.8) * 0.12);
-
-  vec3 halfDir = normalize(viewDir + sun);
-  float sparkleMask = pow(max(dot(normal, halfDir), 0.0), 230.0);
-  sparkleMask += pow(max(dot(normal, halfDir), 0.0), 48.0) * 0.18;
-  float sunFacing = smoothstep(-0.08, 0.16, sun.y);
-  vec3 sunGlint = lightColor * sparkleMask * 5.8 * sunFacing;
-
-  vec3 color = mix(waterColor, reflectedSky, 0.24 + fresnel * 0.68);
-  color += sunGlint;
-  color += vec3(0.07, 0.18, 0.20) * max(dot(normal, sun), 0.0) * 0.24;
+  float grazing = 1.0 - clamp(abs(viewDir.y), 0.0, 1.0);
+  float distanceFade = smoothstep(fogParams.x * 0.22, fogParams.y * 0.72, length(viewPos - vWorldPos));
+  vec3 waterColor = vec3(
+    (26.0 + signal2 * 34.0) / 255.0,
+    (46.0 + signal2 * 62.0) / 255.0,
+    (185.0 + signal2 * 70.0) / 255.0
+  );
+  float light = mix(0.70, 1.0, clamp(sunDir.y * 0.5 + 0.5, 0.0, 1.0));
+  vec3 deepWater = vec3(0.030, 0.095, 0.230);
+  vec3 reflectedSky = mix(fogColor * 0.72, skyZenithColor * 0.86, 0.45 + grazing * 0.38);
+  vec3 color = mix(waterColor, deepWater, distanceFade * 0.42 + grazing * 0.18);
+  color = mix(color, reflectedSky, grazing * 0.20);
+  color *= light;
 
   float fogDistance = length(viewPos - vWorldPos);
   float fogAmount = smoothstep(fogParams.x * 0.85, fogParams.y, fogDistance);
   color = mix(color, fogColor, fogAmount);
 
-  float alpha = mix(0.54, 0.82, fresnel) + smoothstep(55.0, 105.0, fogDistance) * 0.10;
-  FragColor = vec4(tonemap(color * 1.28), clamp(alpha, 0.48, 0.90));
+  float alpha = (146.0 + signal2 * 50.0) / 255.0;
+  FragColor = vec4(color, clamp(alpha, 0.55, 0.77));
 }
 ]]
 
@@ -170,6 +150,7 @@ in vec2 vUv;
 out vec4 FragColor;
 uniform sampler2D sceneColor;
 uniform sampler2D sceneDepth;
+uniform sampler2D underwaterOverlay;
 uniform vec3 cameraPosition;
 uniform vec3 cameraForward;
 uniform vec3 cameraRight;
@@ -183,6 +164,8 @@ uniform vec3 lightColor;
 uniform vec3 depthParams;
 uniform vec3 atmosphereParams;
 uniform vec3 scatterParams;
+uniform float blurAmount;
+uniform float time;
 
 float linearDepth(float rawDepth) {
   float nearPlane = depthParams.x;
@@ -196,7 +179,16 @@ vec3 encodeFogLight(vec3 color) {
 }
 
 void main() {
+  vec2 texel = 1.0 / vec2(textureSize(sceneColor, 0));
   vec3 scene = texture(sceneColor, vUv).rgb;
+  if (blurAmount > 0.001) {
+    vec2 radius = texel * blurAmount;
+    scene = scene * 0.36;
+    scene += texture(sceneColor, vUv + vec2(radius.x, 0.0)).rgb * 0.16;
+    scene += texture(sceneColor, vUv - vec2(radius.x, 0.0)).rgb * 0.16;
+    scene += texture(sceneColor, vUv + vec2(0.0, radius.y)).rgb * 0.16;
+    scene += texture(sceneColor, vUv - vec2(0.0, radius.y)).rgb * 0.16;
+  }
   float rawDepth = texture(sceneDepth, vUv).r;
 
   if (rawDepth >= 0.9999) {
@@ -237,7 +229,18 @@ void main() {
   fogLight += lightColor * sunScatter * scatterParams.x;
   fogLight = encodeFogLight(fogLight);
 
-  FragColor = vec4(mix(scene, fogLight, fogAmount), 1.0);
+  vec3 color = mix(scene, fogLight, fogAmount);
+
+  if (cameraPosition.y < waterLevel) {
+    vec2 overlayUv = fract(vUv * vec2(2.0, 1.35) + vec2(time * 0.012, -time * 0.007));
+    vec4 overlay = texture(underwaterOverlay, overlayUv);
+    float waterDistance = smoothstep(1.5, max(8.0, fogEnd * 0.45), distance);
+    vec3 underwaterColor = vec3(0.035, 0.180, 0.330);
+    color = mix(color, underwaterColor, 0.22 + waterDistance * 0.50);
+    color += (overlay.rgb - 0.5) * overlay.a * 0.18;
+  }
+
+  FragColor = vec4(color, 1.0);
 }
 ]]
 
@@ -351,13 +354,18 @@ function effects.lightSpaceMatrix(playerPosition, sunDir, terrainMaxHeight, dist
   return math3d.multiplyMat4(lightProjection, lightView)
 end
 
-function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMeshes, characterMesh, lightSpaceMatrix, model, mapSize, viewportWidth, viewportHeight)
+function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMeshes, characterMesh, lightSpaceMatrix, model, mapSize, viewportWidth, viewportHeight, atlasTex)
   gl.glViewport(0, 0, mapSize, mapSize)
   gl.glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer[0])
   gl.glClear(GL_DEPTH_BUFFER_BIT)
   gl.glUseProgram(shadowShader)
   gl.glUniformMatrix4fv(locations.lightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
   gl.glUniformMatrix4fv(locations.model, 1, 0, ffi.new("float[16]", model))
+  gl.glUniform1i(locations.tex0, 0)
+  if atlasTex then
+    gl.glActiveTexture(GL_TEXTURE0)
+    gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
+  end
   gl.glEnable(GL_POLYGON_OFFSET_FILL)
   gl.glPolygonOffset(2.0, 4.0)
 
@@ -373,7 +381,7 @@ function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMes
   gl.glViewport(0, 0, viewportWidth, viewportHeight)
 end
 
-function effects.drawWater(waterShader, waterMesh, locations, playerCamera, view, projection, sunDir, atmosphere, time, waterLevel)
+function effects.drawWater(waterShader, waterMesh, locations, playerCamera, view, projection, sunDir, atmosphere, time, waterLevel, waterTexture)
   local centerX = math.floor(playerCamera.position[1] / 16.0) * 16.0
   local centerZ = math.floor(playerCamera.position[3] / 16.0) * 16.0
 
@@ -389,6 +397,12 @@ function effects.drawWater(waterShader, waterMesh, locations, playerCamera, view
   gl.glUniform3f(locations.lightColor, atmosphere.lightColor[1], atmosphere.lightColor[2], atmosphere.lightColor[3])
   gl.glUniform3f(locations.skyZenithColor, atmosphere.skyZenith[1], atmosphere.skyZenith[2], atmosphere.skyZenith[3])
   gl.glUniform1f(locations.time, time)
+  gl.glUniform1i(locations.waterTex, 0)
+
+  if waterTexture then
+    gl.glActiveTexture(GL_TEXTURE0)
+    gl.glBindTexture(GL_TEXTURE_2D, waterTexture[0])
+  end
 
   gl.glEnable(GL_BLEND)
   gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -398,7 +412,7 @@ function effects.drawWater(waterShader, waterMesh, locations, playerCamera, view
   gl.glDisable(GL_BLEND)
 end
 
-function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarget, playerCamera, sunDir, atmosphereState, fov, viewportWidth, viewportHeight, nearPlane, farPlane, waterLevel, settings)
+function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarget, playerCamera, sunDir, atmosphereState, fov, viewportWidth, viewportHeight, nearPlane, farPlane, waterLevel, settings, blurAmount, underwaterOverlayTexture, time)
   settings = settings or {}
 
   local forward = playerCamera:getFront()
@@ -412,6 +426,7 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   gl.glUseProgram(postShader)
   gl.glUniform1i(locations.sceneColor, 0)
   gl.glUniform1i(locations.sceneDepth, 1)
+  gl.glUniform1i(locations.underwaterOverlay, 2)
   gl.glUniform3f(locations.cameraPosition, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
   gl.glUniform3f(locations.cameraForward, forward[1], forward[2], forward[3])
   gl.glUniform3f(locations.cameraRight, right[1], right[2], right[3])
@@ -425,11 +440,19 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   gl.glUniform3f(locations.depthParams, nearPlane, farPlane, waterLevel)
   gl.glUniform3f(locations.atmosphereParams, settings.heightFogDensity or 0.32, settings.heightFogFalloff or 0.080, settings.horizonFog or 0.22)
   gl.glUniform3f(locations.scatterParams, settings.sunScatter or 0.45, 0.0, 0.0)
+  gl.glUniform1f(locations.blurAmount, blurAmount or 0.0)
+  gl.glUniform1f(locations.time, time or 0.0)
 
   gl.glActiveTexture(GL_TEXTURE0)
   gl.glBindTexture(GL_TEXTURE_2D, sceneTarget.colorTexture[0])
   gl.glActiveTexture(GL_TEXTURE1)
   gl.glBindTexture(GL_TEXTURE_2D, sceneTarget.depthTexture[0])
+  gl.glActiveTexture(GL_TEXTURE2)
+  if underwaterOverlayTexture then
+    gl.glBindTexture(GL_TEXTURE_2D, underwaterOverlayTexture[0])
+  else
+    gl.glBindTexture(GL_TEXTURE_2D, sceneTarget.colorTexture[0])
+  end
   rendering.draw(screenMesh)
   gl.glActiveTexture(GL_TEXTURE0)
   gl.glEnable(GL_DEPTH_TEST)

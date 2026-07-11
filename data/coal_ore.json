@@ -1,0 +1,7 @@
+{
+  "name": "Coal Ore",
+  "texture": "./textures/blocks/coal_ore.png",
+  "properties": {
+    "solid": true
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Red Sand",
+  "texture": "./textures/blocks/red_sand.png",
+  "properties": {
+    "solid": true
+  }
+}

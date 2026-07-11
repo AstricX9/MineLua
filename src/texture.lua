@@ -10,7 +10,44 @@ ffi.cdef[[
 
 local stbi = ffi.load("lib/stb_image.dll")
 
+local function file_exists(path)
+  local f = io.open(path, "rb")
+  if f then
+    f:close()
+    return true
+  end
+  return false
+end
+
+local function normalize_path(path)
+  return (path:gsub("\\", "/"):gsub("^%./", ""))
+end
+
+function M.resolvePath(path)
+  if not path then
+    return nil
+  end
+
+  local clean = normalize_path(path)
+  local candidates = {clean}
+
+  if clean:sub(1, 9) == "textures/" then
+    candidates[#candidates + 1] = "assets/" .. clean
+  elseif clean:sub(1, 7) ~= "assets/" then
+    candidates[#candidates + 1] = "assets/" .. clean
+  end
+
+  for i = 1, #candidates do
+    if file_exists(candidates[i]) then
+      return candidates[i]
+    end
+  end
+
+  return clean
+end
+
 local function load_png(path)
+  path = M.resolvePath(path)
   local w = ffi.new("int[1]")
   local h = ffi.new("int[1]")
   local channels = ffi.new("int[1]")
@@ -87,7 +124,7 @@ function M.createAtlas()
     pixels = ffi.new("uint8_t[?]", 256 * 256 * 4),
     current_x = 0,
     current_y = 0,
-    row_h = 16,
+    row_h = 0,
     mapping = {}
   }
   
@@ -129,15 +166,25 @@ function M.createAtlas()
   end
 
   function self:addImage(name, img)
-
-    if self.current_x + img.w > self.w then
-      self.current_x = 0
-      self.current_y = self.current_y + self.row_h
+    local copy_w = img.w
+    local copy_h = img.h
+    if copy_h > copy_w and copy_w <= 64 then
+      copy_h = copy_w
     end
 
-    for y = 0, img.h - 1 do
+    if self.current_x + copy_w > self.w then
+      self.current_x = 0
+      self.current_y = self.current_y + self.row_h
+      self.row_h = 0
+    end
+
+    if self.current_y + copy_h > self.h then
+      error("Texture atlas is full while adding " .. tostring(name))
+    end
+
+    for y = 0, copy_h - 1 do
       local dst_y = self.current_y + y
-      for x = 0, img.w - 1 do
+      for x = 0, copy_w - 1 do
         local dst_x = self.current_x + x
         local src_idx = (y * img.w + x) * 4
         local dst_idx = (dst_y * self.w + dst_x) * 4
@@ -151,11 +198,12 @@ function M.createAtlas()
     self.mapping[name] = {
       u0 = self.current_x / self.w,
       v0 = self.current_y / self.h,
-      u1 = (self.current_x + img.w) / self.w,
-      v1 = (self.current_y + img.h) / self.h
+      u1 = (self.current_x + copy_w) / self.w,
+      v1 = (self.current_y + copy_h) / self.h
     }
 
-    self.current_x = self.current_x + img.w
+    self.current_x = self.current_x + copy_w
+    self.row_h = math.max(self.row_h, copy_h)
     
     return self.mapping[name]
   end

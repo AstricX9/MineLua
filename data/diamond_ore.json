@@ -1,0 +1,7 @@
+{
+  "name": "Diamond Ore",
+  "texture": "./textures/blocks/diamond_ore.png",
+  "properties": {
+    "solid": true
+  }
+}

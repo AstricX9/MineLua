@@ -1,0 +1,7 @@
+{
+  "name": "Lapis Lazuli Ore",
+  "texture": "./textures/blocks/lapis_ore.png",
+  "properties": {
+    "solid": true
+  }
+}

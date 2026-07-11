@@ -1,0 +1,7 @@
+{
+  "name": "Clay",
+  "texture": "./textures/blocks/clay.png",
+  "properties": {
+    "solid": true
+  }
+}

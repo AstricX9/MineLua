@@ -1,0 +1,8 @@
+{
+  "name": "Water",
+  "texture": "./textures/blocks/water_flow.png",
+  "properties": {
+    "solid": false,
+    "liquid": true
+  }
+}

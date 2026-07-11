@@ -1,0 +1,11 @@
+{
+  "name": "Oak Log",
+  "texture": {
+    "top": "./textures/blocks/log_oak_top.png",
+    "bottom": "./textures/blocks/log_oak_top.png",
+    "side": "./textures/blocks/log_oak.png"
+  },
+  "properties": {
+    "solid": true
+  }
+}

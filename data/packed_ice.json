@@ -1,0 +1,7 @@
+{
+  "name": "Packed Ice",
+  "texture": "./textures/blocks/ice_packed.png",
+  "properties": {
+    "solid": true
+  }
+}

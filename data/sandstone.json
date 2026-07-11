@@ -1,0 +1,11 @@
+{
+  "name": "Sandstone",
+  "texture": {
+    "top": "./textures/blocks/sandstone_top.png",
+    "bottom": "./textures/blocks/sandstone_bottom.png",
+    "side": "./textures/blocks/sandstone_normal.png"
+  },
+  "properties": {
+    "solid": true
+  }
+}

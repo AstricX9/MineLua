@@ -1,0 +1,7 @@
+{
+  "name": "Oak Planks",
+  "texture": "./textures/blocks/planks_oak.png",
+  "properties": {
+    "solid": true
+  }
+}
