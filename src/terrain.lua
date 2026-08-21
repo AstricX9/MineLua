@@ -219,6 +219,17 @@ void stbi_image_free(void *retval_from_stbi_load);
 local stbi = ffi.load("lib/stb_image.dll")
 local grassColormap = false
 
+-- Compensates for fbm() clustering near 0.5 (see terrain.heightAt). Tune this to
+-- make the world hillier or flatter; 1.0 restores the original flat behaviour.
+-- Columns generated between yields in fillChunk's density loop. Smaller means a
+-- tighter frame budget cap and slightly more coroutine overhead.
+local DENSITY_YIELD_COLUMNS = 4
+
+terrain.RELIEF_GAIN = settings.reliefGain or 2.4
+-- Extra gain on the short-wavelength terms, which are the only ones that vary
+-- inside a single render distance. Raise for hillier ground, 1.0 to disable.
+terrain.LOCAL_RELIEF_GAIN = settings.localReliefGain or 2.0
+
 local function clamp(value, minValue, maxValue)
   if value < minValue then
     return minValue
@@ -601,8 +612,23 @@ function terrain.heightAt(x, z, maxHeight)
   local coastlineShelf = sea - 4.0 + (broadHills - 0.50) * 5.0
   oceanFloor = lerp(oceanFloor, coastlineShelf, edge(land, 0.15, 0.42))
 
-  local continentalBase = sea + 2.0 + land * 18.0 + (macro.regionalElevation - 0.50) * 11.0
-  local plainsAndHills = (broadHills - 0.50) * 13.0 + (lowlands - 0.50) * 6.5 + (roughness - 0.50) * 3.4 + (detail - 0.50) * 1.1
+  -- fbm() returns the amplitude-weighted mean of its octaves, and averaging
+  -- concentrates the result near 0.5: the hill signals measure a stddev of
+  -- 0.12-0.18 where a full-range [0,1] signal would be about 0.29. Left alone,
+  -- the amplitudes below deliver roughly a third of what they claim, which is
+  -- what made the surface read as a flat plane. This gain restores them.
+  local relief = terrain.RELIEF_GAIN
+
+  -- broadHills runs at ~340 blocks and regionalElevation at ~800, so neither
+  -- changes much inside a single view. The terms that actually shape what you
+  -- can see are localHills (~38 blocks), surfaceDetail (~19) and micro (~10),
+  -- which is why they carry their own gain.
+  local localRelief = relief * terrain.LOCAL_RELIEF_GAIN
+
+  local continentalBase = sea + 2.0 + land * 18.0 + (macro.regionalElevation - 0.50) * 11.0 * relief
+  local plainsAndHills =
+    (broadHills - 0.50) * 13.0 * relief +
+    ((lowlands - 0.50) * 6.5 + (roughness - 0.50) * 3.4 + (detail - 0.50) * 1.1) * localRelief
   local biomeLift = biomeMin * 5.5 + biomeMax * 5.0
   local height = continentalBase + plainsAndHills + biomeLift
 
@@ -710,13 +736,30 @@ function terrain.grassColorAt(x, z)
   return color
 end
 
+-- Amplitudes of the noise terms in terrainDensityAt. DENSITY_NOISE_BOUND is
+-- derived from them, so if you change an amplitude the bound follows and
+-- fillChunk's fast path stays correct. fbm3 returns [0, 1).
+local DENSITY_LOW_AMPLITUDE = 8.0
+local DENSITY_DETAIL_AMPLITUDE = 3.0
+local DENSITY_MOUNTAIN_AMPLITUDE = 12.0
+local DENSITY_MOUNTAIN_BIAS = 0.47
+
+-- Largest distance the noise can move the density away from (column.height - y),
+-- in either direction. deepBias is excluded on purpose: it is only ever positive
+-- and only below y = 8, so it can push a cell towards solid but never towards air.
+terrain.DENSITY_NOISE_BOUND = math.ceil(
+  DENSITY_LOW_AMPLITUDE * 0.5 +
+  DENSITY_DETAIL_AMPLITUDE * 0.5 +
+  DENSITY_MOUNTAIN_AMPLITUDE * math.max(DENSITY_MOUNTAIN_BIAS, 1.0 - DENSITY_MOUNTAIN_BIAS)
+)
+
 local function terrainDensityAt(worldX, y, worldZ, maxHeight, column)
   local base = column.height - y
   local deepBias = y < 8 and (8 - y) * 1.6 or 0.0
   local upperFade = smoothstep((y - terrain.SEA_LEVEL - 18) / math.max(1, maxHeight - terrain.SEA_LEVEL - 24))
-  local lowNoise = (fbm3(worldX, y, worldZ, 151, 3, 0.018) - 0.5) * 8.0
-  local detailNoise = (fbm3(worldX + 900.0, y * 1.7, worldZ - 450.0, 163, 2, 0.045) - 0.5) * 3.0
-  local mountainBoost = (column.mountain or 0.0) > 0.35 and (fbm3(worldX, y, worldZ, 167, 3, 0.026) - 0.47) * 12.0 * upperFade or 0.0
+  local lowNoise = (fbm3(worldX, y, worldZ, 151, 3, 0.018) - 0.5) * DENSITY_LOW_AMPLITUDE
+  local detailNoise = (fbm3(worldX + 900.0, y * 1.7, worldZ - 450.0, 163, 2, 0.045) - 0.5) * DENSITY_DETAIL_AMPLITUDE
+  local mountainBoost = (column.mountain or 0.0) > 0.35 and (fbm3(worldX, y, worldZ, 167, 3, 0.026) - DENSITY_MOUNTAIN_BIAS) * DENSITY_MOUNTAIN_AMPLITUDE * upperFade or 0.0
   return base + deepBias + lowNoise + detailNoise + mountainBoost
 end
 
@@ -1333,23 +1376,48 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
 
   local waterId = blocks.water or blocks.water_still
 
+  -- Density is (column.height - y) plus noise that cannot exceed
+  -- DENSITY_NOISE_BOUND, so outside a band of that width around the surface the
+  -- sign is already decided and evaluating the noise cannot change the result.
+  -- Skipping those levels is exact, not an approximation.
+  local bound = terrain.DENSITY_NOISE_BOUND
+
+  -- A whole x-slice was one step, which is several ms of work. The frame budget
+  -- can only stop between steps, so it overshot by that much every time it hit
+  -- the cap. Yielding every few columns makes the cap tight.
+  local sinceYield = 0
+
   for x = 0, width - 1 do
     for z = 0, depth - 1 do
       local worldX = x + offsetX
       local worldZ = z + offsetZ
       local column = terrain.columnAt(worldX, worldZ, maxHeight)
+      local bandLow = column.height - bound
+      local bandHigh = column.height + bound
 
       for y = 0, maxHeight do
-        if y == 0 then
-          chunk:setBlock(x, y, z, blocks.stone)
-        elseif terrainDensityAt(worldX, y, worldZ, maxHeight, column) > 0.0 then
+        local solid
+        if y == 0 or y < bandLow then
+          solid = true
+        elseif y > bandHigh then
+          solid = false
+        else
+          solid = terrainDensityAt(worldX, y, worldZ, maxHeight, column) > 0.0
+        end
+
+        if solid then
           chunk:setBlock(x, y, z, blocks.stone)
         elseif y <= terrain.SEA_LEVEL and waterId then
           chunk:setBlock(x, y, z, waterId)
         end
       end
+
+      sinceYield = sinceYield + 1
+      if step and sinceYield >= DENSITY_YIELD_COLUMNS then
+        sinceYield = 0
+        step()
+      end
     end
-    if step then step() end
   end
 
   applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, maxHeight, step)

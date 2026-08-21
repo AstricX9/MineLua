@@ -12,6 +12,7 @@ local GL_DEPTH_BUFFER_BIT = 0x00000100
 local GL_TEXTURE0 = 0x84C0
 local GL_TEXTURE1 = 0x84C1
 local GL_TEXTURE2 = 0x84C2
+local GL_TEXTURE3 = 0x84C3
 local GL_TEXTURE_2D = 0x0DE1
 local GL_TEXTURE_MIN_FILTER = 0x2801
 local GL_TEXTURE_MAG_FILTER = 0x2800
@@ -34,6 +35,10 @@ local GL_DEPTH_TEST = 0x0B71
 local GL_BLEND = 0x0BE2
 local GL_SRC_ALPHA = 0x0302
 local GL_ONE_MINUS_SRC_ALPHA = 0x0303
+local GL_RGBA16F = 0x881A
+local GL_FLOAT = 0x1406
+local GL_ONE = 1
+local GL_COLOR_BUFFER_BIT = 0x00004000
 
 function effects.createShadowShader()
   local vertSource = [[
@@ -166,6 +171,52 @@ uniform vec3 atmosphereParams;
 uniform vec3 scatterParams;
 uniform float blurAmount;
 uniform float time;
+uniform sampler2D bloomTexture;
+uniform vec4 gradeParams;   // exposure, bloomStrength, saturation, contrast
+uniform vec3 tonemapParams; // mode, knee, white
+
+// Exactly identity below `knee`, then compresses smoothly toward `white`.
+// This is the operator that suits a retrofit: the scene was authored to look
+// correct already, so the curve must not touch anything that was already in
+// range -- it only has to handle the overbrights the HDR target now preserves.
+vec3 rolloffHighlights(vec3 x, float knee, float white) {
+  vec3 low = min(x, vec3(knee));
+  vec3 high = max(x - knee, vec3(0.0));
+  float range = max(white - knee, 1e-3);
+  return low + range * (high / (high + range));
+}
+
+// Narkowicz's fitted ACES. Scene-referred: it expects linear input and adds
+// considerable midtone contrast and saturation of its own. Available on
+// request, but it is not the right default on top of already-graded content.
+vec3 acesFilmic(vec3 x) {
+  const float a = 2.51;
+  const float b = 0.03;
+  const float c = 2.43;
+  const float d = 0.59;
+  const float e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 gradeScene(vec3 color, vec3 bloom) {
+  color = max(color, vec3(0.0)) * gradeParams.x;
+  color += max(bloom, vec3(0.0)) * gradeParams.y;
+
+  float mode = tonemapParams.x;
+  if (mode > 1.5) {
+    vec3 linear = pow(color, vec3(2.2));
+    color = pow(acesFilmic(linear), vec3(1.0 / 2.2));
+  } else if (mode > 0.5) {
+    color = rolloffHighlights(color, tonemapParams.y, tonemapParams.z);
+  }
+
+  // Both of these are identity at 1.0, so neutral settings change nothing.
+  float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+  color = mix(vec3(luma), color, gradeParams.z);
+  color = (color - 0.5) * gradeParams.w + 0.5;
+
+  return clamp(color, 0.0, 1.0);
+}
 
 float linearDepth(float rawDepth) {
   float nearPlane = depthParams.x;
@@ -190,9 +241,17 @@ void main() {
     scene += texture(sceneColor, vUv - vec2(0.0, radius.y)).rgb * 0.16;
   }
   float rawDepth = texture(sceneDepth, vUv).r;
+  vec3 bloom = texture(bloomTexture, vUv).rgb;
+  float waterLevel = depthParams.z;
 
+  // Sky needs no fog, but must still go through grading, so it can no longer
+  // return early.
   if (rawDepth >= 0.9999) {
-    FragColor = vec4(scene, 1.0);
+    vec3 skyColor = scene;
+    if (cameraPosition.y < waterLevel) {
+      skyColor = mix(skyColor, vec3(0.035, 0.180, 0.330), 0.72);
+    }
+    FragColor = vec4(gradeScene(skyColor, bloom), 1.0);
     return;
   }
 
@@ -214,7 +273,6 @@ void main() {
   float distFog = smoothstep(fogStart, fogEnd, distance);
   distFog = 1.0 - exp(-distFog * distFog * 2.25);
 
-  float waterLevel = depthParams.z;
   float heightDensity = atmosphereParams.x;
   float heightFalloff = atmosphereParams.y;
   float horizonDensity = atmosphereParams.z;
@@ -240,7 +298,7 @@ void main() {
     color += (overlay.rgb - 0.5) * overlay.a * 0.18;
   }
 
-  FragColor = vec4(color, 1.0);
+  FragColor = vec4(gradeScene(color, bloom), 1.0);
 }
 ]]
 
@@ -254,7 +312,10 @@ function effects.createSceneTarget(width, height)
 
   gl.glGenTextures(1, colorTexture)
   gl.glBindTexture(GL_TEXTURE_2D, colorTexture[0])
-  gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil)
+  -- Half-float so the scene keeps values above 1.0. An 8-bit target clamps
+  -- everything at white, which leaves bloom nothing to pick up and tone mapping
+  -- nothing to roll off -- the main reason the image reads as flat.
+  gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, nil)
   gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
   gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
   gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
@@ -287,6 +348,230 @@ function effects.createSceneTarget(width, height)
     width = width,
     height = height
   }
+end
+
+-- Progressive-blur bloom: a chain of half-resolution targets, downsampled with
+-- a 13-tap filter and upsampled back with a tent filter, each level added on
+-- top. A single wide blur cannot produce the broad soft falloff this gives, and
+-- the cost is dominated by the first mip, not the wide ones.
+function effects.createBloomChain(width, height, levels)
+  levels = levels or 6
+  local mips = {}
+  local w, h = width, height
+
+  for _ = 1, levels do
+    w = math.floor(w / 2)
+    h = math.floor(h / 2)
+    if w < 2 or h < 2 then
+      break
+    end
+
+    local texture = ffi.new("GLuint[1]")
+    local framebuffer = ffi.new("GLuint[1]")
+
+    gl.glGenTextures(1, texture)
+    gl.glBindTexture(GL_TEXTURE_2D, texture[0])
+    gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nil)
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+    gl.glGenFramebuffers(1, framebuffer)
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer[0])
+    gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture[0], 0)
+    gl.glDrawBuffer(GL_COLOR_ATTACHMENT0)
+
+    if gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ~= GL_FRAMEBUFFER_COMPLETE then
+      error("Failed to create bloom framebuffer")
+    end
+
+    mips[#mips + 1] = {texture = texture, framebuffer = framebuffer, width = w, height = h}
+  end
+
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+  return {mips = mips, width = width, height = height}
+end
+
+function effects.releaseBloomChain(chain)
+  if not chain then
+    return
+  end
+  for _, mip in ipairs(chain.mips) do
+    gl.glDeleteFramebuffers(1, mip.framebuffer)
+    gl.glDeleteTextures(1, mip.texture)
+  end
+  chain.mips = {}
+end
+
+function effects.ensureBloomChain(chain, width, height, levels)
+  if chain and chain.width == width and chain.height == height then
+    return chain
+  end
+  effects.releaseBloomChain(chain)
+  return effects.createBloomChain(width, height, levels)
+end
+
+function effects.createBloomDownShader()
+  local vertSource = [[
+#version 330 core
+layout (location = 0) in vec3 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos.xy * 0.5 + 0.5;
+  gl_Position = vec4(aPos.xy, 0.0, 1.0);
+}
+]]
+
+  local fragSource = [[
+#version 330 core
+in vec2 vUv;
+out vec4 FragColor;
+uniform sampler2D source;
+uniform vec2 texelSize;
+uniform vec3 prefilter;   // threshold, knee, enabled
+uniform float clampMax;
+
+// 13-tap downsample: four inner taps carry most of the weight, which keeps the
+// chain stable instead of shimmering as the camera moves.
+vec3 sampleBox(vec2 uv) {
+  vec2 t = texelSize;
+  vec3 a = texture(source, uv + vec2(-2.0, 2.0) * t).rgb;
+  vec3 b = texture(source, uv + vec2( 0.0, 2.0) * t).rgb;
+  vec3 c = texture(source, uv + vec2( 2.0, 2.0) * t).rgb;
+  vec3 d = texture(source, uv + vec2(-2.0, 0.0) * t).rgb;
+  vec3 e = texture(source, uv).rgb;
+  vec3 f = texture(source, uv + vec2( 2.0, 0.0) * t).rgb;
+  vec3 g = texture(source, uv + vec2(-2.0,-2.0) * t).rgb;
+  vec3 h = texture(source, uv + vec2( 0.0,-2.0) * t).rgb;
+  vec3 i = texture(source, uv + vec2( 2.0,-2.0) * t).rgb;
+  vec3 j = texture(source, uv + vec2(-1.0, 1.0) * t).rgb;
+  vec3 k = texture(source, uv + vec2( 1.0, 1.0) * t).rgb;
+  vec3 l = texture(source, uv + vec2(-1.0,-1.0) * t).rgb;
+  vec3 m = texture(source, uv + vec2( 1.0,-1.0) * t).rgb;
+
+  vec3 result = e * 0.125;
+  result += (a + c + g + i) * 0.03125;
+  result += (b + d + f + h) * 0.0625;
+  result += (j + k + l + m) * 0.125;
+  return result;
+}
+
+void main() {
+  vec3 color = sampleBox(vUv);
+
+  if (prefilter.z > 0.5) {
+    // soft knee, so surfaces near the threshold ramp in rather than popping
+    float threshold = prefilter.x;
+    float knee = max(prefilter.y, 1e-4);
+    float brightness = max(color.r, max(color.g, color.b));
+    float soft = clamp(brightness - threshold + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee);
+    float contribution = max(soft, brightness - threshold) / max(brightness, 1e-5);
+    color *= contribution;
+  }
+
+  color = min(color, vec3(clampMax));
+  FragColor = vec4(color, 1.0);
+}
+]]
+
+  return shaderModule.fromSource(vertSource, fragSource)
+end
+
+function effects.createBloomUpShader()
+  local vertSource = [[
+#version 330 core
+layout (location = 0) in vec3 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos.xy * 0.5 + 0.5;
+  gl_Position = vec4(aPos.xy, 0.0, 1.0);
+}
+]]
+
+  local fragSource = [[
+#version 330 core
+in vec2 vUv;
+out vec4 FragColor;
+uniform sampler2D source;
+uniform vec2 texelSize;
+uniform float radius;
+
+// 3x3 tent filter. Blended additively into the larger mip by the caller.
+void main() {
+  vec2 o = texelSize * radius;
+  vec3 result = texture(source, vUv + vec2(-o.x,  o.y)).rgb * 1.0;
+  result += texture(source, vUv + vec2( 0.0,  o.y)).rgb * 2.0;
+  result += texture(source, vUv + vec2( o.x,  o.y)).rgb * 1.0;
+  result += texture(source, vUv + vec2(-o.x,  0.0)).rgb * 2.0;
+  result += texture(source, vUv).rgb * 4.0;
+  result += texture(source, vUv + vec2( o.x,  0.0)).rgb * 2.0;
+  result += texture(source, vUv + vec2(-o.x, -o.y)).rgb * 1.0;
+  result += texture(source, vUv + vec2( 0.0, -o.y)).rgb * 2.0;
+  result += texture(source, vUv + vec2( o.x, -o.y)).rgb * 1.0;
+  FragColor = vec4(result * (1.0 / 16.0), 1.0);
+}
+]]
+
+  return shaderModule.fromSource(vertSource, fragSource)
+end
+
+-- Runs the whole chain and leaves the result in mips[1], ready to composite.
+function effects.renderBloom(shaders, chain, sceneTexture, screenMesh, settings)
+  local mips = chain.mips
+  if #mips == 0 then
+    return nil
+  end
+
+  gl.glDisable(GL_DEPTH_TEST)
+  gl.glDisable(GL_BLEND)
+
+  -- downsample: scene -> mip1 (with prefilter) -> mip2 -> ...
+  gl.glUseProgram(shaders.down)
+  gl.glActiveTexture(GL_TEXTURE0)
+  gl.glUniform1i(shaders.downLoc.source, 0)
+  gl.glUniform1f(shaders.downLoc.clampMax, settings.clampMax or 12.0)
+
+  for i = 1, #mips do
+    local mip = mips[i]
+    local sourceTexture = i == 1 and sceneTexture or mips[i - 1].texture[0]
+    local sourceW = i == 1 and chain.width or mips[i - 1].width
+    local sourceH = i == 1 and chain.height or mips[i - 1].height
+
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, mip.framebuffer[0])
+    gl.glViewport(0, 0, mip.width, mip.height)
+    gl.glBindTexture(GL_TEXTURE_2D, sourceTexture)
+    gl.glUniform2f(shaders.downLoc.texelSize, 1.0 / sourceW, 1.0 / sourceH)
+    gl.glUniform3f(shaders.downLoc.prefilter,
+      settings.threshold or 0.7,
+      (settings.threshold or 0.7) * (settings.softKnee or 0.6),
+      i == 1 and 1.0 or 0.0)
+    rendering.draw(screenMesh)
+  end
+
+  -- upsample: add each smaller mip back into the one above it
+  gl.glUseProgram(shaders.up)
+  gl.glUniform1i(shaders.upLoc.source, 0)
+  gl.glUniform1f(shaders.upLoc.radius, settings.radius or 1.0)
+  gl.glEnable(GL_BLEND)
+  gl.glBlendFunc(GL_ONE, GL_ONE)
+
+  for i = #mips, 2, -1 do
+    local source = mips[i]
+    local target = mips[i - 1]
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer[0])
+    gl.glViewport(0, 0, target.width, target.height)
+    gl.glBindTexture(GL_TEXTURE_2D, source.texture[0])
+    gl.glUniform2f(shaders.upLoc.texelSize, 1.0 / source.width, 1.0 / source.height)
+    rendering.draw(screenMesh)
+  end
+
+  gl.glDisable(GL_BLEND)
+  gl.glEnable(GL_DEPTH_TEST)
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+  return mips[1].texture[0]
 end
 
 function effects.ensureSceneTarget(target, width, height)
@@ -412,8 +697,9 @@ function effects.drawWater(waterShader, waterMesh, locations, playerCamera, view
   gl.glDisable(GL_BLEND)
 end
 
-function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarget, playerCamera, sunDir, atmosphereState, fov, viewportWidth, viewportHeight, nearPlane, farPlane, waterLevel, settings, blurAmount, underwaterOverlayTexture, time)
+function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarget, playerCamera, sunDir, atmosphereState, fov, viewportWidth, viewportHeight, nearPlane, farPlane, waterLevel, settings, blurAmount, underwaterOverlayTexture, time, bloomTexture, grade)
   settings = settings or {}
+  grade = grade or {}
 
   local forward = playerCamera:getFront()
   local worldUp = {0.0, 1.0, 0.0}
@@ -442,6 +728,23 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   gl.glUniform3f(locations.scatterParams, settings.sunScatter or 0.45, 0.0, 0.0)
   gl.glUniform1f(locations.blurAmount, blurAmount or 0.0)
   gl.glUniform1f(locations.time, time or 0.0)
+  gl.glUniform1i(locations.bloomTexture, 3)
+  gl.glUniform4f(locations.gradeParams,
+    grade.exposure or 1.0,
+    bloomTexture and (grade.bloomStrength or 0.06) or 0.0,
+    grade.saturation or 1.0,
+    grade.contrast or 1.0)
+
+  local mode = 1.0
+  if grade.tonemap == false or grade.tonemap == "off" then
+    mode = 0.0
+  elseif grade.tonemap == "aces" then
+    mode = 2.0
+  end
+  gl.glUniform3f(locations.tonemapParams, mode, grade.tonemapKnee or 0.80, grade.tonemapWhite or 2.2)
+
+  gl.glActiveTexture(GL_TEXTURE3)
+  gl.glBindTexture(GL_TEXTURE_2D, bloomTexture or sceneTarget.colorTexture[0])
 
   gl.glActiveTexture(GL_TEXTURE0)
   gl.glBindTexture(GL_TEXTURE_2D, sceneTarget.colorTexture[0])

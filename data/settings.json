@@ -2,7 +2,8 @@
   "window": {
     "width": 1280,
     "height": 720,
-    "fovDegrees": 70
+    "fovDegrees": 70,
+    "vsync": false
   },
   "world": {
     "terrainMaxHeight": 127,

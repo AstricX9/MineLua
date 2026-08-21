@@ -7,6 +7,7 @@ local World = {}
 World.__index = World
 
 local CHUNK_SIZE = 16
+local SIDE_NEIGHBOURS = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
 
 function World.new(options)
   options = options or {}
@@ -18,10 +19,12 @@ function World.new(options)
   self.generatorType = options.generatorType or "default"
   self.superflatLayers = options.superflatLayers
   self.seed = options.seed or 1
-  self.lightDirty = true
+  self.lightDirty = false
   self.lightRevision = 0
   self.lightingJob = nil
   self.lightingJobRevision = nil
+  -- Chunks whose sky light changed since the renderer last drained this set.
+  self.lightTouched = {}
 
   if not options.deferInitialChunks then
     self:ensureChunksAroundBlock(0, 0)
@@ -70,7 +73,26 @@ function World:createChunk(chunkX, chunkZ, generationOptions)
   }
 
   self.chunks[World.chunkKey(chunkX, chunkZ)] = entry
-  self:markLightDirty()
+
+  -- Light the chunk in place instead of invalidating the whole world. A new
+  -- chunk can only add light to its neighbours, so this needs no removal pass.
+  lighting.lightChunk(self, entry, self.lightTouched, generationOptions.yieldStep)
+  entry.hasInitialLight = true
+  entry.hasInitialLighting = true
+  entry.lightRevision = self.lightRevision
+
+  -- A new chunk changes its neighbours' boundary faces and ambient occlusion,
+  -- which the mesher now reads across the border. Their meshes are stale even
+  -- when no light changed, so mark them through the same channel.
+  for i = 1, #SIDE_NEIGHBOURS do
+    local side = SIDE_NEIGHBOURS[i]
+    local key = World.chunkKey(chunkX + side[1], chunkZ + side[2])
+    local neighbour = self.chunks[key]
+    if neighbour then
+      self.lightTouched[key] = neighbour
+    end
+  end
+
   return entry
 end
 
@@ -253,9 +275,20 @@ function World:setBlock(x, y, z, id)
   end
 
   local localX, localZ = self:localBlockCoord(x, z)
+  -- Capture the sky column before the write so the update can tell which cells
+  -- actually gained or lost direct sky.
+  local beforeColumn = lighting.directSkyColumn(self, x, z)
   entry.chunk:setBlock(localX, y, localZ, id)
-  self:markLightDirty()
+  lighting.applyBlockChange(self, x, y, z, beforeColumn, self.lightTouched)
+
   return entry
+end
+
+-- Returns the chunks whose light changed since the last call, and clears the set.
+function World:drainLightTouched()
+  local touched = self.lightTouched
+  self.lightTouched = {}
+  return touched
 end
 
 function World:skyLightAt(x, y, z)
@@ -273,6 +306,91 @@ function World:skyLightAt(x, y, z)
 
   local localX, localZ = self:localBlockCoord(x, z)
   return entry.chunk:getSkyLight(localX, y, localZ)
+end
+
+-- Block sampler bound to the 3x3 chunk neighbourhood, in world coordinates.
+-- The mesher must see across chunk borders: without it every chunk treats its
+-- neighbours as empty air, which emits the whole boundary wall as hidden
+-- geometry and computes ambient occlusion as if a void sat next to it.
+-- Missing neighbours still read as air, so an edge chunk meshes as it does now
+-- and is remeshed once the neighbour arrives.
+function World:blockSampler(chunkX, chunkZ)
+  local neighbours = {}
+  for dz = -1, 1 do
+    for dx = -1, 1 do
+      neighbours[dz * 3 + dx] = self.chunks[World.chunkKey(chunkX + dx, chunkZ + dz)]
+    end
+  end
+
+  local baseX = chunkX * CHUNK_SIZE
+  local baseZ = chunkZ * CHUNK_SIZE
+  local floor = math.floor
+
+  return function(x, y, z)
+    if y < 0 or y > 255 then
+      return 0
+    end
+
+    local lx = x - baseX
+    local lz = z - baseZ
+    local cx = floor(lx / CHUNK_SIZE)
+    local cz = floor(lz / CHUNK_SIZE)
+
+    if cx < -1 or cx > 1 or cz < -1 or cz > 1 then
+      return self:blockAt(x, y, z) or 0
+    end
+
+    local entry = neighbours[cz * 3 + cx]
+    if not entry then
+      return 0
+    end
+
+    return entry.chunk:getBlock(lx - cx * CHUNK_SIZE, y, lz - cz * CHUNK_SIZE)
+  end
+end
+
+-- Returns a sky-light sampler bound to the 3x3 chunk neighbourhood around
+-- (chunkX, chunkZ). The mesher takes about 24 light samples per face, and going
+-- through skyLightAt for each one rebuilds a "x,z" string key every time; this
+-- resolves the chunks once and indexes them arithmetically.
+function World:skyLightSampler(chunkX, chunkZ)
+  local neighbours = {}
+  for dz = -1, 1 do
+    for dx = -1, 1 do
+      neighbours[dz * 3 + dx] = self.chunks[World.chunkKey(chunkX + dx, chunkZ + dz)]
+    end
+  end
+
+  local baseX = chunkX * CHUNK_SIZE
+  local baseZ = chunkZ * CHUNK_SIZE
+  local maxHeight = self.maxHeight
+  local floor = math.floor
+
+  return function(x, y, z)
+    if y > maxHeight then
+      return 15
+    end
+    if y < 0 then
+      return 0
+    end
+
+    local lx = x - baseX
+    local lz = z - baseZ
+    local cx = floor(lx / CHUNK_SIZE)
+    local cz = floor(lz / CHUNK_SIZE)
+
+    if cx < -1 or cx > 1 or cz < -1 or cz > 1 then
+      -- The mesher never samples this far out, but stay correct if it ever does.
+      return self:skyLightAt(x, y, z)
+    end
+
+    local entry = neighbours[cz * 3 + cx]
+    if not entry then
+      return 15
+    end
+
+    return entry.chunk:getSkyLight(lx - cx * CHUNK_SIZE, y, lz - cz * CHUNK_SIZE)
+  end
 end
 
 function World:isSolidBlock(x, y, z)

@@ -3,7 +3,10 @@ local graphics = {}
 graphics.window = {
   width = 1280,
   height = 720,
-  fovDegrees = 70
+  fovDegrees = 70,
+  -- false uncaps the frame rate, so the debug screen shows true frame cost
+  -- rather than the display refresh interval.
+  vsync = true
 }
 
 graphics.player = {
@@ -38,7 +41,14 @@ graphics.world = {
 }
 
 graphics.performance = {
-  terrainWorkBudget = 16,
+  -- Safety cap only; terrainFrameBudgetMs is what actually limits the frame.
+  -- Generation yields every 4 columns now, so this must be high enough that the
+  -- step count never binds before the time budget does.
+  terrainWorkBudget = 64,
+  -- ~9 chunks arrive per chunk-border crossing at about 120 ms each, so keeping
+  -- up needs ~340 ms/s walking and ~470 ms/s flying. 8 ms/frame covers both at
+  -- 60 fps. Raise to stream faster, lower for steadier frames.
+  terrainFrameBudgetMs = 8.0,
   chunkQueueBudget = 4,
   chunkQueueBacklog = 16,
   lightingStepBudget = 10,
@@ -65,6 +75,47 @@ graphics.atmosphere = {
   heightFogFalloff = 0.080,
   horizonFog = 0.10,
   sunScatter = 0.45
+}
+
+-- Post-processing / colour grading. The scene renders to a half-float target,
+-- so values above 1.0 survive to be bloomed and tone mapped instead of clipping.
+-- Defaults are deliberately neutral: exposure, saturation and contrast are all
+-- identity, and the tone curve does nothing below its knee. The scene was
+-- already authored to look right, so grading must only handle the overbrights
+-- the HDR target newly preserves. Anything punchier is a taste choice to dial
+-- in from here, not a starting point.
+graphics.post = {
+  bloom = true,
+  bloomThreshold = 0.85,   -- scene brightness where bloom starts
+  bloomSoftKnee = 0.60,    -- 0 = hard cutoff, 1 = very gradual
+  bloomStrength = 0.06,    -- how much bloom is added back
+  bloomRadius = 1.0,       -- tent filter spread during upsample
+  bloomLevels = 6,         -- mip chain depth; more = wider glow
+  bloomClamp = 12.0,       -- guards against fireflies from very bright pixels
+
+  -- "rolloff" = identity below the knee, compress above (recommended)
+  -- "aces"    = filmic, scene-referred, adds its own contrast and saturation
+  -- false     = no tone mapping at all
+  tonemap = "rolloff",
+  tonemapKnee = 0.80,      -- below this, pixels pass through untouched
+  tonemapWhite = 2.2,      -- value that maps to display white
+
+  exposure = 1.0,
+  saturation = 1.0,
+  contrast = 1.0
+}
+
+-- Physical sky: Rayleigh + Mie single scattering, marched per pixel. Sample
+-- counts are compiled into the shader, so changing them needs a restart.
+graphics.sky = {
+  scatterViewSamples = 16,   -- steps along the view ray
+  scatterLightSamples = 8,   -- steps along each ray toward the sun
+  -- Brightness knob. The sun intensity below is in arbitrary units, so absolute
+  -- radiance is not calibrated to anything; 2.5 puts the zenith at roughly the
+  -- brightness the previous authored gradient had. Lower for a deeper, more
+  -- literal sky, higher for a brighter one.
+  scatterStrength = 2.5,
+  sunIntensity = 22.0        -- radiance of the sun before scattering
 }
 
 graphics.terrain = {
@@ -98,6 +149,8 @@ graphics.terrainGeneration = {
   macroWarpScale = 0.00062,
   macroWarpAmount = 360.0,
   detailScale = 0.026,
+  reliefGain = 2.4,
+  localReliefGain = 2.0,
   grassTintStrength = 0.92,
   treeDensity = 0.78
 }

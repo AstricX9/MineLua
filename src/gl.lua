@@ -14,6 +14,7 @@ void glClearColor(float r, float g, float b, float a);
 void glClear(int mask);
 void glViewport(GLint x, GLint y, GLint w, GLint h);
 void glGenTextures(int n, GLuint *textures);
+void glDeleteTextures(GLsizei n, const GLuint *textures);
 void glBindTexture(GLenum target, GLuint texture);
 void glTexParameteri(GLenum target, GLenum pname, GLint param);
 void glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels);
@@ -51,7 +52,9 @@ void glUseProgram(GLuint program);
 
 // Uniforms
 GLint glGetUniformLocation(GLuint program, const char* name);
+void glUniform2f(GLint location, float v0, float v1);
 void glUniform3f(GLint location, float v0, float v1, float v2);
+void glUniform4f(GLint location, float v0, float v1, float v2, float v3);
 void glUniform1f(GLint location, float v0);
 void glUniform1i(GLint location, GLint v0);
   void glUniformMatrix4fv(GLint location, GLsizei count, unsigned char transpose, const float* value);
@@ -69,6 +72,7 @@ void glUniform1i(GLint location, GLint v0);
 
 // Framebuffers
 void glGenFramebuffers(GLsizei n, GLuint* ids);
+void glDeleteFramebuffers(GLsizei n, const GLuint* framebuffers);
 void glBindFramebuffer(GLenum target, GLuint framebuffer);
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
 GLenum glCheckFramebufferStatus(GLenum target);
@@ -105,7 +109,9 @@ void glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
 
   -- Uniforms
   gl.glGetUniformLocation = loader.load("glGetUniformLocation", "GLint", "GLuint", "const char*")
+  gl.glUniform2f = loader.load("glUniform2f", "void", "GLint", "float", "float")
   gl.glUniform3f = loader.load("glUniform3f", "void", "GLint", "float", "float", "float")
+  gl.glUniform4f = loader.load("glUniform4f", "void", "GLint", "float", "float", "float", "float")
   gl.glUniform1f = loader.load("glUniform1f", "void", "GLint", "float")
   gl.glUniform1i = loader.load("glUniform1i", "void", "GLint", "GLint")
   gl.glUniformMatrix4fv = loader.load("glUniformMatrix4fv", "void", "GLint", "GLsizei", "unsigned char", "const float*")
@@ -123,6 +129,7 @@ void glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
 
   -- Framebuffers
   gl.glGenFramebuffers = loader.load("glGenFramebuffers", "void", "GLsizei", "GLuint*")
+  gl.glDeleteFramebuffers = loader.load("glDeleteFramebuffers", "void", "GLsizei", "const GLuint*")
   gl.glBindFramebuffer = loader.load("glBindFramebuffer", "void", "GLenum", "GLuint")
   gl.glFramebufferTexture2D = loader.load("glFramebufferTexture2D", "void", "GLenum", "GLenum", "GLenum", "GLuint", "GLint")
   gl.glCheckFramebufferStatus = loader.load("glCheckFramebufferStatus", "GLenum", "GLenum")

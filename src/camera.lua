@@ -181,6 +181,44 @@ function Camera:hasBodyClearance(world, x, z, feetY, allowMissingCollision)
   return true
 end
 
+-- Flight passes through chunks that have not generated yet, otherwise
+-- unstreamed terrain would wall the player in. Outrun the streamer and those
+-- chunks materialise around you. The test below is deliberately narrow -- the
+-- head being literally inside a solid block, which normal movement never
+-- produces -- so ground snap and step-ups cannot trigger it.
+local MAX_UNSTICK_RISE = 12
+
+function Camera:isHeadInsideBlock(world)
+  local pos = self.position
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+  if not self:hasCollisionData(world, blockX, blockZ) then
+    return false
+  end
+  return world:isSolidBlock(blockX, math.floor(pos[2]), blockZ) == true
+end
+
+function Camera:resolveTerrainOverlap(world)
+  if not self:isHeadInsideBlock(world) then
+    return false
+  end
+
+  local pos = self.position
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+
+  for rise = 1, MAX_UNSTICK_RISE do
+    local clearBody = self:hasBodyClearance(world, pos[1], pos[3], pos[2] - self.eyeHeight + rise, true)
+    local clearHead = not world:isSolidBlock(blockX, math.floor(pos[2] + rise), blockZ)
+    if clearBody and clearHead then
+      pos[2] = pos[2] + rise
+      self.velocityY = 0.0
+      self.velocity[2] = 0.0
+      return true
+    end
+  end
+
+  return false
+end
+
 function Camera:getSupportY(world, x, z)
   local feetY = self.position[2] - self.eyeHeight
   local range = self:getAabbBlockRange(x, z, feetY)
@@ -470,6 +508,7 @@ function Camera:updateMovement(dt, window, world)
   self:applyHorizontalInput(dt, window)
   self:moveHorizontally(dt, world)
   self:applyVerticalMovement(dt, window, world)
+  self:resolveTerrainOverlap(world)
 end
 
 function Camera:update(dt, window, world)

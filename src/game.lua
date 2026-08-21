@@ -62,6 +62,9 @@ local WINDOW_H = graphics.window.height
 local windowWidth = WINDOW_W
 local windowHeight = WINDOW_H
 local CAMERA_FOV = math.rad(graphics.window.fovDegrees)
+-- Set graphics.window.vsync = false (data/settings.json) to uncap the frame rate
+-- and have the debug screen report real frame cost instead of the refresh rate.
+local VSYNC_ENABLED = graphics.window.vsync ~= false
 local CAMERA_NEAR = 0.1
 local CAMERA_FAR = math.max(graphics.world.visualDistance or 4096.0, 4096.0)
 local TERRAIN_MAX_H = graphics.world.terrainMaxHeight
@@ -83,7 +86,13 @@ local CLOUD_BOTTOM = graphics.atmosphere.cloudBottom or 132.0
 local CLOUD_TOP = graphics.atmosphere.cloudTop or (CLOUD_BOTTOM + 4.0)
 local CLOUD_ALPHA = 0.76
 local PERFORMANCE = graphics.performance or {}
+local POST = graphics.post or {}
+local SKY = graphics.sky or {}
 local TERRAIN_WORK_BUDGET = PERFORMANCE.terrainWorkBudget or 10
+-- Step counts are a poor budget: a single step ranges from under 1 ms to about
+-- 20 ms, so a fixed count of them produces wildly uneven frames. The step count
+-- stays as an upper bound; this is what actually caps the frame.
+local TERRAIN_FRAME_BUDGET = (PERFORMANCE.terrainFrameBudgetMs or 6.0) / 1000.0
 local CHUNK_QUEUE_BUDGET = PERFORMANCE.chunkQueueBudget or 2
 local CHUNK_QUEUE_BACKLOG = PERFORMANCE.chunkQueueBacklog or math.max(CHUNK_QUEUE_BUDGET * 3, 4)
 local LIGHTING_STEP_BUDGET = PERFORMANCE.lightingStepBudget or 10
@@ -263,17 +272,12 @@ uniform vec3 cameraUp;
 uniform vec3 cameraPosition;
 uniform vec3 cameraProjection;
 uniform vec3 skyTuning;
+uniform vec3 skyParams;   // scatterStrength, unused, sunIntensity
 uniform vec3 fogColor;
 uniform sampler2D moonTex;
 uniform sampler2D sunTex;
 uniform sampler2D cloudTex;
 
-const float Br = 0.0025;
-const float Bm = 0.0003;
-const float g = 0.9800;
-const vec3 nitrogen = vec3(0.650, 0.570, 0.475);
-const vec3 Kr = Br / pow(nitrogen, vec3(4.0));
-const vec3 Km = Bm / pow(nitrogen, vec3(0.84));
 const mat3 cloudMatrix = mat3(
    0.0,  1.60,  1.20,
   -1.6,  0.72, -0.96,
@@ -343,6 +347,108 @@ vec3 moonTexture(vec2 uv) {
   return vec3(0.78, 0.80, 0.76) * (shade + grain - craters);
 }
 
+// ---------------------------------------------------------------------------
+// Rayleigh + Mie single scattering (Nishita). The view ray is marched through
+// the atmosphere; at each step a second march toward the sun gives the optical
+// depth light travelled to get there. Sunset reds, the blue zenith and horizon
+// brightening all fall out of the wavelength dependence rather than being
+// authored -- Rayleigh scatters blue ~5.7x more strongly than red, so a long
+// grazing path through air has the blue removed from it.
+// ---------------------------------------------------------------------------
+const float PI_SKY = 3.14159265359;
+const float PLANET_RADIUS = 6371000.0;
+const float ATMOSPHERE_RADIUS = 6471000.0;
+const float RAYLEIGH_SCALE_H = 8000.0;
+const float MIE_SCALE_H = 1200.0;
+// Bruneton's coefficients at 680/550/440 nm, per metre.
+const vec3 RAYLEIGH_BETA = vec3(5.802e-6, 13.558e-6, 33.100e-6);
+const float MIE_BETA = 21.0e-6;
+const float MIE_G = 0.758;
+const int SCATTER_VIEW_SAMPLES = @VIEW_SAMPLES@;
+const int SCATTER_LIGHT_SAMPLES = @LIGHT_SAMPLES@;
+
+// Distance to the far intersection with a sphere centred on the origin.
+float raySphereFar(vec3 origin, vec3 dir, float radius) {
+  float b = dot(origin, dir);
+  float c = dot(origin, origin) - radius * radius;
+  float d = b * b - c;
+  if (d < 0.0) return -1.0;
+  return -b + sqrt(d);
+}
+
+// Distance to the near intersection, or -1 when the ray misses or starts past it.
+float raySphereNear(vec3 origin, vec3 dir, float radius) {
+  float b = dot(origin, dir);
+  float c = dot(origin, origin) - radius * radius;
+  float d = b * b - c;
+  if (d < 0.0) return -1.0;
+  float t = -b - sqrt(d);
+  return t > 0.0 ? t : -1.0;
+}
+
+vec3 atmosphericScattering(vec3 rayDir, vec3 sunDirection, float observerAltitude, float sunIntensity) {
+  vec3 origin = vec3(0.0, PLANET_RADIUS + observerAltitude, 0.0);
+
+  float rayLength = raySphereFar(origin, rayDir, ATMOSPHERE_RADIUS);
+  if (rayLength <= 0.0) return vec3(0.0);
+
+  // Looking down into the planet: stop at the surface.
+  float groundHit = raySphereNear(origin, rayDir, PLANET_RADIUS);
+  if (groundHit > 0.0) rayLength = min(rayLength, groundHit);
+
+  float mu = dot(rayDir, sunDirection);
+  float phaseRayleigh = 3.0 / (16.0 * PI_SKY) * (1.0 + mu * mu);
+  float g2 = MIE_G * MIE_G;
+  float phaseMie = 3.0 / (8.0 * PI_SKY) * ((1.0 - g2) * (1.0 + mu * mu)) /
+                   ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * MIE_G * mu, 1e-4), 1.5));
+
+  float stepSize = rayLength / float(SCATTER_VIEW_SAMPLES);
+  float travelled = 0.0;
+  float opticalDepthR = 0.0;
+  float opticalDepthM = 0.0;
+  vec3 accumR = vec3(0.0);
+  vec3 accumM = vec3(0.0);
+
+  for (int i = 0; i < SCATTER_VIEW_SAMPLES; i++) {
+    vec3 samplePos = origin + rayDir * (travelled + stepSize * 0.5);
+    float height = length(samplePos) - PLANET_RADIUS;
+
+    float densityR = exp(-height / RAYLEIGH_SCALE_H) * stepSize;
+    float densityM = exp(-height / MIE_SCALE_H) * stepSize;
+    opticalDepthR += densityR;
+    opticalDepthM += densityM;
+
+    // second march: how much air the sunlight crossed to reach this sample
+    float lightLength = raySphereFar(samplePos, sunDirection, ATMOSPHERE_RADIUS);
+    float lightStep = lightLength / float(SCATTER_LIGHT_SAMPLES);
+    float lightTravelled = 0.0;
+    float lightDepthR = 0.0;
+    float lightDepthM = 0.0;
+    bool occluded = false;
+
+    for (int j = 0; j < SCATTER_LIGHT_SAMPLES; j++) {
+      vec3 lightPos = samplePos + sunDirection * (lightTravelled + lightStep * 0.5);
+      float lightHeight = length(lightPos) - PLANET_RADIUS;
+      if (lightHeight < 0.0) { occluded = true; break; }
+      lightDepthR += exp(-lightHeight / RAYLEIGH_SCALE_H) * lightStep;
+      lightDepthM += exp(-lightHeight / MIE_SCALE_H) * lightStep;
+      lightTravelled += lightStep;
+    }
+
+    if (!occluded) {
+      vec3 tau = RAYLEIGH_BETA * (opticalDepthR + lightDepthR) +
+                 MIE_BETA * 1.1 * (opticalDepthM + lightDepthM);
+      vec3 transmittance = exp(-tau);
+      accumR += transmittance * densityR;
+      accumM += transmittance * densityM;
+    }
+
+    travelled += stepSize;
+  }
+
+  return sunIntensity * (accumR * RAYLEIGH_BETA * phaseRayleigh + accumM * MIE_BETA * phaseMie);
+}
+
 void main() {
   vec2 p = vUv * 2.0 - 1.0;
   vec3 pos = normalize(
@@ -359,20 +465,14 @@ void main() {
   vec3 skyPos = normalize(vec3(pos.x, max(pos.y, 0.015), pos.z));
 
   float altitude = smoothstep(0.0, 0.92, skyPos.y);
-  float twilightAmount = 1.0 - smoothstep(0.08, 0.44, abs(sun.y));
-  float horizon = 1.0 - smoothstep(0.015, 0.30, pos.y);
-  vec3 nightSky = mix(vec3(0.060, 0.095, 0.150), vec3(0.015, 0.028, 0.080), altitude);
-  vec3 daySky = mix(vec3(0.66, 0.82, 1.00), vec3(0.16, 0.40, 0.86), pow(altitude, 0.72));
-  daySky = mix(daySky, vec3(0.74, 0.88, 1.0), horizon * dayAmount * 0.45);
-  vec3 twilightSky = mix(vec3(0.86, 0.42, 0.24), vec3(0.17, 0.15, 0.34), altitude);
-  vec3 color = mix(nightSky, daySky, dayAmount);
-  color = mix(color, twilightSky, twilightAmount * smoothstep(0.0, 0.72, skyPos.y) * 0.62);
 
-  float mu = max(dot(skyPos, sun), 0.0);
-  float rayleigh = 3.0 / (8.0 * 3.14159) * (1.0 + mu * mu);
-  vec3 mie = (Kr + Km * (1.0 - g * g) / (2.0 + g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 0.02), 1.5)) / (Br + Bm);
-  vec3 scatter = rayleigh * mie * 0.045 * dayAmount;
-  color += scatter;
+  // The physical model produces daylight only; it correctly falls to black once
+  // the sun is below the horizon, so the authored night sky sits underneath it
+  // rather than being cross-faded against it.
+  float observerAltitude = max(cameraPosition.y - 62.0, 1.0);
+  vec3 scattered = atmosphericScattering(skyPos, sun, observerAltitude, skyParams.z);
+  vec3 nightSky = mix(vec3(0.060, 0.095, 0.150), vec3(0.015, 0.028, 0.080), altitude);
+  vec3 color = nightSky * nightAmount + scattered * skyParams.x;
 
   float moonVisible = smoothstep(-0.06, 0.08, moon.y) * nightAmount;
   vec3 moonBasisUp = abs(moon.y) > 0.96 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
@@ -410,6 +510,12 @@ void main() {
   FragColor = vec4(color, 1.0);
 }
 ]]
+
+  -- Sample counts must be compile-time constants for the loops to unroll, so
+  -- they are substituted into the source rather than passed as uniforms.
+  fragSource = fragSource
+    :gsub("@VIEW_SAMPLES@", tostring(SKY.scatterViewSamples or 16))
+    :gsub("@LIGHT_SAMPLES@", tostring(SKY.scatterLightSamples or 8))
 
   return shaderModule.fromSource(vertSource, fragSource)
 end
@@ -701,17 +807,35 @@ local function createImageTexture(path, nearest, repeatWrap)
   return tex
 end
 
-local function createTerrainMesh(entry, world)
-  local provisionalLight = not world:lightingReady()
-  return uploadTerrainChunkMesh(entry, voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ, {
-    skyLightAt = function(x, y, z)
-      local level = world:skyLightAt(x, y, z)
-      if provisionalLight and level <= 0 and y >= 0 then
+-- Samplers for meshing one chunk. Both are bound to the 3x3 chunk neighbourhood
+-- so the mesher can cull boundary faces against real neighbours and light their
+-- corners correctly. Provisional light is only used before the world has
+-- finished lighting; it forces dark cells bright so a chunk can be shown early.
+local function meshOptions(world, entry, provisionalLight, yieldStep)
+  local light = world:skyLightSampler(entry.chunkX, entry.chunkZ)
+
+  if provisionalLight then
+    local base = light
+    light = function(x, y, z)
+      local level = base(x, y, z)
+      if level <= 0 and y >= 0 then
         return 15
       end
       return level
     end
-  }), {
+  end
+
+  return {
+    skyLightAt = light,
+    blockAt = world:blockSampler(entry.chunkX, entry.chunkZ),
+    yieldStep = yieldStep
+  }
+end
+
+local function createTerrainMesh(entry, world)
+  local provisionalLight = not world:lightingReady()
+  return uploadTerrainChunkMesh(entry, voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ,
+    meshOptions(world, entry, provisionalLight)), {
     provisionalLight = provisionalLight,
     lightRevision = world.lightRevision
   })
@@ -742,18 +866,10 @@ local function ensureTerrainMeshThread(world, item)
   end
   local provisionalLight = item.provisionalLight
   item.meshThread = coroutine.create(function()
-    item.vertices = voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ, {
-      skyLightAt = function(x, y, z)
-        local level = world:skyLightAt(x, y, z)
-        if provisionalLight and level <= 0 and y >= 0 then
-          return 15
-        end
-        return level
-      end,
-      yieldStep = function()
+    item.vertices = voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ,
+      meshOptions(world, entry, provisionalLight, function()
         coroutine.yield(false)
-      end
-    })
+      end))
     return true
   end)
 end
@@ -906,7 +1022,11 @@ local function pendingChunkCoords(item)
   return item.chunkX, item.chunkZ
 end
 
-local function queueChunkRemesh(pendingEntries, entry)
+-- `urgent` marks work the player is waiting to see. The queue is processed from
+-- the front, so without this a remesh caused by placing a block queues behind
+-- every pending chunk generation -- up to CHUNK_QUEUE_BACKLOG of them, seconds
+-- of work -- and the edit stays invisible until streaming catches up.
+local function queueChunkRemesh(pendingEntries, entry, urgent)
   if not entry then
     return
   end
@@ -915,18 +1035,29 @@ local function queueChunkRemesh(pendingEntries, entry)
   for i = 1, #pendingEntries do
     local chunkX, chunkZ = pendingChunkCoords(pendingEntries[i])
     if chunkX and chunkZ and World.chunkKey(chunkX, chunkZ) == key then
-      pendingEntries[i].entry = pendingEntries[i].entry or entry
-      pendingEntries[i].rebuild = true
+      local item = pendingEntries[i]
+      item.entry = item.entry or entry
+      item.rebuild = true
+      if urgent and i > 1 then
+        table.remove(pendingEntries, i)
+        table.insert(pendingEntries, 1, item)
+      end
       return
     end
   end
 
-  pendingEntries[#pendingEntries + 1] = {
+  local item = {
     chunkX = entry.chunkX,
     chunkZ = entry.chunkZ,
     entry = entry,
     rebuild = true
   }
+
+  if urgent then
+    table.insert(pendingEntries, 1, item)
+  else
+    pendingEntries[#pendingEntries + 1] = item
+  end
 end
 
 local function queueProvisionalLightRemeshes(world, terrainMeshes, pendingEntries)
@@ -938,6 +1069,22 @@ local function queueProvisionalLightRemeshes(world, terrainMeshes, pendingEntrie
       end
     end
   end
+end
+
+-- The incremental light update records every chunk it wrote into. Remesh those
+-- and nothing else.
+local function queueLightTouchedRemeshes(world, pendingEntries, urgent)
+  local touched = world:drainLightTouched()
+  local queued = 0
+
+  for _, entry in pairs(touched) do
+    if entry.hasMesh then
+      queueChunkRemesh(pendingEntries, entry, urgent)
+      queued = queued + 1
+    end
+  end
+
+  return queued
 end
 
 local function queueTerrainMeshes(world, pendingEntries, x, z, budget, priority)
@@ -1009,9 +1156,13 @@ end
 local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, budget)
   budget = budget or TERRAIN_WORK_BUDGET
   local processed = 0
+  local deadline = glfw.glfwGetTime() + TERRAIN_FRAME_BUDGET
   local lightingWasReady = world:lightingReady()
   local stats = {
     budget = budget,
+    budgetMs = TERRAIN_FRAME_BUDGET * 1000.0,
+    elapsedMs = 0,
+    timeSliced = false,
     processed = 0,
     chunkSteps = 0,
     meshSteps = 0,
@@ -1062,7 +1213,16 @@ local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, bud
       stats.syncUploads = stats.syncUploads + 1
       break
     end
+
+    -- Checked after the body so at least one step always runs; otherwise a
+    -- frame that is already over budget would never make progress.
+    if glfw.glfwGetTime() >= deadline then
+      stats.timeSliced = true
+      break
+    end
   end
+
+  stats.elapsedMs = (glfw.glfwGetTime() - (deadline - TERRAIN_FRAME_BUDGET)) * 1000.0
 
   stats.processed = processed
   if world.lightDirty or world.lightingJob then
@@ -1073,6 +1233,10 @@ local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, bud
     end
     stats.lightingReadyAfter = lightingReady
   end
+
+  -- Newly generated chunks light themselves and can spill into a neighbour that
+  -- is already meshed; pick those up here.
+  stats.lightRemeshes = queueLightTouchedRemeshes(world, pendingEntries)
 
   return stats
 end
@@ -1102,29 +1266,25 @@ local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, z)
   end
 end
 
-local function rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ)
+local function rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ, urgent)
   local key = World.chunkKey(chunkX, chunkZ)
   local entry = world.chunks[key]
   if entry then
-    queueChunkRemesh(pendingEntries, entry)
+    queueChunkRemesh(pendingEntries, entry, urgent)
   end
 end
 
+-- Called when the player places or breaks a block, so everything here is urgent:
+-- the block data (and its collision) has already changed and the mesh is the
+-- only thing left before the edit becomes visible.
 local function rebuildBlockChunkMeshes(world, pendingEntries, x, z)
-  local localX, localZ, chunkX, chunkZ = world:localBlockCoord(x, z)
-  rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ)
+  local _, _, chunkX, chunkZ = world:localBlockCoord(x, z)
+  rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ, true)
 
-  if localX == 0 then
-    rebuildChunkMesh(world, pendingEntries, chunkX - 1, chunkZ)
-  elseif localX == 15 then
-    rebuildChunkMesh(world, pendingEntries, chunkX + 1, chunkZ)
-  end
-
-  if localZ == 0 then
-    rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ - 1)
-  elseif localZ == 15 then
-    rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ + 1)
-  end
+  -- Neighbour geometry never depends on this chunk (voxel.lua treats anything
+  -- outside 0..15 as air), so the only reason to touch a neighbour is light,
+  -- and the update tells us exactly which ones changed.
+  queueLightTouchedRemeshes(world, pendingEntries, true)
 end
 
 local function createCharacterMesh()
@@ -1148,6 +1308,7 @@ local function drawSky(skyShader, skyMesh, locations, moonTexture, sunTexture, c
   gl.glUniform3f(locations.cameraPosition, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
   gl.glUniform3f(locations.cameraProjection, windowWidth / windowHeight * math.tan(CAMERA_FOV / 2), math.tan(CAMERA_FOV / 2), 0.0)
   gl.glUniform3f(locations.skyTuning, graphics.atmosphere.skyExposure, graphics.atmosphere.cloudDensity, graphics.atmosphere.sunGlare)
+  gl.glUniform3f(locations.skyParams, SKY.scatterStrength or 1.0, 0.0, SKY.sunIntensity or 22.0)
   gl.glUniform3f(locations.fogColor, sky.fogColor[1], sky.fogColor[2], sky.fogColor[3])
   gl.glActiveTexture(GL_TEXTURE2)
   gl.glBindTexture(GL_TEXTURE_2D, moonTexture[0])
@@ -1360,11 +1521,13 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     chunkStats.pendingRemesh
   )
   local frameWorkLine = string.format(
-    "Frame work: %d/%d steps, %d uploads, %d light budget",
+    "Frame work: %.1f/%.1f ms%s, %d/%d steps, %d uploads",
+    queueStats.elapsedMs or 0.0,
+    queueStats.budgetMs or 0.0,
+    queueStats.timeSliced and " (capped)" or "",
     queueStats.processed or 0,
     queueStats.budget or TERRAIN_WORK_BUDGET,
-    (queueStats.meshUploads or 0) + (queueStats.syncUploads or 0),
-    queueStats.lightingBudget or 0
+    (queueStats.meshUploads or 0) + (queueStats.syncUploads or 0)
   )
 
   local leftLines = {
@@ -1675,6 +1838,10 @@ local function initWindow()
   end
 
   glfw.glfwMakeContextCurrent(window)
+  -- With vsync on, every frame reports the refresh interval regardless of how
+  -- much work it actually did, which hides the real headroom. Turn it off to
+  -- measure true frame cost.
+  glfw.glfwSwapInterval(VSYNC_ENABLED and 1 or 0)
   glfw.glfwSetInputMode(window, glfw.GLFW_CURSOR, glfw.GLFW_CURSOR_NORMAL)
 
   return window
@@ -1753,6 +1920,7 @@ function game.run()
       cameraPosition = gl.glGetUniformLocation(skyShader, "cameraPosition"),
       cameraProjection = gl.glGetUniformLocation(skyShader, "cameraProjection"),
       skyTuning = gl.glGetUniformLocation(skyShader, "skyTuning"),
+      skyParams = gl.glGetUniformLocation(skyShader, "skyParams"),
       fogColor = gl.glGetUniformLocation(skyShader, "fogColor"),
       moonTex = gl.glGetUniformLocation(skyShader, "moonTex"),
       sunTex = gl.glGetUniformLocation(skyShader, "sunTex"),
@@ -1797,8 +1965,28 @@ function game.run()
       atmosphereParams = gl.glGetUniformLocation(atmospherePostShader, "atmosphereParams"),
       scatterParams = gl.glGetUniformLocation(atmospherePostShader, "scatterParams"),
       blurAmount = gl.glGetUniformLocation(atmospherePostShader, "blurAmount"),
-      time = gl.glGetUniformLocation(atmospherePostShader, "time")
+      time = gl.glGetUniformLocation(atmospherePostShader, "time"),
+      bloomTexture = gl.glGetUniformLocation(atmospherePostShader, "bloomTexture"),
+      gradeParams = gl.glGetUniformLocation(atmospherePostShader, "gradeParams"),
+      tonemapParams = gl.glGetUniformLocation(atmospherePostShader, "tonemapParams")
     }
+
+    local bloomShaders = {
+      down = effects.createBloomDownShader(),
+      up = effects.createBloomUpShader()
+    }
+    bloomShaders.downLoc = {
+      source = gl.glGetUniformLocation(bloomShaders.down, "source"),
+      texelSize = gl.glGetUniformLocation(bloomShaders.down, "texelSize"),
+      prefilter = gl.glGetUniformLocation(bloomShaders.down, "prefilter"),
+      clampMax = gl.glGetUniformLocation(bloomShaders.down, "clampMax")
+    }
+    bloomShaders.upLoc = {
+      source = gl.glGetUniformLocation(bloomShaders.up, "source"),
+      texelSize = gl.glGetUniformLocation(bloomShaders.up, "texelSize"),
+      radius = gl.glGetUniformLocation(bloomShaders.up, "radius")
+    }
+    local bloomChain = effects.createBloomChain(windowWidth, windowHeight, POST.bloomLevels or 6)
 
     local model = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
 
@@ -1944,6 +2132,7 @@ function game.run()
         effects.renderShadowPass(shadowShader, shadowMap, shadowLocations, visibleMeshes, characterMesh, lightSpaceMatrix, model, SHADOW_MAP_SIZE, windowWidth, windowHeight, atlasTex)
 
         sceneTarget = effects.ensureSceneTarget(sceneTarget, windowWidth, windowHeight)
+        bloomChain = effects.ensureBloomChain(bloomChain, windowWidth, windowHeight, POST.bloomLevels or 6)
         gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneTarget.framebuffer[0])
         gl.glViewport(0, 0, windowWidth, windowHeight)
 
@@ -1982,9 +2171,22 @@ function game.run()
           effects.drawWater(waterShader, waterMesh, waterLocations, playerCamera, view, projection, sunDir, sky, currentTime, currentWaterLevel, waterTexture)
         end
 
+        -- Bloom reads the HDR scene before it is graded, so anything brighter
+        -- than the threshold bleeds. Runs at half resolution downward, so the
+        -- whole chain costs about as much as one full-resolution pass.
+        local bloomTexture = nil
+        if POST.bloom ~= false then
+          bloomTexture = effects.renderBloom(bloomShaders, bloomChain, sceneTarget.colorTexture[0], skyMesh, {
+            threshold = POST.bloomThreshold or 0.70,
+            softKnee = POST.bloomSoftKnee or 0.60,
+            radius = POST.bloomRadius or 1.0,
+            clampMax = POST.bloomClamp or 12.0
+          })
+        end
+
         gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
         gl.glViewport(0, 0, windowWidth, windowHeight)
-        effects.drawAtmospherePost(atmospherePostShader, skyMesh, atmospherePostLocations, sceneTarget, playerCamera, sunDir, sky, CAMERA_FOV, windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR, currentWaterLevel or -1000.0, graphics.atmosphere, displayState.screen == "pause" and 1.15 or 0.0, underwaterOverlayTexture, currentTime)
+        effects.drawAtmospherePost(atmospherePostShader, skyMesh, atmospherePostLocations, sceneTarget, playerCamera, sunDir, sky, CAMERA_FOV, windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR, currentWaterLevel or -1000.0, graphics.atmosphere, displayState.screen == "pause" and 1.15 or 0.0, underwaterOverlayTexture, currentTime, bloomTexture, POST)
         if displayState.screen then
           hudOverlay:drawMenu(windowWidth, windowHeight, displayState.screen, displayState.menuMouseX, displayState.menuMouseY, displayState, currentTime)
         else
@@ -1999,6 +2201,7 @@ function game.run()
       end
     end
 
+    effects.releaseBloomChain(bloomChain)
     releaseTerrainMeshes(terrainMeshes)
     rendering.release(characterMesh)
     rendering.release(skyMesh)

@@ -31,6 +31,7 @@ void glfwSetWindowMonitor(GLFWwindow* window, GLFWmonitor* monitor, int xpos, in
 GLFWmonitor* glfwGetPrimaryMonitor(void);
 const GLFWvidmode* glfwGetVideoMode(GLFWmonitor* monitor);
 double glfwGetTime(void);
+void glfwSwapInterval(int interval);
 ]]
 
 local _lib = ffi.load("glfw3")
