@@ -38,6 +38,30 @@ end
 
 local EPSILON = 0.0001
 
+-- Keep acceleration as a change in speed, not a slow rotation of the velocity
+-- vector. When input changes direction the new heading takes effect at once;
+-- only its speed ramps. With no input, friction preserves the current heading
+-- while bringing that speed to zero.
+local function approachHorizontalVelocity(x, z, targetX, targetZ, amount)
+  local targetSpeed = math.sqrt(targetX * targetX + targetZ * targetZ)
+  if targetSpeed > EPSILON then
+    local dirX = targetX / targetSpeed
+    local dirZ = targetZ / targetSpeed
+    local speedAlongInput = x * dirX + z * dirZ
+    local nextSpeed = moveToward(speedAlongInput, targetSpeed, amount)
+    return dirX * nextSpeed, dirZ * nextSpeed
+  end
+
+  local currentSpeed = math.sqrt(x * x + z * z)
+  if currentSpeed <= amount or currentSpeed < EPSILON then
+    return 0.0, 0.0
+  end
+
+  local nextSpeed = currentSpeed - amount
+  local scale = nextSpeed / currentSpeed
+  return x * scale, z * scale
+end
+
 function Camera.new(options)
   options = options or {}
 
@@ -65,10 +89,10 @@ function Camera.new(options)
     sprintSpeed = options.sprintSpeed or 7.2,
     crouchSpeed = options.crouchSpeed or 2.4,
     flySpeed = options.flySpeed or 9.5,
-    acceleration = options.acceleration or 34.0,
-    airAcceleration = options.airAcceleration or 8.0,
+    acceleration = options.acceleration or 55.0,
+    airAcceleration = options.airAcceleration or 14.0,
     flyAcceleration = options.flyAcceleration or 24.0,
-    groundFriction = options.groundFriction or 38.0,
+    groundFriction = options.groundFriction or 46.0,
     airFriction = options.airFriction or 2.0,
     flyFriction = options.flyFriction or 18.0,
     gravity = options.gravity or 19.5,
@@ -384,8 +408,8 @@ function Camera:applyHorizontalInput(dt, window)
     accel = self.flying and self.flyFriction or (self.grounded and self.groundFriction or self.airFriction)
   end
 
-  self.velocity[1] = moveToward(self.velocity[1], targetX, accel * dt)
-  self.velocity[3] = moveToward(self.velocity[3], targetZ, accel * dt)
+  self.velocity[1], self.velocity[3] =
+    approachHorizontalVelocity(self.velocity[1], self.velocity[3], targetX, targetZ, accel * dt)
 end
 
 function Camera:updateFlightToggle(window)

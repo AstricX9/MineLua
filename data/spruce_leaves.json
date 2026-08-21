@@ -1,6 +1,7 @@
 {
   "name": "Spruce Leaves",
   "texture": "./textures/blocks/leaves_spruce.png",
+  "biomeTint": true,
   "properties": {
     "solid": true,
     "cutout": true,

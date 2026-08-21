@@ -303,7 +303,10 @@ function M.meshChunk(chunk, maxh, offsetX, offsetZ, options)
           if def.biomeTint then
             biomeTint = terrain.grassColorAt(wx, wz)
           end
-          local tintAllFaces = (props and props.plant) and true or false
+          -- Leaves use grayscale mask textures just like cross-plane plants.
+          -- Tinting only their top face leaves the four visible sides white,
+          -- which made temperate spruce crowns look permanently snow-covered.
+          local tintAllFaces = (props and (props.plant or props.leaves)) and true or false
 
           if props and props.cross then
             local r, g, b = faceRGB(def, "side", biomeTint, tintAllFaces, ao)

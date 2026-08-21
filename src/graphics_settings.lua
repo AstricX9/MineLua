@@ -17,10 +17,12 @@ graphics.player = {
   sprintSpeed = 7.2,
   crouchSpeed = 2.4,
   flySpeed = 9.5,
-  acceleration = 34.0,
-  airAcceleration = 8.0,
+  -- Acceleration changes speed only. Input direction is applied immediately so
+  -- mouse turns and key changes do not steer the player through a circular arc.
+  acceleration = 55.0,
+  airAcceleration = 14.0,
   flyAcceleration = 24.0,
-  groundFriction = 38.0,
+  groundFriction = 46.0,
   airFriction = 2.0,
   flyFriction = 18.0,
   gravity = 19.5,
@@ -36,8 +38,8 @@ graphics.player = {
 
 graphics.world = {
   terrainMaxHeight = 127,
-  chunkRenderRadius = 4,
-  visualDistance = 192.0
+  chunkRenderRadius = 8,
+  visualDistance = 320.0
 }
 
 graphics.performance = {
@@ -61,8 +63,10 @@ graphics.performance = {
 }
 
 graphics.atmosphere = {
-  fogStart = 220.0,
-  fogEnd = 1250.0,
+  -- Visibility range for homogeneous aerial extinction. Height fog begins
+  -- immediately at low altitude; these distances control the broader haze.
+  fogStart = 48.0,
+  fogEnd = 360.0,
   sunCycleSpeed = 0.005235987755982989,
   skyColor = {0.53, 0.81, 0.92},
   skyExposure = 0.62,
@@ -70,11 +74,19 @@ graphics.atmosphere = {
   cloudBottom = 132.0,
   cloudTop = 136.0,
   sunGlare = 0.58,
-  maxFogAmount = 0.58,
-  heightFogDensity = 0.08,
-  heightFogFalloff = 0.080,
-  horizonFog = 0.10,
-  sunScatter = 0.45
+  maxFogAmount = 0.72,
+  -- Extinction per block at sea level and its exponential falloff with height.
+  heightFogDensity = 0.0045,
+  heightFogFalloff = 0.055,
+  horizonFog = 0.24,
+  sunScatter = 0.65,
+  -- Frustum-aligned froxel volume. XY is one cell per 8x8 pixels at 1280x720;
+  -- logarithmic Z slices keep detail close to the camera.
+  volumetricGridWidth = 160,
+  volumetricGridHeight = 90,
+  volumetricGridDepth = 64,
+  volumetricNear = 0.5,
+  volumetricFar = 360.0
 }
 
 -- Post-processing / colour grading. The scene renders to a half-float target,
@@ -115,7 +127,18 @@ graphics.sky = {
   -- brightness the previous authored gradient had. Lower for a deeper, more
   -- literal sky, higher for a brighter one.
   scatterStrength = 2.5,
-  sunIntensity = 22.0        -- radiance of the sun before scattering
+  sunIntensity = 22.0,       -- radiance of the sun before scattering
+
+  -- The sun is a limb-darkened disc shaded through the same atmosphere as the
+  -- sky, not a sprite. Its true angular radius is 0.00465 rad -- about half a
+  -- degree across, roughly seven pixels at this field of view -- which is
+  -- correct but reads as a speck in a blocky world. This is enlarged; set it to
+  -- 0.00465 for the literal size.
+  sunAngularRadius = 0.012,
+  -- Radiance of the disc, in the units the sky lands in after its own tone map.
+  -- The scene target is half-float, so anything above 1.0 survives to be
+  -- bloomed; this is what gives the sun its glow.
+  sunDiscBrightness = 9.0
 }
 
 graphics.terrain = {
@@ -134,13 +157,39 @@ graphics.shadows = {
 
 graphics.water = {
   level = 62.65,
-  radius = 1024.0
+  fftResolution = 256,
+  fftOceanSize = 256.0,
+  windSpeed = 11.0,
+  windAngleDegrees = 45.0,
+  -- Keep the silhouette rolling rather than folding into sharp triangular
+  -- peaks. Fine normal detail still supplies lively small ripples.
+  choppiness = 0.88,
+  displacementScale = 1.0,
+  nearTessellation = 2,
+  farChunkRadius = 18,
+  farCoverageSubdivisions = 4,
+  farTileSubdivisions = 8,
+  farBuildBudget = 8,
+  farBuildBudgetMs = 2.0,
+  -- Reuse the physically evolved FFT field at three decorrelated world scales.
+  -- The smallest two chiefly provide surface detail; the largest carries swell.
+  cascadeSizes = {36.0, 144.0, 576.0},
+  cascadeDisplacementWeights = {0.075, 0.16, 0.40},
+  cascadeNormalWeights = {0.48, 0.29, 0.16},
+  -- Stable world-space fetch makes open ocean strongest without changing when
+  -- the camera turns. Enclosed water keeps animated short ripples.
+  openWaterWaveBoost = 1.08,
+  refractionStrength = 0.014,
+  -- Project FFT-driven light concentration onto submerged voxel faces.
+  causticStrength = 0.42,
+  -- Beer-Lambert absorption per metre: red disappears first in natural water.
+  absorption = {0.16, 0.055, 0.026}
 }
 
 graphics.terrainGeneration = {
   seed = 1,
   seaLevel = 63,
-  continentScale = 0.00036,
+  continentScale = 0.0025,
   biomeScale = 0.00092,
   regionScale = 0.00125,
   mountainScale = 0.00078,
@@ -151,6 +200,18 @@ graphics.terrainGeneration = {
   detailScale = 0.026,
   reliefGain = 2.4,
   localReliefGain = 2.0,
+  -- Procedural erosion approximation. It damps short-wavelength relief and
+  -- rounds mountain crests without changing the continent layout.
+  erosionStrength = 0.0,
+  riverCarveStrength = 0.86,
+  lakeCarveStrength = 0.78,
+  mountainSharpness = 1.65,
+  shorelineWidth = 5.0,
+  rockyShoreThreshold = 0.24,
+  biomeClimateInfluence = 0.34,
+  snowTemperature = 0.18,
+  elevationCooling = 0.0045,
+  freezeTemperature = 0.08,
   grassTintStrength = 0.92,
   treeDensity = 0.78
 }

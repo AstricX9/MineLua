@@ -8,6 +8,10 @@ typedef int GLint;
 typedef int GLsizei;
 typedef float GLfloat;
 typedef unsigned char GLchar;
+typedef unsigned char GLboolean;
+typedef unsigned int GLbitfield;
+typedef intptr_t GLintptr;
+typedef intptr_t GLsizeiptr;
 
 // Core OpenGL 1.1 (from opengl32.dll)
 void glClearColor(float r, float g, float b, float a);
@@ -48,7 +52,13 @@ void glGetShaderInfoLog(GLuint shader, GLsizei maxLen, GLsizei* length, char* in
 GLuint glCreateProgram(void);
 void glAttachShader(GLuint program, GLuint shader);
 void glLinkProgram(GLuint program);
+void glGetProgramiv(GLuint program, GLenum pname, GLint* params);
+void glGetProgramInfoLog(GLuint program, GLsizei maxLen, GLsizei* length, char* infoLog);
+void glDeleteShader(GLuint shader);
+void glDeleteProgram(GLuint program);
 void glUseProgram(GLuint program);
+void glDispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z);
+void glMemoryBarrier(GLbitfield barriers);
 
 // Uniforms
 GLint glGetUniformLocation(GLuint program, const char* name);
@@ -75,12 +85,26 @@ void glGenFramebuffers(GLsizei n, GLuint* ids);
 void glDeleteFramebuffers(GLsizei n, const GLuint* framebuffers);
 void glBindFramebuffer(GLenum target, GLuint framebuffer);
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+void glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level);
 GLenum glCheckFramebufferStatus(GLenum target);
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+  GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+  GLbitfield mask, GLenum filter);
+
+// Immutable/3D textures and image load-store (OpenGL 4.x volumetrics)
+void glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void* pixels);
+void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
+void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
+void glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format);
+void glGenerateMipmap(GLenum target);
 
 // Buffers
 void glGenBuffers(GLsizei n, GLuint* buffers);
 void glBindBuffer(GLenum target, GLuint buffer);
-void glBufferData(GLenum target, GLint size, const void* data, GLenum usage);
+void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage);
+void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data);
+void glBindBufferBase(GLenum target, GLuint index, GLuint buffer);
+void glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
 void glDeleteBuffers(GLsizei n, const GLuint* buffers);
 
 // Vertex Attributes
@@ -105,7 +129,13 @@ void glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
   gl.glCreateProgram = loader.load("glCreateProgram", "GLuint")
   gl.glAttachShader = loader.load("glAttachShader", "void", "GLuint", "GLuint")
   gl.glLinkProgram = loader.load("glLinkProgram", "void", "GLuint")
+  gl.glGetProgramiv = loader.load("glGetProgramiv", "void", "GLuint", "GLenum", "GLint*")
+  gl.glGetProgramInfoLog = loader.load("glGetProgramInfoLog", "void", "GLuint", "GLsizei", "GLsizei*", "char*")
+  gl.glDeleteShader = loader.load("glDeleteShader", "void", "GLuint")
+  gl.glDeleteProgram = loader.load("glDeleteProgram", "void", "GLuint")
   gl.glUseProgram = loader.load("glUseProgram", "void", "GLuint")
+  gl.glDispatchCompute = loader.load("glDispatchCompute", "void", "GLuint", "GLuint", "GLuint")
+  gl.glMemoryBarrier = loader.load("glMemoryBarrier", "void", "GLbitfield")
 
   -- Uniforms
   gl.glGetUniformLocation = loader.load("glGetUniformLocation", "GLint", "GLuint", "const char*")
@@ -132,12 +162,26 @@ void glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
   gl.glDeleteFramebuffers = loader.load("glDeleteFramebuffers", "void", "GLsizei", "const GLuint*")
   gl.glBindFramebuffer = loader.load("glBindFramebuffer", "void", "GLenum", "GLuint")
   gl.glFramebufferTexture2D = loader.load("glFramebufferTexture2D", "void", "GLenum", "GLenum", "GLenum", "GLuint", "GLint")
+  gl.glFramebufferTexture = loader.load("glFramebufferTexture", "void", "GLenum", "GLenum", "GLuint", "GLint")
   gl.glCheckFramebufferStatus = loader.load("glCheckFramebufferStatus", "GLenum", "GLenum")
+  gl.glBlitFramebuffer = loader.load("glBlitFramebuffer", "void",
+    "GLint", "GLint", "GLint", "GLint",
+    "GLint", "GLint", "GLint", "GLint", "GLbitfield", "GLenum")
+
+  -- OpenGL 4.x textures and image load-store
+  gl.glTexImage3D = loader.load("glTexImage3D", "void", "GLenum", "GLint", "GLint", "GLsizei", "GLsizei", "GLsizei", "GLint", "GLenum", "GLenum", "const void*")
+  gl.glTexStorage2D = loader.load("glTexStorage2D", "void", "GLenum", "GLsizei", "GLenum", "GLsizei", "GLsizei")
+  gl.glTexStorage3D = loader.load("glTexStorage3D", "void", "GLenum", "GLsizei", "GLenum", "GLsizei", "GLsizei", "GLsizei")
+  gl.glBindImageTexture = loader.load("glBindImageTexture", "void", "GLuint", "GLuint", "GLint", "GLboolean", "GLint", "GLenum", "GLenum")
+  gl.glGenerateMipmap = loader.load("glGenerateMipmap", "void", "GLenum")
 
   -- Buffers
   gl.glGenBuffers = loader.load("glGenBuffers", "void", "GLsizei", "GLuint*")
   gl.glBindBuffer = loader.load("glBindBuffer", "void", "GLenum", "GLuint")
-  gl.glBufferData = loader.load("glBufferData", "void", "GLenum", "GLint", "const void*", "GLenum")
+  gl.glBufferData = loader.load("glBufferData", "void", "GLenum", "GLsizeiptr", "const void*", "GLenum")
+  gl.glBufferSubData = loader.load("glBufferSubData", "void", "GLenum", "GLintptr", "GLsizeiptr", "const void*")
+  gl.glBindBufferBase = loader.load("glBindBufferBase", "void", "GLenum", "GLuint", "GLuint")
+  gl.glBindBufferRange = loader.load("glBindBufferRange", "void", "GLenum", "GLuint", "GLuint", "GLintptr", "GLsizeiptr")
   gl.glDeleteBuffers = loader.load("glDeleteBuffers", "void", "GLsizei", "const GLuint*")
 
   -- Vertex attribs

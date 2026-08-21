@@ -20,6 +20,14 @@ function terrain.setSeed(seed)
   end
 end
 
+function terrain.refreshGenerationSettings()
+  terrain.SEA_LEVEL = settings.seaLevel or 63
+  terrain.RELIEF_GAIN = settings.reliefGain or 2.4
+  terrain.LOCAL_RELIEF_GAIN = settings.localReliefGain or 2.0
+  macroCache = {}
+  macroCacheCount = 0
+end
+
 local SUPERFLAT_LAYERS = {
   {block = "stone", height = 1},
   {block = "dirt", height = 2},
@@ -208,6 +216,29 @@ local biomeProfiles = {
     fillerBlock = "sand",
     treeSpacing = 16,
     treeChance = 0.0
+  },
+  rockyShore = {
+    name = "Rocky Shore",
+    temperature = 0.5,
+    rainfall = 0.45,
+    minHeight = 0.0,
+    maxHeight = 0.12,
+    topBlock = "gravel",
+    fillerBlock = "stone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  frozenShore = {
+    name = "Frozen Shore",
+    temperature = 0.05,
+    rainfall = 0.35,
+    minHeight = 0.0,
+    maxHeight = 0.12,
+    topBlock = "gravel",
+    fillerBlock = "dirt",
+    treeSpacing = 16,
+    treeChance = 0.0,
+    snow = true
   }
 }
 
@@ -573,8 +604,62 @@ function terrain.biomeProfileAt(x, z)
   return biomeProfiles[biome] or biomeProfiles.plains, biome
 end
 
-local function smoothedBiomeHeight(x, z)
+-- Climate is continuous even when the named biome changes. Biome profiles
+-- influence the regional signal, elevation cools it, and the resulting values
+-- drive snow, frozen water, and shoreline material using the same rules in the
+-- RTS preview and full chunk generator.
+function terrain.environmentAt(x, z, height, sourceBiome)
+  local macro = terrain.macroAt(x, z)
+  sourceBiome = sourceBiome or terrain.biomeAt(x, z)
+  local profile = biomeProfiles[sourceBiome] or biomeProfiles.plains
+  local influence = clamp(settings.biomeClimateInfluence or 0.34, 0.0, 1.0)
+  if sourceBiome == "mountains" or sourceBiome == "ocean" or sourceBiome == "beach" then
+    influence = influence * 0.25
+  end
+
+  local profileTemperature = clamp(profile.temperature or macro.temperature, 0.0, 1.0)
+  local profileRainfall = clamp(profile.rainfall or macro.rainfall, 0.0, 1.0)
+  local temperature = lerp(macro.temperature, profileTemperature, influence)
+  local rainfall = lerp(macro.rainfall, profileRainfall, influence)
+  local elevation = math.max(0.0, height - terrain.SEA_LEVEL)
+  temperature = clamp(temperature - elevation * (settings.elevationCooling or 0.0045), 0.0, 1.0)
+
+  local snowNoise = fbm(x + 4400.0, z - 7100.0, 733, 2, 0.018)
+  local snowThreshold = (settings.snowTemperature or 0.18) + (snowNoise - 0.5) * 0.045
+  local hasSnow = temperature < snowThreshold and (rainfall > 0.10 or temperature < 0.055)
+  local freezeWater = temperature < (settings.freezeTemperature or 0.08)
+
+  local biome = sourceBiome
+  local shorelineWidth = settings.shorelineWidth or 5.0
+  local nearSea = height <= terrain.SEA_LEVEL + shorelineWidth and macro.land > 0.08 and macro.land < 0.98
+  if nearSea and macro.river < 0.45 and macro.lake < 0.50 and sourceBiome ~= "ocean" then
+    local coastalEnergy = macro.mountain * 0.72 + math.abs(macro.localHills - 0.5) * 0.70 +
+      math.abs(macro.surfaceDetail - 0.5) * 0.42
+    if temperature < 0.14 then
+      biome = "frozenShore"
+    elseif coastalEnergy > (settings.rockyShoreThreshold or 0.24) then
+      biome = "rockyShore"
+    else
+      biome = "beach"
+    end
+  end
+
+  return {
+    biome = biome,
+    profile = biomeProfiles[biome] or profile,
+    temperature = temperature,
+    rainfall = rainfall,
+    hasSnow = hasSnow,
+    freezeWater = freezeWater,
+    coast = macro.coast
+  }
+end
+
+local function smoothedBiomeHeight(x, z, fastPreview)
   local centerProfile = terrain.biomeProfileAt(x, z)
+  if fastPreview then
+    return centerProfile.minHeight, centerProfile.maxHeight
+  end
   local totalMin = 0.0
   local totalMax = 0.0
   local totalWeight = 0.0
@@ -596,16 +681,18 @@ local function smoothedBiomeHeight(x, z)
   return totalMin / totalWeight, totalMax / totalWeight
 end
 
-function terrain.heightAt(x, z, maxHeight)
+function terrain.heightAt(x, z, maxHeight, fastPreview)
   local sea = terrain.SEA_LEVEL
   local macro = terrain.macroAt(x, z)
-  local biomeMin, biomeMax = smoothedBiomeHeight(x, z)
+  local biomeMin, biomeMax = smoothedBiomeHeight(x, z, fastPreview)
   local land = macro.land
   local mountainMask = macro.mountain
   local broadHills = macro.broadHills
-  local lowlands = macro.localHills
-  local roughness = macro.surfaceDetail
-  local detail = macro.micro
+  local erosion = clamp(settings.erosionStrength or 0.0, 0.0, 1.0)
+  local fineRelief = 1.0 - erosion * 0.72
+  local lowlands = 0.5 + (macro.localHills - 0.5) * (1.0 - erosion * 0.35)
+  local roughness = 0.5 + (macro.surfaceDetail - 0.5) * fineRelief
+  local detail = 0.5 + (macro.micro - 0.5) * fineRelief
   local ridgeNoise = macro.ridge
 
   local oceanFloor = sea - 34.0 + macro.continent * 28.0 + (broadHills - 0.50) * 8.0 + (roughness - 0.50) * 4.5
@@ -632,17 +719,19 @@ function terrain.heightAt(x, z, maxHeight)
   local biomeLift = biomeMin * 5.5 + biomeMax * 5.0
   local height = continentalBase + plainsAndHills + biomeLift
 
-  local chainHeight = (mountainMask ^ 1.65) * (14.0 + ridgeNoise * ridgeNoise * 23.0)
-  local foothills = edge(mountainMask, 0.08, 0.42) * ridgeNoise * 7.0
+  local mountainSharpness = settings.mountainSharpness or 1.65
+  local mountainErosion = 1.0 - erosion * 0.38
+  local chainHeight = (mountainMask ^ mountainSharpness) * (14.0 + ridgeNoise * ridgeNoise * 23.0) * mountainErosion
+  local foothills = edge(mountainMask, 0.08, 0.42) * ridgeNoise * 7.0 * (1.0 - erosion * 0.18)
   height = height + chainHeight + foothills
   height = lerp(oceanFloor, height, land)
 
   if macro.lake > 0.0 and height > sea - 2.0 then
-    height = lerp(height, sea - 2.0 + (roughness - 0.5) * 1.4, macro.lake * 0.78)
+    height = lerp(height, sea - 2.0 + (roughness - 0.5) * 1.4, macro.lake * (settings.lakeCarveStrength or 0.78))
   end
   if macro.river > 0.0 and height > sea - 3.0 then
     local riverBed = sea - 2.0 + (roughness - 0.5) * 1.2
-    height = lerp(height, riverBed, macro.river * 0.86)
+    height = lerp(height, riverBed, macro.river * (settings.riverCarveStrength or 0.86))
   end
 
   local profile, biome = terrain.biomeProfileAt(x, z)
@@ -668,15 +757,20 @@ function terrain.columnAt(x, z, maxHeight)
   local macro = terrain.macroAt(x, z)
   local height = terrain.heightAt(x, z, maxHeight)
   local profile, biome = terrain.biomeProfileAt(x, z)
+  local environment = terrain.environmentAt(x, z, height, biome)
+  biome = environment.biome
+  profile = environment.profile
   local stoneNoise = fbm(x, z, 41, 2, 1.0 / 16.0)
   local fillerDepth = math.floor(stoneNoise * 2.0 + 2.5 + hash2(x, z, 311) * 0.45)
   local topBlock = profile.topBlock
   local fillerBlock = profile.fillerBlock
 
-  if height <= terrain.SEA_LEVEL and biome ~= "ocean" then
-    biome = "beach"
+  if biome == "beach" then
     topBlock = "sand"
     fillerBlock = "sand"
+  elseif biome == "rockyShore" or biome == "frozenShore" then
+    topBlock = blocks.gravel and "gravel" or "stone"
+    fillerBlock = biome == "rockyShore" and "stone" or "dirt"
   elseif macro.river > 0.45 and height <= terrain.SEA_LEVEL + 1 then
     topBlock = "sand"
     fillerBlock = "sand"
@@ -699,6 +793,10 @@ function terrain.columnAt(x, z, maxHeight)
     lake = macro.lake,
     land = macro.land,
     mountain = macro.mountain,
+    temperature = environment.temperature,
+    rainfall = environment.rainfall,
+    hasSnow = environment.hasSnow,
+    freezeWater = environment.freezeWater,
     topBlock = blockId(topBlock, "grass"),
     fillerBlock = blockId(fillerBlock, "dirt"),
     fillerDepth = math.max(1, fillerDepth)
@@ -780,6 +878,14 @@ local function surfaceBlocksForColumn(column, y)
     topBlock = blocks.sand or topBlock
     fillerBlock = blocks.sand or fillerBlock
     underFillerBlock = blocks.sandstone or blocks.stone
+  elseif column.biome == "rockyShore" then
+    topBlock = blocks.gravel or blocks.stone
+    fillerBlock = blocks.stone
+    underFillerBlock = blocks.stone
+  elseif column.biome == "frozenShore" then
+    topBlock = blocks.gravel or blocks.dirt or blocks.stone
+    fillerBlock = blocks.dirt or blocks.stone
+    underFillerBlock = blocks.stone
   elseif (column.river or 0.0) > 0.45 and y <= terrain.SEA_LEVEL + 1 then
     topBlock = blocks.sand or topBlock
     fillerBlock = blocks.sand or fillerBlock
@@ -827,7 +933,7 @@ local function applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, ma
             depthLeft = column.fillerDepth
             if y >= terrain.SEA_LEVEL - 4 then
               chunk:setBlock(x, y, z, topBlock)
-              if column.profile.snow and y > terrain.SEA_LEVEL + 1 and blocks.snow then
+              if column.hasSnow and y > terrain.SEA_LEVEL and blocks.snow then
                 chunk:setBlock(x, y, z, blocks.snow)
               end
             else
@@ -1408,7 +1514,11 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
         if solid then
           chunk:setBlock(x, y, z, blocks.stone)
         elseif y <= terrain.SEA_LEVEL and waterId then
-          chunk:setBlock(x, y, z, waterId)
+          if y == terrain.SEA_LEVEL and column.freezeWater and blocks.ice then
+            chunk:setBlock(x, y, z, blocks.ice)
+          else
+            chunk:setBlock(x, y, z, waterId)
+          end
         end
       end
 

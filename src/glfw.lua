@@ -52,6 +52,9 @@ local glfw = setmetatable({
 	GLFW_KEY_S = 83,
 	GLFW_KEY_D = 68,
 	GLFW_KEY_F = 70,
+	GLFW_KEY_E = 69,
+	GLFW_KEY_Q = 81,
+	GLFW_KEY_R = 82,
 	GLFW_KEY_1 = 49,
 	GLFW_KEY_2 = 50,
 	GLFW_KEY_3 = 51,
@@ -65,11 +68,13 @@ local glfw = setmetatable({
 	GLFW_KEY_C = 67,
 	GLFW_KEY_ESCAPE = 256,
 	GLFW_KEY_F3 = 292,
+	GLFW_KEY_F4 = 293,
 	GLFW_KEY_F11 = 300,
 	GLFW_KEY_LEFT_SHIFT = 340,
 	GLFW_KEY_LEFT_CONTROL = 341,
 	GLFW_MOUSE_BUTTON_LEFT = 0,
 	GLFW_MOUSE_BUTTON_RIGHT = 1,
+	GLFW_MOUSE_BUTTON_MIDDLE = 2,
 }, { __index = _lib })
 
 return glfw

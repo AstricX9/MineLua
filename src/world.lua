@@ -145,6 +145,18 @@ function World:eachChunk(fn)
   end
 end
 
+-- Developer world-generation preview reset. GPU meshes and queued jobs are
+-- owned by game.lua; this clears only the generated voxel/light state so the
+-- same World instance can be repopulated around the current camera.
+function World:clearGeneratedChunks()
+  self.chunks = {}
+  self.lightDirty = false
+  self.lightRevision = self.lightRevision + 1
+  self.lightingJob = nil
+  self.lightingJobRevision = nil
+  self.lightTouched = {}
+end
+
 function World:markLightDirty()
   self.lightDirty = true
   self.lightRevision = self.lightRevision + 1

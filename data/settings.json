@@ -7,13 +7,13 @@
   },
   "world": {
     "terrainMaxHeight": 127,
-    "chunkRenderRadius": 4,
-    "visualDistance": 192.0
+    "chunkRenderRadius": 8,
+    "visualDistance": 320.0
   },
   "terrainGeneration": {
     "seed": 1,
     "seaLevel": 63,
-    "continentScale": 0.00036,
+    "continentScale": 0.0025,
     "biomeScale": 0.00092,
     "regionScale": 0.00125,
     "mountainScale": 0.00078,
@@ -22,6 +22,12 @@
     "macroWarpScale": 0.00062,
     "macroWarpAmount": 360.0,
     "detailScale": 0.026,
+    "shorelineWidth": 5.0,
+    "rockyShoreThreshold": 0.24,
+    "biomeClimateInfluence": 0.34,
+    "snowTemperature": 0.18,
+    "elevationCooling": 0.0045,
+    "freezeTemperature": 0.08,
     "grassTintStrength": 0.92,
     "treeDensity": 0.78
   },
@@ -33,7 +39,6 @@
     "sunGlare": 0.58
   },
   "water": {
-    "level": 62.65,
-    "radius": 1024.0
+    "level": 62.65
   }
 }

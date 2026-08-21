@@ -52,7 +52,7 @@ local COLORS = {
 
 local function createShader()
   local vertSource = [[
-#version 330 core
+#version 460 core
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aInfo;
 layout (location = 2) in vec3 aColor;
@@ -72,7 +72,7 @@ void main() {
 ]]
 
   local fragSource = [[
-#version 330 core
+#version 460 core
 in vec4 vColor;
 in vec2 vTexCoord;
 in float vUseTexture;
