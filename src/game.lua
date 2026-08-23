@@ -1560,9 +1560,16 @@ function game.startGridWorld(world, playerCamera, terrainMeshes, radius)
   local runtime = GridRuntime.new(gridWorld, {
     radius = radius or 5,
     renderOrigin = world.renderOrigin,
-    upload = function(key, vertices)
+    upload = function(key, vertices, leaves)
       releaseTerrainMesh(terrainMeshes[key])
-      terrainMeshes[key] = #vertices > 0 and uploadTerrainMesh(vertices) or nil
+      local mesh = #vertices > 0 and uploadTerrainMesh(vertices) or nil
+      if leaves and #leaves > 0 then
+        -- The leaf pass reads this off the terrain mesh, so an all-leaf chunk
+        -- still needs a carrier even when it has no opaque geometry of its own.
+        mesh = mesh or {count = 0, vao = nil}
+        mesh.leafMesh = uploadTerrainMesh(leaves)
+      end
+      terrainMeshes[key] = mesh
     end,
     release = function(key)
       releaseTerrainMesh(terrainMeshes[key])

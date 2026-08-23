@@ -78,6 +78,20 @@ end
 
 -- 3. Columns are ordered. Going down a column the ground must start once and
 --    keep going, apart from caves -- no floating soil, no soil under stone.
+-- Decorations sit on top of the ground, so the depth rules below do not apply
+-- to them.
+local decorationIds = {}
+for _, name in ipairs({"tall_grass", "oak_log", "oak_leaves", "spruce_log",
+    "spruce_leaves", "oak_log_x", "oak_log_z"}) do
+  if blocks[name] then decorationIds[blocks[name]] = true end
+end
+
+local oreIds = {}
+for _, name in ipairs({"coal_ore", "iron_ore", "gold_ore", "redstone_ore",
+    "lapis_ore", "diamond_ore", "emerald_ore"}) do
+  if blocks[name] then oreIds[blocks[name]] = true end
+end
+
 local baseLayer = groundChunkLayer * CHUNK
 local checkedColumns, solidColumns = 0, 0
 for row = 0, CHUNK - 1 do
@@ -90,14 +104,18 @@ for row = 0, CHUNK - 1 do
       local id = first:getBlock(column, layer, row)
       local radius = grid:layerCenterRadius(baseLayer + layer)
       local depth = surface - radius
-      if id ~= airId and id ~= blocks.water and id ~= blocks.water_still then
+      if decorationIds[id] then
+        -- Grass, logs and leaves are placed above the surface by design.
+      elseif id ~= airId and id ~= blocks.water and id ~= blocks.water_still then
         sawSolid = true
         solidColumns = solidColumns + 1
         assert(depth >= 0.0,
           string.format("solid blocks only appear at or below the surface (depth %.3f)", depth))
-        -- And the block matches the depth rule, unless a cave removed it.
-        assert(id == terrain.blockForDepth(sample, depth),
-          "a block matches the shared depth-to-block rule")
+        -- And the block matches the depth rule, except where a vein has
+        -- replaced stone with ore.
+        local expected = terrain.blockForDepth(sample, depth)
+        assert(id == expected or (expected == blocks.stone and oreIds[id]),
+          "a block matches the shared depth-to-block rule, or is ore in place of stone")
       elseif sawSolid and id == airId then
         -- Air under solid is allowed only where a cave carved it.
         local dx, dy, dz = grid:columnDirection(
@@ -120,6 +138,38 @@ for i = 1, rounds do
 end
 local perChunk = (clock() - started) * 1000.0 / rounds
 print(string.format("surface chunk: %.1f ms", perChunk))
+
+-- 4c. Ores. Rarity has to be ordered and depth-gated, and the counts have to be
+--     interpreted per 16-cube rather than per 16x128x16 column, which is what
+--     the Cartesian table means.
+local oreNames = {"coal_ore", "iron_ore", "gold_ore", "redstone_ore",
+  "lapis_ore", "diamond_ore", "emerald_ore"}
+local byId, found = {}, {}
+for _, name in ipairs(oreNames) do
+  if blocks[name] then byId[blocks[name]] = name end
+  found[name] = 0
+end
+local oreChunks, oreTotal = 0, 0
+for chunkLayer = groundChunkLayer - 8, groundChunkLayer do
+  local chunk = GridTerrain.fillChunk(grid, face, chunkColumn, chunkRow, chunkLayer, planet,
+    {samples = samples})
+  oreChunks = oreChunks + 1
+  for x = 0, CHUNK - 1 do
+    for y = 0, CHUNK - 1 do
+      for z = 0, CHUNK - 1 do
+        local name = byId[chunk:getBlock(x, y, z)]
+        if name then found[name] = found[name] + 1 oreTotal = oreTotal + 1 end
+      end
+    end
+  end
+end
+print(string.format("ores: %d blocks over %d chunks (%.0f per chunk), coal %d iron %d diamond %d",
+  oreTotal, oreChunks, oreTotal / oreChunks, found.coal_ore, found.iron_ore, found.diamond_ore))
+assert(oreTotal > 0, "the ground contains ore at all")
+assert(found.coal_ore > found.iron_ore, "coal is commoner than iron")
+assert(found.iron_ore > found.diamond_ore, "iron is commoner than diamond")
+assert(oreTotal / oreChunks < 120,
+  string.format("and the density is not absurd (%.0f per chunk)", oreTotal / oreChunks))
 
 -- 5. The point of all of it, measured the same way for both topologies.
 --

@@ -1873,6 +1873,12 @@ end
 
 -- Public wrapper, so a generator that addresses voxels some other way can
 -- carve the same caves rather than growing a second, drifting copy of them.
+-- Deterministic hash, exposed so generators that address voxels differently
+-- can seed themselves from the same source.
+function terrain.hash3(x, y, z, seed)
+  return hash3(x, y, z, seed)
+end
+
 function terrain.caveAt(x, y, z, depthVoxels, planet)
   return sphericalCaveAt(x, y, z, depthVoxels, planet)
 end

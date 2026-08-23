@@ -68,6 +68,8 @@ function GridRuntime:meshChunk(entry)
   local function tintAt(f, c, r)
     return self:tintFor(f, c, r)
   end
+  -- Returns opaque vertices and leaf vertices; leaves are alpha-blended in a
+  -- later pass and must not be mixed into the opaque mesh.
   return GridMesher.meshChunk(self.grid, entry.face, entry.chunkColumn, entry.chunkRow,
     entry.chunkLayer, {
       blockAt = blockAt,
@@ -134,9 +136,9 @@ function GridRuntime:rebuildDirty()
     self.dirty[key] = nil
     local entry = self.world.chunks[key]
     if entry then
-      local vertices = self:meshChunk(entry)
-      self.upload(key, vertices)
-      self.meshed[key] = #vertices > 0
+      local vertices, leaves = self:meshChunk(entry)
+      self.upload(key, vertices, leaves)
+      self.meshed[key] = #vertices > 0 or #leaves > 0
       rebuilt = rebuilt + 1
     else
       if self.meshed[key] then self.release(key) end
@@ -166,9 +168,9 @@ function GridRuntime:update(position)
     self.dirty[key] = nil
     local entry = self.world.chunks[key]
     if entry then
-      local vertices = self:meshChunk(entry)
-      self.upload(key, vertices)
-      self.meshed[key] = #vertices > 0
+      local vertices, leaves = self:meshChunk(entry)
+      self.upload(key, vertices, leaves)
+      self.meshed[key] = #vertices > 0 or #leaves > 0
     elseif self.meshed[key] then
       self.release(key)
       self.meshed[key] = nil
@@ -178,9 +180,9 @@ function GridRuntime:update(position)
   for key, entry in pairs(self.world.chunks) do
     if meshedThisFrame >= self.meshBudget then break end
     if self.meshed[key] == nil then
-      local vertices = self:meshChunk(entry)
-      self.upload(key, vertices)
-      self.meshed[key] = #vertices > 0
+      local vertices, leaves = self:meshChunk(entry)
+      self.upload(key, vertices, leaves)
+      self.meshed[key] = #vertices > 0 or #leaves > 0
       meshedThisFrame = meshedThisFrame + 1
     end
   end

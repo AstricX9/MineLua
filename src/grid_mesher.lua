@@ -74,7 +74,7 @@ local CORNER_ORDER = {1, 2, 3, 3, 4, 1}
 local CORNER_HIGH_U = {false, true, true, false}
 local CORNER_HIGH_V = {true, true, false, false}
 
-local solidLookup, cutoutLookup, leavesLookup, liquidLookup, opaqueLookup
+local solidLookup, cutoutLookup, leavesLookup, liquidLookup, opaqueLookup, crossLookup
 local lookupCount = -1
 
 local function ensureLookups()
@@ -82,13 +82,15 @@ local function ensureLookups()
   for _ in pairs(blocks.list) do count = count + 1 end
   if count == lookupCount then return end
   lookupCount = count
-  solidLookup, cutoutLookup, leavesLookup, liquidLookup, opaqueLookup = {}, {}, {}, {}, {}
+  solidLookup, cutoutLookup, leavesLookup, liquidLookup, opaqueLookup, crossLookup =
+    {}, {}, {}, {}, {}, {}
   for id, def in pairs(blocks.list) do
     local p = def.properties
     solidLookup[id] = (p and p.solid and not p.cutout) or false
     cutoutLookup[id] = (p and p.cutout) or false
     leavesLookup[id] = (p and p.leaves) or false
     liquidLookup[id] = (p and p.liquid) or false
+    crossLookup[id] = (p and p.cross) or false
     -- Only fully opaque blocks occlude: leaves and cutouts must not.
     opaqueLookup[id] = (p and p.solid and not p.cutout and not p.leaves
       and not p.liquid and not p.ice) or false
@@ -171,6 +173,9 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
   local step = options.yieldStep
 
   local vertices, n = {}, 0
+  -- Leaves go to their own array: they are alpha-blended in a later pass, so
+  -- mixing them into the opaque mesh would sort wrong against everything.
+  local leafVertices, leafN = {}, 0
   local half = grid.voxelSizeMeters * 0.5
   local baseColumn = chunkColumn * CHUNK_SIZE
   local baseRow = chunkRow * CHUNK_SIZE
@@ -202,7 +207,49 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
         -- reason and leaves them to the water pass.
         if id and id ~= 0 and not liquidLookup[id] then
           local definition = blocks.list[id]
-          if definition and definition.uvs then
+          if definition and definition.uvs and crossLookup[id] then
+            -- Two quads crossed on the diagonals, standing along the local up.
+            local radius = grid:layerCenterRadius(gridLayer)
+            local cx = center[1] + ux * radius - renderOrigin[1]
+            local cy = center[2] + uy * radius - renderOrigin[2]
+            local cz = center[3] + uz * radius - renderOrigin[3]
+            local uv = definition.uvs.side or definition.uvs.top
+            local colour = (definition.colors and definition.colors.side) or {1, 1, 1}
+            local red, green, blue = colour[1], colour[2], colour[3]
+            if definition.biomeTint and tintAt then
+              local tr, tg, tb = tintAt(gridFace, gridColumn, gridRow)
+              red, green, blue = red * tr, green * tg, blue * tb
+            end
+            local light = lightCurve(SKY_LIGHT_MAX)
+            local halfVoxel = half
+            for blade = 1, 2 do
+              -- The two diagonals of the column/row plane.
+              local ax = (blade == 1 and rx + fx or rx - fx) * 0.7071
+              local ay = (blade == 1 and ry + fy or ry - fy) * 0.7071
+              local az = (blade == 1 and rz + fz or rz - fz) * 0.7071
+              local nx = (blade == 1 and rx - fx or rx + fx) * 0.7071
+              local ny = (blade == 1 and ry - fy or ry + fy) * 0.7071
+              local nz = (blade == 1 and rz - fz or rz + fz) * 0.7071
+              for index = 1, 6 do
+                local corner = CORNER_ORDER[index]
+                local sideways = CORNER_HIGH_U[corner] and 1.0 or -1.0
+                local upward = CORNER_HIGH_V[corner] and -1.0 or 1.0
+                vertices[n + 1] = cx + ax * sideways * halfVoxel + ux * upward * halfVoxel
+                vertices[n + 2] = cy + ay * sideways * halfVoxel + uy * upward * halfVoxel
+                vertices[n + 3] = cz + az * sideways * halfVoxel + uz * upward * halfVoxel
+                vertices[n + 4], vertices[n + 5], vertices[n + 6] = nx, ny, nz
+                vertices[n + 7], vertices[n + 8], vertices[n + 9] = red, green, blue
+                vertices[n + 10] = CORNER_HIGH_U[corner] and uv.u1 or uv.u0
+                vertices[n + 11] = CORNER_HIGH_V[corner] and uv.v1 or uv.v0
+                vertices[n + 12] = MATERIAL_FOLIAGE
+                -- Foliage uses this channel for its anchored height, so wind
+                -- bends the top of a blade and leaves the root still.
+                vertices[n + 13] = CORNER_HIGH_V[corner] and 0.0 or 1.0
+                vertices[n + 14] = light
+                n = n + 14
+              end
+            end
+          elseif definition and definition.uvs then
             local radius = grid:layerCenterRadius(gridLayer)
             local cx = center[1] + ux * radius - renderOrigin[1]
             local cy = center[2] + uy * radius - renderOrigin[2]
@@ -254,6 +301,8 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
                   red, green, blue = red * tintRed, green * tintGreen, blue * tintBlue
                 end
                 local quad = FACE_QUADS[face]
+                local target, targetIndex = vertices, n
+                if material == MATERIAL_LEAVES then target, targetIndex = leafVertices, leafN end
                 -- Face centre is half a voxel out along the face normal.
                 local ox, oy, oz = cx + nx * half, cy + ny * half, cz + nz * half
 
@@ -265,18 +314,25 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
                   local vx = ox + ax * sa * half + bx * sb * half
                   local vy = oy + ay * sa * half + by * sb * half
                   local vz = oz + az * sa * half + bz * sb * half
-                  vertices[n + 1], vertices[n + 2], vertices[n + 3] = vx, vy, vz
-                  vertices[n + 4], vertices[n + 5], vertices[n + 6] = nx, ny, nz
-                  vertices[n + 7], vertices[n + 8], vertices[n + 9] = red, green, blue
-                  vertices[n + 10] = CORNER_HIGH_U[corner] and uv.u1 or uv.u0
-                  vertices[n + 11] = CORNER_HIGH_V[corner] and uv.v1 or uv.v0
-                  vertices[n + 12] = material
+                  target[targetIndex + 1] = vx
+                  target[targetIndex + 2] = vy
+                  target[targetIndex + 3] = vz
+                  target[targetIndex + 4] = nx
+                  target[targetIndex + 5] = ny
+                  target[targetIndex + 6] = nz
+                  target[targetIndex + 7] = red
+                  target[targetIndex + 8] = green
+                  target[targetIndex + 9] = blue
+                  target[targetIndex + 10] = CORNER_HIGH_U[corner] and uv.u1 or uv.u0
+                  target[targetIndex + 11] = CORNER_HIGH_V[corner] and uv.v1 or uv.v0
+                  target[targetIndex + 12] = material
                   -- Spare channel carries AO so unlit ground keeps its corner
                   -- definition instead of flattening to one ambient value.
-                  vertices[n + 13] = ao
-                  vertices[n + 14] = light * ao
-                  n = n + 14
+                  target[targetIndex + 13] = ao
+                  target[targetIndex + 14] = light * ao
+                  targetIndex = targetIndex + 14
                 end
+                if material == MATERIAL_LEAVES then leafN = targetIndex else n = targetIndex end
               end
             end
           end
@@ -287,7 +343,7 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
     end
   end
 
-  return vertices
+  return vertices, leafVertices
 end
 
 GridMesher.CHUNK_SIZE = CHUNK_SIZE
