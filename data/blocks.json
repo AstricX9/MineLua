@@ -30,5 +30,9 @@
   "spruce_leaves",
   "tall_grass",
   "double_grass_lower",
-  "double_grass_upper"
+  "double_grass_upper",
+  "oak_log_x",
+  "oak_log_z",
+  "spruce_log_x",
+  "spruce_log_z"
 ]

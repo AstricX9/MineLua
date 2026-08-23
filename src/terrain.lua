@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local bit = require("bit")
 local blocks = require("blocks")
 local settings = require("graphics_settings").terrainGeneration or {}
 local texture = require("texture")
@@ -15,6 +16,7 @@ function terrain.setSeed(seed)
   local nextSeed = tonumber(seed) or settings.seed or 1
   if terrain.activeSeed ~= nextSeed then
     terrain.activeSeed = nextSeed
+    terrain.refreshSeedSalt()
     macroCache = {}
     macroCacheCount = 0
   end
@@ -261,6 +263,10 @@ terrain.RELIEF_GAIN = settings.reliefGain or 2.4
 -- inside a single render distance. Raise for hillier ground, 1.0 to disable.
 terrain.LOCAL_RELIEF_GAIN = settings.localReliefGain or 2.0
 
+local floor = math.floor
+local abs = math.abs
+local sqrt = math.sqrt
+
 local function clamp(value, minValue, maxValue)
   if value < minValue then
     return minValue
@@ -280,16 +286,41 @@ local function smoothstep(t)
   return t * t * (3.0 - 2.0 * t)
 end
 
+-- Value-noise hashing. The previous implementation ran every lattice corner
+-- through math.sin of a very large argument, which measured 44 ns per call and
+-- made a single 16-cube planet chunk cost 178 ms. Integer mixing on 32-bit
+-- words lowers to a handful of instructions: 6 ns per call, and the output is
+-- closer to uniform (stddev 0.2886 against the ideal 0.2887; the sine hash
+-- drifted). No chunk data is persisted, so changing the hash re-rolls worlds
+-- without seaming anything.
+local band, bxor, rshift, tobit = bit.band, bit.bxor, bit.rshift, bit.tobit
+local HASH_SCALE = 1.0 / 16777216.0
+local seedSalt = (terrain.activeSeed or settings.seed or 1) * 101
+
+function terrain.refreshSeedSalt()
+  seedSalt = (terrain.activeSeed or settings.seed or 1) * 101
+end
+
+local function mix32(h)
+  h = tobit(bxor(h, rshift(h, 15)) * 2246822519)
+  h = tobit(bxor(h, rshift(h, 13)) * 3266489917)
+  return band(bxor(h, rshift(h, 16)), 0x00ffffff) * HASH_SCALE
+end
+
 local function hash2(x, z, seed)
-  seed = seed + (terrain.activeSeed or settings.seed or 1) * 101
-  local n = x * 374761393 + z * 668265263 + seed * 1442695041
-  n = math.sin(n) * 43758.5453123
-  return n - math.floor(n)
+  seed = seed + seedSalt
+  return mix32(bxor(bxor(tobit(x * 374761393), tobit(z * 668265263)), tobit(seed * 1442695041)))
+end
+
+local function hash3(x, y, z, seed)
+  seed = seed + seedSalt
+  return mix32(bxor(bxor(bxor(tobit(x * 374761393), tobit(y * 1442695041)),
+    tobit(z * 668265263)), tobit(seed * 1274126177)))
 end
 
 local function valueNoise(x, z, seed)
-  local x0 = math.floor(x)
-  local z0 = math.floor(z)
+  local x0 = floor(x)
+  local z0 = floor(z)
   local x1 = x0 + 1
   local z1 = z0 + 1
 
@@ -306,29 +337,21 @@ local function valueNoise(x, z, seed)
   return lerp(ix0, ix1, sz)
 end
 
-local function hash3(x, y, z, seed)
-  seed = seed + (terrain.activeSeed or settings.seed or 1) * 101
-  local n = x * 374761393 + y * 1442695041 + z * 668265263 + seed * 1274126177
-  n = math.sin(n) * 43758.5453123
-  return n - math.floor(n)
-end
-
+-- The eight corner reads used to go through a closure created per call, which
+-- allocated once per octave per voxel. They are spelled out instead.
 local function valueNoise3(x, y, z, seed)
-  local x0 = math.floor(x)
-  local y0 = math.floor(y)
-  local z0 = math.floor(z)
+  local x0 = floor(x)
+  local y0 = floor(y)
+  local z0 = floor(z)
+  local x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
   local sx = smoothstep(x - x0)
   local sy = smoothstep(y - y0)
   local sz = smoothstep(z - z0)
 
-  local function sample(dx, dy, dz)
-    return hash3(x0 + dx, y0 + dy, z0 + dz, seed)
-  end
-
-  local x00 = lerp(sample(0, 0, 0), sample(1, 0, 0), sx)
-  local x10 = lerp(sample(0, 1, 0), sample(1, 1, 0), sx)
-  local x01 = lerp(sample(0, 0, 1), sample(1, 0, 1), sx)
-  local x11 = lerp(sample(0, 1, 1), sample(1, 1, 1), sx)
+  local x00 = lerp(hash3(x0, y0, z0, seed), hash3(x1, y0, z0, seed), sx)
+  local x10 = lerp(hash3(x0, y1, z0, seed), hash3(x1, y1, z0, seed), sx)
+  local x01 = lerp(hash3(x0, y0, z1, seed), hash3(x1, y0, z1, seed), sx)
+  local x11 = lerp(hash3(x0, y1, z1, seed), hash3(x1, y1, z1, seed), sx)
   local y0v = lerp(x00, x10, sy)
   local y1v = lerp(x01, x11, sy)
   return lerp(y0v, y1v, sz)
@@ -370,6 +393,17 @@ local function ridged(value)
   return 1.0 - math.abs(value * 2.0 - 1.0)
 end
 
+-- A C1 lower bound: values a full softness above floorValue pass through
+-- unchanged, values a full softness below settle onto it, and the join between
+-- them is a parabola rather than a crease.
+local function softFloor(value, floorValue, softness)
+  local delta = value - floorValue
+  if delta >= softness then return value end
+  if delta <= -softness then return floorValue end
+  local t = (delta + softness) / (2.0 * softness)
+  return floorValue + softness * t * t
+end
+
 local function edge(value, edge0, edge1)
   if edge0 == edge1 then
     return value >= edge1 and 1.0 or 0.0
@@ -386,6 +420,48 @@ end
 local function mountainChain(x, z, seed, scale, angle, stretch)
   local rx, rz = rotated(x, z, angle)
   return ridged(fbm(rx, rz * stretch, seed, 5, scale))
+end
+
+-- Lakes are discrete drainage basins, rather than another thresholded noise
+-- field.  The basin id owns one integer surface elevation, so a lake stays
+-- perfectly level even when it crosses a chunk boundary.  Neighbouring basin
+-- cells can still choose different elevations.
+local function lakeBasinAt(x, z, land, mountain, regionScale)
+  local cellSize = settings.lakeCellSize or 176.0
+  local cellX = math.floor(x / cellSize)
+  local cellZ = math.floor(z / cellSize)
+  local bestMask, bestLevel = 0.0, nil
+
+  for dz = -1, 1 do
+    for dx = -1, 1 do
+      local basinX = cellX + dx
+      local basinZ = cellZ + dz
+      if hash2(basinX, basinZ, 421) < (settings.lakeBasinChance or 0.34) then
+        local centerX = (basinX + 0.18 + hash2(basinX, basinZ, 423) * 0.64) * cellSize
+        local centerZ = (basinZ + 0.18 + hash2(basinX, basinZ, 425) * 0.64) * cellSize
+        local radiusX = 24.0 + hash2(basinX, basinZ, 427) * 34.0
+        local radiusZ = 22.0 + hash2(basinX, basinZ, 429) * 32.0
+        local angle = (hash2(basinX, basinZ, 431) - 0.5) * math.pi
+        local localX, localZ = rotated(x - centerX, z - centerZ, angle)
+        local distance = math.sqrt((localX / radiusX) ^ 2 + (localZ / radiusZ) ^ 2)
+        local shape = 1.0 - smoothstep((distance - 0.68) / 0.32)
+        local mask = shape * edge(land, 0.48, 0.88) * (1.0 - mountain * 0.82)
+
+        if mask > bestMask then
+          -- Sample only broad elevation at the owning basin centre.  This is
+          -- intentionally independent of the per-column terrain height: using
+          -- the latter would make the supposedly level lake tilt and ripple.
+          local regional = fbm(centerX - 14000.0, centerZ + 9300.0, 17, 4, regionScale)
+          local broad = fbm(centerX + 4100.0, centerZ - 3700.0, 19, 4, regionScale * 2.35)
+          local lift = clamp((regional - 0.30) * 22.0 + (broad - 0.50) * 4.0, 3.0, 19.0)
+          bestMask = mask
+          bestLevel = terrain.SEA_LEVEL + math.floor(lift + 0.5)
+        end
+      end
+    end
+  end
+
+  return bestMask, bestLevel
 end
 
 local function macroSignals(x, z)
@@ -426,8 +502,20 @@ local function macroSignals(x, z)
   local riverField = riverBase * 0.82 + riverDetail * 0.18
   local river = edge(riverField, 0.86, 0.98) * edge(land, 0.28, 0.76) * (1.0 - mountain * 0.62)
 
-  local lakeField = fbm(wx - 8300.0, wz + 11800.0, 421, 3, regionScale * 1.55)
-  local lake = edge(0.20 - lakeField, 0.00, 0.09) * edge(land, 0.45, 0.90) * (1.0 - mountain * 0.75)
+  local lake, lakeLevel = lakeBasinAt(x, z, land, mountain, regionScale)
+
+  -- Rivers use a much broader drainage potential than their channel mask.
+  -- Quantising it gives Minecraft-like level reaches with occasional one-block
+  -- falls, while the continental blend brings every channel back down to sea
+  -- level near its outlet.
+  local drainage = fbm(wx - 18600.0, wz + 7400.0, 433, 3, regionScale * 0.34)
+  local inlandLift = clamp(
+    (regionalElevation - 0.28) * 21.0 + (drainage - 0.50) * 5.0,
+    1.0,
+    20.0
+  )
+  local outletBlend = edge(land, 0.32, 0.78)
+  local riverLevel = terrain.SEA_LEVEL + math.floor(lerp(1.0, inlandLift, outletBlend) + 0.5)
 
   local temperatureRaw = fbm(wx + 1200.0, wz - 800.0, 71, 4, biomeScale)
   local rainfallRaw = fbm(wx - 500.0, wz + 900.0, 83, 4, biomeScale * 1.18)
@@ -447,6 +535,8 @@ local function macroSignals(x, z)
     ridge = ridge,
     river = river,
     lake = lake,
+    riverLevel = riverLevel,
+    lakeLevel = lakeLevel,
     temperature = temperature,
     rainfall = rainfall,
     warpX = warpX,
@@ -681,6 +771,32 @@ local function smoothedBiomeHeight(x, z, fastPreview)
   return totalMin / totalWeight, totalMax / totalWeight
 end
 
+local function waterSurfaceForMacro(macro)
+  -- The coast and open ocean retain the global datum. Inland bodies own their
+  -- elevation. A lake keeps ownership through a river intersection so its
+  -- entire connected basin remains exactly level.
+  if macro.land < 0.42 then
+    return terrain.SEA_LEVEL, "ocean", 1.0
+  end
+
+  local lakeStrength = macro.lake or 0.0
+  local riverStrength = macro.river or 0.0
+  local lakeLevel = lakeStrength > 0.075 and macro.lakeLevel or nil
+  local riverLevel = riverStrength > 0.10 and macro.riverLevel or nil
+
+  if lakeLevel then
+    return lakeLevel, "lake", lakeStrength
+  elseif riverLevel then
+    return riverLevel, "river", riverStrength
+  end
+
+  return nil, nil, 0.0
+end
+
+function terrain.waterSurfaceAt(x, z)
+  return waterSurfaceForMacro(terrain.macroAt(x, z))
+end
+
 function terrain.heightAt(x, z, maxHeight, fastPreview)
   local sea = terrain.SEA_LEVEL
   local macro = terrain.macroAt(x, z)
@@ -726,12 +842,13 @@ function terrain.heightAt(x, z, maxHeight, fastPreview)
   height = height + chainHeight + foothills
   height = lerp(oceanFloor, height, land)
 
-  if macro.lake > 0.0 and height > sea - 2.0 then
-    height = lerp(height, sea - 2.0 + (roughness - 0.5) * 1.4, macro.lake * (settings.lakeCarveStrength or 0.78))
-  end
-  if macro.river > 0.0 and height > sea - 3.0 then
-    local riverBed = sea - 2.0 + (roughness - 0.5) * 1.2
-    height = lerp(height, riverBed, macro.river * (settings.riverCarveStrength or 0.86))
+  local localWaterLevel, waterKind, waterStrength = waterSurfaceForMacro(macro)
+  if waterKind == "lake" and height > localWaterLevel - 2.0 then
+    local lakeBed = localWaterLevel - 2.4 + (roughness - 0.5) * 1.1
+    height = lerp(height, lakeBed, waterStrength * (settings.lakeCarveStrength or 0.92))
+  elseif waterKind == "river" and height > localWaterLevel - 2.0 then
+    local riverBed = localWaterLevel - 2.2 + (roughness - 0.5) * 0.8
+    height = lerp(height, riverBed, waterStrength * (settings.riverCarveStrength or 0.94))
   end
 
   local profile, biome = terrain.biomeProfileAt(x, z)
@@ -756,6 +873,8 @@ end
 function terrain.columnAt(x, z, maxHeight)
   local macro = terrain.macroAt(x, z)
   local height = terrain.heightAt(x, z, maxHeight)
+  local waterLevel, waterKind, waterStrength = waterSurfaceForMacro(macro)
+  local hasWater = waterLevel ~= nil and height < waterLevel
   local profile, biome = terrain.biomeProfileAt(x, z)
   local environment = terrain.environmentAt(x, z, height, biome)
   biome = environment.biome
@@ -771,10 +890,10 @@ function terrain.columnAt(x, z, maxHeight)
   elseif biome == "rockyShore" or biome == "frozenShore" then
     topBlock = blocks.gravel and "gravel" or "stone"
     fillerBlock = biome == "rockyShore" and "stone" or "dirt"
-  elseif macro.river > 0.45 and height <= terrain.SEA_LEVEL + 1 then
+  elseif waterKind == "river" and hasWater then
     topBlock = "sand"
     fillerBlock = "sand"
-  elseif macro.lake > 0.50 and height <= terrain.SEA_LEVEL + 1 then
+  elseif waterKind == "lake" and hasWater then
     topBlock = blocks.clay and "clay" or "sand"
     fillerBlock = topBlock
   elseif biome == "ocean" and height > terrain.SEA_LEVEL - 7 then
@@ -791,6 +910,9 @@ function terrain.columnAt(x, z, maxHeight)
     profile = profile,
     river = macro.river,
     lake = macro.lake,
+    waterLevel = hasWater and waterLevel or nil,
+    waterKind = hasWater and waterKind or nil,
+    waterStrength = hasWater and waterStrength or 0.0,
     land = macro.land,
     mountain = macro.mountain,
     temperature = environment.temperature,
@@ -886,11 +1008,11 @@ local function surfaceBlocksForColumn(column, y)
     topBlock = blocks.gravel or blocks.dirt or blocks.stone
     fillerBlock = blocks.dirt or blocks.stone
     underFillerBlock = blocks.stone
-  elseif (column.river or 0.0) > 0.45 and y <= terrain.SEA_LEVEL + 1 then
+  elseif column.waterKind == "river" and column.waterLevel and y < column.waterLevel then
     topBlock = blocks.sand or topBlock
     fillerBlock = blocks.sand or fillerBlock
     underFillerBlock = blocks.sandstone or blocks.stone
-  elseif (column.lake or 0.0) > 0.50 and y <= terrain.SEA_LEVEL + 1 then
+  elseif column.waterKind == "lake" and column.waterLevel and y < column.waterLevel then
     topBlock = blocks.clay or blocks.sand or topBlock
     fillerBlock = topBlock
   elseif column.biome == "iceDesert" then
@@ -931,7 +1053,8 @@ local function applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, ma
         elseif id == blocks.stone then
           if depthLeft == -1 then
             depthLeft = column.fillerDepth
-            if y >= terrain.SEA_LEVEL - 4 then
+            local surfaceDatum = column.waterLevel or terrain.SEA_LEVEL
+            if y >= surfaceDatum - 4 then
               chunk:setBlock(x, y, z, topBlock)
               if column.hasSnow and y > terrain.SEA_LEVEL and blocks.snow then
                 chunk:setBlock(x, y, z, blocks.snow)
@@ -1008,11 +1131,6 @@ local function randomInt(x, z, salt, bound)
   return math.floor(hash2(x, z, salt) * bound)
 end
 
-local function javaDiv(a, b)
-  local value = a / b
-  return value < 0 and math.ceil(value) or math.floor(value)
-end
-
 local function isOpaqueLocal(chunk, lx, y, lz)
   if lx < 0 or lx > 15 or lz < 0 or lz > 15 or y < 0 or y > 255 then
     return false
@@ -1040,193 +1158,226 @@ local function chooseTreeGenerator(profile, x, z)
   return generators[index] or "oak"
 end
 
-local function addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
-  local trunkHeight = generator == "forest" and (randomInt(treeX, treeZ, 257, 3) + 5) or (randomInt(treeX, treeZ, 257, 3) + 4)
+local TREE_DIRECTIONS = {
+  {1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}
+}
 
-  local logId = blocks.oak_log or blocks.oak_planks or blocks.dirt
-  local leavesId = blocks.oak_leaves or blocks.grass
-  local localTreeX = treeX - offsetX
-  local localTreeZ = treeZ - offsetZ
-
-  setLocalBlock(chunk, localTreeX, groundY, localTreeZ, blocks.dirt or logId)
-
-  for y = groundY + trunkHeight - 3, groundY + trunkHeight do
-    local dy = y - (groundY + trunkHeight)
-    local radius = 1 - javaDiv(dy, 2)
-
-    for lx = localTreeX - radius, localTreeX + radius do
-      local dx = lx - localTreeX
-      for lz = localTreeZ - radius, localTreeZ + radius do
-        local dz = lz - localTreeZ
-        local isCorner = math.abs(dx) == radius and math.abs(dz) == radius
-        local keepCorner = randomInt(treeX + dx, treeZ + dz, y + 271, 2) ~= 0 and dy ~= 0
-        if (not isCorner or keepCorner) then
-          setIfNotOpaque(chunk, lx, y, lz, leavesId)
-        end
-      end
-    end
+local function setLogIfReplaceable(chunk, lx, y, lz, logId)
+  local existing = getLocalBlock(chunk, lx, y, lz)
+  if existing == blocks.air or isLeafBlock(existing) then
+    setLocalBlock(chunk, lx, y, lz, logId)
   end
+end
 
-  for y = 0, trunkHeight - 1 do
-    local localY = groundY + 1 + y
-    local existing = getLocalBlock(chunk, localTreeX, localY, localTreeZ)
-    if existing == blocks.air or isLeafBlock(existing) then
-      setLocalBlock(chunk, localTreeX, localY, localTreeZ, logId)
+local function addLogLine(chunk, x0, y0, z0, x1, y1, z1, logId, logXId, logZId)
+  local steps = math.max(math.abs(x1-x0), math.abs(y1-y0), math.abs(z1-z0), 1)
+  local dx, dy, dz = math.abs(x1-x0), math.abs(y1-y0), math.abs(z1-z0)
+  local orientedLogId = logId
+  if dx > dy or dz > dy then
+    orientedLogId = dx >= dz and (logXId or logId) or (logZId or logId)
+  end
+  for step=0,steps do
+    local t=step/steps
+    setLogIfReplaceable(chunk,
+      math.floor(x0+(x1-x0)*t+0.5),
+      math.floor(y0+(y1-y0)*t+0.5),
+      math.floor(z0+(z1-z0)*t+0.5),orientedLogId)
+  end
+end
+
+local BRANCH_SHEATH_DIRECTIONS = {
+  {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+}
+
+local function sheatheLogLine(chunk, x0, y0, z0, x1, y1, z1, leavesId)
+  local steps=math.max(math.abs(x1-x0),math.abs(y1-y0),math.abs(z1-z0),1)
+  for step=0,steps do
+    local t=step/steps
+    local x=math.floor(x0+(x1-x0)*t+0.5)
+    local y=math.floor(y0+(y1-y0)*t+0.5)
+    local z=math.floor(z0+(z1-z0)*t+0.5)
+    for _,direction in ipairs(BRANCH_SHEATH_DIRECTIONS) do
+      setIfNotOpaque(chunk,x+direction[1],y+direction[2],z+direction[3],leavesId)
     end
   end
 end
 
-local function addBigTreeCluster(chunk, centerX, centerY, centerZ, leavesId)
-  for layer = 0, 3 do
-    local y = centerY + layer
-    local radius = (layer == 0 or layer == 3) and 2 or 3
-    local radiusSq = (radius + 0.5) * (radius + 0.5)
-
-    for lx = centerX - radius, centerX + radius do
-      local dx = lx - centerX
-      for lz = centerZ - radius, centerZ + radius do
-        local dz = lz - centerZ
-        if dx * dx + dz * dz <= radiusSq then
-          setIfNotOpaque(chunk, lx, y, lz, leavesId)
+local function addOrganicLeafCluster(chunk, cx, cy, cz, rx, ry, rz, leavesId, seedX, seedZ, salt)
+  for y=math.floor(cy-ry),math.ceil(cy+ry) do
+    local dy=(y-cy)/math.max(ry,0.5)
+    for lx=math.floor(cx-rx),math.ceil(cx+rx) do
+      local dx=(lx-cx)/math.max(rx,0.5)
+      for lz=math.floor(cz-rz),math.ceil(cz+rz) do
+        local dz=(lz-cz)/math.max(rz,0.5)
+        local distance=dx*dx+dy*dy+dz*dz
+        local irregular=0.92+hash2(seedX+lx*3+y,seedZ+lz*5-y,salt)*0.25
+        if distance<=irregular and (distance<0.84 or hash2(seedX+lx,seedZ+lz,salt+y*13)>0.035) then
+          setIfNotOpaque(chunk,lx,y,lz,leavesId)
         end
       end
     end
   end
+end
+
+local function addLeafBridge(chunk, x0, y0, z0, x1, y1, z1, leavesId, seedX, seedZ, salt, radius)
+  local steps=math.max(math.abs(x1-x0),math.abs(y1-y0),math.abs(z1-z0),1)
+  for step=1,steps-1 do
+    local t=step/steps
+    local cx=math.floor(x0+(x1-x0)*t+0.5)
+    local cy=math.floor(y0+(y1-y0)*t+0.5)+1
+    local cz=math.floor(z0+(z1-z0)*t+0.5)
+    addOrganicLeafCluster(chunk,cx,cy,cz,radius,1.05,radius,leavesId,seedX,seedZ,salt+step*17)
+  end
+end
+
+local function addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
+  local trunkHeight=(generator=="forest" and 6 or 5)+randomInt(treeX,treeZ,257,3)
+  local logId = blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local logXId = blocks.oak_log_x or logId
+  local logZId = blocks.oak_log_z or logId
+  local leavesId = blocks.oak_leaves or blocks.grass
+  local localTreeX = treeX - offsetX
+  local localTreeZ = treeZ - offsetZ
+  setLocalBlock(chunk, localTreeX, groundY, localTreeZ, blocks.dirt or logId)
+  local bendIndex=randomInt(treeX,treeZ,259,8)+1
+  local bend=TREE_DIRECTIONS[bendIndex]
+  local bendStart=trunkHeight-2
+  local topX,topZ=localTreeX,localTreeZ
+  for level=1,trunkHeight do
+    if level>bendStart and generator=="forest" then
+      topX=localTreeX+math.floor(bend[1]*(level-bendStart)/2+0.5)
+      topZ=localTreeZ+math.floor(bend[2]*(level-bendStart)/2+0.5)
+    end
+    setLogIfReplaceable(chunk,topX,groundY+level,topZ,logId)
+  end
+
+  local topY=groundY+trunkHeight
+  addOrganicLeafCluster(chunk,topX,topY,topZ,2.5,2.0,2.5,leavesId,treeX,treeZ,271)
+  addOrganicLeafCluster(chunk,topX,topY+1,topZ,1.7,1.35,1.7,leavesId,treeX,treeZ,273)
+
+  local branchCount=2+randomInt(treeX,treeZ,275,3)
+  local directionStart=randomInt(treeX,treeZ,277,8)
+  for branch=1,branchCount do
+    local direction=TREE_DIRECTIONS[(directionStart+(branch-1)*2)%8+1]
+    local reach=2+randomInt(treeX+branch,treeZ-branch,279,2)
+    local startY=topY-2+((branch-1)%2)
+    local endX=topX+direction[1]*reach
+    local endZ=topZ+direction[2]*reach
+    local endY=startY+1+randomInt(treeX-branch,treeZ+branch,281,2)
+    addLogLine(chunk,topX,startY,topZ,endX,endY,endZ,logId,logXId,logZId)
+    sheatheLogLine(chunk,topX,startY,topZ,endX,endY,endZ,leavesId)
+    addLeafBridge(chunk,topX,startY,topZ,endX,endY,endZ,leavesId,treeX,treeZ,283+branch*29,1.35)
+    addOrganicLeafCluster(chunk,endX,endY+1,endZ,2.05,1.60,2.05,leavesId,treeX,treeZ,283+branch*7)
+  end
+end
+
+local function addBigTreeCluster(chunk, centerX, centerY, centerZ, leavesId, treeX, treeZ)
+  -- Seed canopy irregularity from world coordinates. Local chunk coordinates
+  -- change for the same tree when it is rebuilt by a neighbouring chunk.
+  addOrganicLeafCluster(chunk,centerX,centerY+1,centerZ,3.65,2.35,3.65,leavesId,treeX,treeZ,337+centerY)
 end
 
 local function addBigTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  local heightLimit = randomInt(treeX, treeZ, 263, 12) + 5
-  local trunkHeight = math.floor(heightLimit * 0.618)
-  if trunkHeight >= heightLimit then
-    trunkHeight = heightLimit - 1
-  end
-
+  local heightLimit=11+randomInt(treeX,treeZ,263,6)
+  local trunkHeight=heightLimit-2
   local logId = blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local logXId = blocks.oak_log_x or logId
+  local logZId = blocks.oak_log_z or logId
   local leavesId = blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
-  local crownBase = groundY + heightLimit - 4
-
+  local crownBase=groundY+heightLimit-3
   setLocalBlock(chunk, localTreeX, groundY, localTreeZ, blocks.dirt or logId)
 
-  addBigTreeCluster(chunk, localTreeX, crownBase, localTreeZ, leavesId)
-
-  local branchCount = 2 + randomInt(treeX, treeZ, 267, 3)
-  for branch = 1, branchCount do
-    local angleIndex = randomInt(treeX + branch, treeZ - branch, 269, 8)
-    local dx = ({1, 1, 0, -1, -1, -1, 0, 1})[angleIndex + 1]
-    local dz = ({0, 1, 1, 1, 0, -1, -1, -1})[angleIndex + 1]
-    local reach = 2 + randomInt(treeX + branch, treeZ + branch, 273, 2)
-    local clusterX = localTreeX + dx * reach
-    local clusterZ = localTreeZ + dz * reach
-    local clusterY = crownBase - 1 - randomInt(treeX - branch, treeZ + branch, 277, 2)
-    addBigTreeCluster(chunk, clusterX, clusterY, clusterZ, leavesId)
-
-    for step = 1, reach do
-      local bx = localTreeX + dx * step
-      local bz = localTreeZ + dz * step
-      local by = clusterY - 1 + math.floor((step / reach) * 2)
-      local existing = getLocalBlock(chunk, bx, by, bz)
-      if existing == blocks.air or isLeafBlock(existing) then
-        setLocalBlock(chunk, bx, by, bz, logId)
-      end
+  local broadTrunk=heightLimit>=16
+  for level=1,trunkHeight do
+    setLogIfReplaceable(chunk,localTreeX,groundY+level,localTreeZ,logId)
+    if broadTrunk and level<trunkHeight-4 then
+      setLogIfReplaceable(chunk,localTreeX+1,groundY+level,localTreeZ,logId)
+      if level<trunkHeight-7 then setLogIfReplaceable(chunk,localTreeX,groundY+level,localTreeZ+1,logId) end
     end
   end
+  addBigTreeCluster(chunk,localTreeX,crownBase,localTreeZ,leavesId,treeX,treeZ)
+  addOrganicLeafCluster(chunk,localTreeX,crownBase+3,localTreeZ,2.3,2.0,2.3,leavesId,treeX,treeZ,347)
 
-  for y = 0, trunkHeight do
-    local localY = groundY + 1 + y
-    local existing = getLocalBlock(chunk, localTreeX, localY, localTreeZ)
-    if existing == blocks.air or isLeafBlock(existing) then
-      setLocalBlock(chunk, localTreeX, localY, localTreeZ, logId)
+  local branchCount=6+randomInt(treeX,treeZ,267,3)
+  local startDirection=randomInt(treeX,treeZ,269,8)
+  for branch=1,branchCount do
+    local direction=TREE_DIRECTIONS[(startDirection+branch*3)%8+1]
+    local tier=(branch-1)%3
+    local reach=3+randomInt(treeX+branch,treeZ-branch,273,3)
+    local startY=crownBase-4+tier*2
+    local endX=localTreeX+direction[1]*reach
+    local endZ=localTreeZ+direction[2]*reach
+    local endY=startY+1+randomInt(treeX-branch,treeZ+branch,277,3)
+    addLogLine(chunk,localTreeX,startY,localTreeZ,endX,endY,endZ,logId,logXId,logZId)
+    sheatheLogLine(chunk,localTreeX,startY,localTreeZ,endX,endY,endZ,leavesId)
+    addLeafBridge(chunk,localTreeX,startY,localTreeZ,endX,endY,endZ,leavesId,treeX,treeZ,359+branch*31,1.55)
+    addOrganicLeafCluster(chunk,endX,endY+1,endZ,2.6,1.85,2.6,leavesId,treeX,treeZ,359+branch*11)
+    if branch%2==0 then
+      local side=TREE_DIRECTIONS[(startDirection+branch*3+1)%8+1]
+      local splitX=endX+side[1]*2 local splitZ=endZ+side[2]*2
+      addLogLine(chunk,endX,endY,endZ,splitX,endY+1,splitZ,logId,logXId,logZId)
+      sheatheLogLine(chunk,endX,endY,endZ,splitX,endY+1,splitZ,leavesId)
+      addLeafBridge(chunk,endX,endY,endZ,splitX,endY+1,splitZ,leavesId,treeX,treeZ,401+branch*37,1.25)
+      addOrganicLeafCluster(chunk,splitX,endY+2,splitZ,1.9,1.45,1.9,leavesId,treeX,treeZ,401+branch*13)
     end
   end
 end
 
-local function addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  local height = randomInt(treeX, treeZ, 281, 5) + 7
-  local trunkBareHeight = height - randomInt(treeX, treeZ, 283, 2) - 3
-  local leafHeight = height - trunkBareHeight
-  local maxRadius = 1 + randomInt(treeX, treeZ, 287, leafHeight + 1)
+local function addSpruceTree(chunk,offsetX,offsetZ,treeX,treeZ,groundY,broad)
+  local height=(broad and 10 or 12)+randomInt(treeX,treeZ,281,broad and 5 or 6)
+  local bareHeight=(broad and 3 or 5)+randomInt(treeX,treeZ,283,3)
+  local maxRadius=(broad and 4 or 3)+randomInt(treeX,treeZ,287,2)
   local logId = blocks.spruce_log or blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local logXId = blocks.spruce_log_x or logId
+  local logZId = blocks.spruce_log_z or logId
   local leavesId = blocks.spruce_leaves or blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
-
   setLocalBlock(chunk, localTreeX, groundY, localTreeZ, blocks.dirt or logId)
+  for level=1,height do setLogIfReplaceable(chunk,localTreeX,groundY+level,localTreeZ,logId) end
 
-  local radius = 0
-  for y = groundY + height, groundY + trunkBareHeight, -1 do
-    for lx = localTreeX - radius, localTreeX + radius do
-      local dx = lx - localTreeX
-      for lz = localTreeZ - radius, localTreeZ + radius do
-        local dz = lz - localTreeZ
-        if (math.abs(dx) ~= radius or math.abs(dz) ~= radius or radius <= 0) then
-          setIfNotOpaque(chunk, lx, y, lz, leavesId)
+  local crownBottom=groundY+bareHeight
+  local crownTop=groundY+height
+  for y=crownBottom,crownTop do
+    local fromTop=crownTop-y
+    local envelope=math.min(maxRadius,1+math.floor(fromTop*(broad and 0.46 or 0.36)))
+    local tier=fromTop%3
+    local radius=math.max(0,envelope-(tier==2 and 1 or 0))
+    if fromTop<=1 then radius=fromTop end
+    for lx=localTreeX-radius,localTreeX+radius do
+      local dx=lx-localTreeX
+      for lz=localTreeZ-radius,localTreeZ+radius do
+        local dz=lz-localTreeZ
+        local distance=dx*dx+dz*dz
+        local limit=(radius+0.35)*(radius+0.35)
+        local noise=hash2(treeX+dx*7+y,treeZ+dz*11-y,313)
+        if distance<=limit and (distance<radius*radius*0.55 or noise>0.12) then
+          setIfNotOpaque(chunk,lx,y,lz,leavesId)
         end
       end
     end
 
-    if radius >= 1 and y == groundY + trunkBareHeight + 1 then
-      radius = radius - 1
-    elseif radius < maxRadius then
-      radius = radius + 1
+    if tier==0 and radius>=2 then
+      local rotation=randomInt(treeX+y,treeZ-y,317,2)
+      for branch=0,3 do
+        local direction=TREE_DIRECTIONS[((branch*2+rotation)%8)+1]
+        local reach=math.max(1,radius-1)
+        addLogLine(chunk,localTreeX,y,localTreeZ,localTreeX+direction[1]*reach,y,localTreeZ+direction[2]*reach,logId,logXId,logZId)
+        sheatheLogLine(chunk,localTreeX,y,localTreeZ,localTreeX+direction[1]*reach,y,localTreeZ+direction[2]*reach,leavesId)
+      end
     end
   end
-
-  for y = 0, height - 2 do
-    local localY = groundY + 1 + y
-    local existing = getLocalBlock(chunk, localTreeX, localY, localTreeZ)
-    if existing == blocks.air or isLeafBlock(existing) then
-      setLocalBlock(chunk, localTreeX, localY, localTreeZ, logId)
-    end
-  end
+  addOrganicLeafCluster(chunk,localTreeX,crownTop,localTreeZ,1.15,1.8,1.15,leavesId,treeX,treeZ,331)
 end
 
-local function addTaiga2Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  local height = randomInt(treeX, treeZ, 293, 4) + 6
-  local leafStart = 1 + randomInt(treeX, treeZ, 307, 2)
-  local leafLayers = height - leafStart
-  local maxRadius = 2 + randomInt(treeX, treeZ, 311, 2)
-  local logId = blocks.spruce_log or blocks.oak_log or blocks.oak_planks or blocks.dirt
-  local leavesId = blocks.spruce_leaves or blocks.oak_leaves or blocks.grass
-  local localTreeX = treeX - offsetX
-  local localTreeZ = treeZ - offsetZ
+local function addTaiga1Tree(chunk,offsetX,offsetZ,treeX,treeZ,groundY)
+  addSpruceTree(chunk,offsetX,offsetZ,treeX,treeZ,groundY,false)
+end
 
-  setLocalBlock(chunk, localTreeX, groundY, localTreeZ, blocks.dirt or logId)
-
-  local radius = randomInt(treeX, treeZ, 313, 2)
-  local radiusTarget = 1
-  local previousTarget = 0
-
-  for layer = 0, leafLayers do
-    local y = groundY + height - layer
-    for lx = localTreeX - radius, localTreeX + radius do
-      local dx = lx - localTreeX
-      for lz = localTreeZ - radius, localTreeZ + radius do
-        local dz = lz - localTreeZ
-        if (math.abs(dx) ~= radius or math.abs(dz) ~= radius or radius <= 0) then
-          setIfNotOpaque(chunk, lx, y, lz, leavesId)
-        end
-      end
-    end
-
-    if radius >= radiusTarget then
-      radius = previousTarget
-      previousTarget = 1
-      radiusTarget = math.min(radiusTarget + 1, maxRadius)
-    else
-      radius = radius + 1
-    end
-  end
-
-  local missingTop = randomInt(treeX, treeZ, 317, 3)
-  for y = 0, height - missingTop - 1 do
-    local localY = groundY + 1 + y
-    local existing = getLocalBlock(chunk, localTreeX, localY, localTreeZ)
-    if existing == blocks.air or isLeafBlock(existing) then
-      setLocalBlock(chunk, localTreeX, localY, localTreeZ, logId)
-    end
-  end
+local function addTaiga2Tree(chunk,offsetX,offsetZ,treeX,treeZ,groundY)
+  addSpruceTree(chunk,offsetX,offsetZ,treeX,treeZ,groundY,true)
 end
 
 local function addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, biome)
@@ -1251,8 +1402,10 @@ local foliageProfiles = {
   shrubland = {grass = 0.28, doubleGrass = 0.020},
   plains = {grass = 0.44, doubleGrass = 0.048},
   forest = {grass = 0.32, doubleGrass = 0.030},
-  taiga = {grass = 0.16, doubleGrass = 0.006},
-  mountains = {grass = 0.12, doubleGrass = 0.006}
+  -- Temperate taiga supports a continuous grassy understory. The old 0.16
+  -- baseline combined with low patch noise could leave entire green hills bare.
+  taiga = {grass = 0.34, doubleGrass = 0.020},
+  mountains = {grass = 0.18, doubleGrass = 0.010}
 }
 
 local function isPlantAir(id)
@@ -1286,10 +1439,17 @@ local function populateGrassFoliage(chunk, offsetX, offsetZ, width, depth, maxHe
       if foliage then
         local groundY, groundId = surfaceYForFoliage(chunk, x, z, maxHeight)
         if groundY and groundId == blocks.grass and groundY + 1 <= maxHeight and isPlantAir(chunk:getBlock(x, groundY + 1, z)) then
-          local waterClearance = 1.0 - clamp(math.max(column.river or 0.0, column.lake or 0.0) * 1.7, 0.0, 1.0)
+          -- The macro river/lake fields remain broad around coastal terrain and
+          -- used to erase vegetation even when the final surface was dry grass.
+          -- Block/material checks already exclude water and sand, so wetness is
+          -- only a mild shoreline bias here, never a zero-density veto.
+          local wetness = clamp(math.max(column.river or 0.0, column.lake or 0.0), 0.0, 1.0)
+          local waterClearance = lerp(1.0, 0.72, wetness)
           local patchNoise = fbm(worldX + 2600.0, worldZ - 1300.0, 887, 2, 0.055)
           local meadowNoise = fbm(worldX - 9800.0, worldZ + 4300.0, 889, 3, 0.0065)
-          local density = foliage.grass * lerp(0.35, 1.45, patchNoise) * lerp(0.65, 1.22, meadowNoise) * waterClearance
+          local density = foliage.grass * (settings.grassDensity or 1.35)
+            * lerp(0.72, 1.35, patchNoise) * lerp(0.82, 1.12, meadowNoise) * waterClearance
+          density = math.min(density, 0.92)
           if hash2(worldX, worldZ, 881) < density then
             if doubleLowerId and doubleUpperId and groundY + 2 <= maxHeight and isPlantAir(chunk:getBlock(x, groundY + 2, z)) and hash2(worldX, worldZ, 883) < foliage.doubleGrass then
               chunk:setBlock(x, groundY + 1, z, doubleLowerId)
@@ -1472,6 +1632,284 @@ local function populateOres(chunk, offsetX, offsetZ)
   end
 end
 
+-- Planet terrain is sampled directly in 3D from the unit radial direction.
+-- None of these signals use longitude/latitude, so there is no meridian seam
+-- and no special polar case. Frequencies are expressed as approximate surface
+-- wavelengths by scaling the unit vector with radius / wavelength.
+local function sphericalFbm(direction, wavelengthMeters, seed, octaves, planet)
+  local scale = planet.radiusMeters / wavelengthMeters
+  return fbm3(direction[1] * scale, direction[2] * scale, direction[3] * scale, seed, octaves, 1.0)
+end
+
+-- fbm3 averages its octaves, so its output clusters hard around 0.5 instead of
+-- filling [0, 1]. Measured standard deviation by octave count, over 20k
+-- directions:
+local FBM_SIGMA = {0.1857, 0.1364, 0.1217, 0.1131, 0.1106, 0.1079}
+
+-- A signed signal normalised to roughly unit standard deviation, so an
+-- amplitude written in metres below is the metres it actually delivers. The
+-- clamp only bites on the far tail, about four sigma out.
+local function sphericalSigned(direction, wavelengthMeters, seed, octaves, planet)
+  local sigma = FBM_SIGMA[octaves] or FBM_SIGMA[#FBM_SIGMA]
+  return clamp((sphericalFbm(direction, wavelengthMeters, seed, octaves, planet) - 0.5) / sigma, -4.0, 4.0)
+end
+
+local function sphericalBiome(temperature, rainfall, mountain, land)
+  if land < 0.40 then return "ocean" end
+  if mountain > 0.68 then return "mountains" end
+  if temperature < 0.12 then return rainfall > 0.30 and "taiga" or "tundra" end
+  if temperature > 0.78 and rainfall < 0.20 then return "desert" end
+  if rainfall > 0.72 then return temperature > 0.72 and "rainforest" or "forest" end
+  if rainfall < 0.30 then return temperature > 0.62 and "savanna" or "shrubland" end
+  return rainfall > 0.52 and "forest" or "plains"
+end
+
+-- The elevation stack runs from continent width down to a wavelength of a few
+-- voxels. The short end is the whole point: the loaded world is a ball of about
+-- 96 m radius, so anything with a wavelength above a couple of kilometres is a
+-- constant tilt from inside it. Measured before this stack existed, a 200 m
+-- walk changed elevation by 0.9 m, which is why the ground read as a plane.
+function terrain.surfaceAtDirection(direction, planet)
+  local reliefGain = (terrain.RELIEF_GAIN or 2.4) / 2.4
+  local localGain = (terrain.LOCAL_RELIEF_GAIN or 2.0) / 2.0
+
+  local continent = sphericalSigned(direction, 2400000.0, 1103, 5, planet)
+  local continentDetail = sphericalSigned(direction, 520000.0, 1117, 4, planet)
+  local regional = sphericalSigned(direction, 62000.0, 1129, 4, planet)
+  local upland = sphericalSigned(direction, 9200.0, 1289, 4, planet)
+  local hills = sphericalSigned(direction, 1500.0, 1151, 4, planet)
+  local knolls = sphericalSigned(direction, 430.0, 1301, 4, planet)
+  local detail = sphericalSigned(direction, 115.0, 1163, 3, planet)
+  local micro = sphericalSigned(direction, 36.0, 1307, 2, planet)
+  local grain = sphericalSigned(direction, 14.0, 1319, 2, planet)
+  local ridgeSignal = sphericalFbm(direction, 26000.0, 1171, 5, planet)
+  local ridge = ridged(ridgeSignal)
+  ridge = ridge * ridge
+
+  local land = smoothstep(continent * 0.62 + continentDetail * 0.24 + 0.42)
+  local landCore = smoothstep((land - 0.45) / 0.50)
+  local mountainMask = smoothstep(ridge * (1.35 + regional * 0.45) - 0.42) * land
+  local mountain = mountainMask
+
+  -- Ruggedness decides whether the metre scale reads as prairie or as broken
+  -- ground. Without it every biome gets identical roughness and the world is
+  -- uniformly lumpy, which is as characterless as uniformly flat.
+  local rugged = clamp(0.30 + mountainMask * 1.15 + smoothstep(upland * 0.8 + 0.5) * 0.55, 0.22, 2.0)
+
+  -- The last two terms are what stop a gentle dome from voxelising into
+  -- concentric contour rings. On a 1:20 slope 1.7 m of relief displaces a
+  -- contour line by thirty metres, which turns the terraces into irregular
+  -- patches instead of a wedding cake.
+  local localRelief = (hills * 15.0 + knolls * 7.2 + detail * 2.3 + micro * 1.7 + grain * 0.6)
+    * rugged * localGain
+
+  local oceanFloor = (-165.0 + regional * 34.0 + upland * 12.0) * reliefGain + localRelief * 0.35
+  -- The regional and upland terms are symmetric, so on their own they sink a
+  -- fair share of every continent below sea level. softFloor lifts only the
+  -- deep tail, turning a would-be hole into a broad low plain and leaving
+  -- anything already above the datum untouched.
+  local landBase = softFloor((8.0 + landCore * 38.0 + regional * 24.0 + upland * 15.0) * reliefGain, 1.5, 20.0)
+  local peaks = mountainMask * mountainMask * (90.0 + ridge * 150.0) * reliefGain
+  local landHeight = landBase + peaks + localRelief
+
+  -- The shore is a separate, sharper blend than the continental mask so that
+  -- beaches stay narrow instead of the coast being a hundred-kilometre ramp.
+  local shore = smoothstep((land - 0.34) / 0.14)
+  local elevationMeters = lerp(oceanFloor, landHeight, shore)
+  elevationMeters = clamp(elevationMeters, planet.minTerrainElevationMeters, planet.maxTerrainElevationMeters)
+
+  -- Inland water is owned by a local radial level.  Quantising the very
+  -- low-frequency level field keeps each basin effectively level while the
+  -- water surface itself remains a true sphere concentric with the planet.
+  -- Across a lake-sized footprint Earth curvature is only millimetres, which
+  -- is exactly the visually-flat/local-but-globally-spherical behaviour wanted.
+  local lakeNoise = sphericalFbm(direction, 26000.0, 1181, 4, planet)
+  local lakeLevelNoise = sphericalFbm(direction, 310000.0, 1187, 3, planet)
+  local lakeLevelMeters = 6.0 + floor(lakeLevelNoise * 8.0) * 4.0
+  local inland = smoothstep((land - 0.58) / 0.18)
+  local heightFit = 1.0 - smoothstep((abs(elevationMeters - lakeLevelMeters) - 9.0) / 18.0)
+  local lakeStrength = smoothstep((lakeNoise - 0.70) / 0.13) * inland * heightFit * (1.0 - mountain)
+  local waterKind, waterSurfaceRadiusVoxels
+  if lakeStrength > 0.08 then
+    elevationMeters = lerp(elevationMeters, lakeLevelMeters - 3.2, smoothstep(lakeStrength) * 0.94)
+    waterKind = "lake"
+    waterSurfaceRadiusVoxels = planet.radiusVoxels + lakeLevelMeters / planet.voxelSizeMeters
+  end
+
+  local latitudeTemperature = 1.0 - abs(direction[2])
+  local climateNoise = sphericalFbm(direction, 720000.0, 1193, 4, planet)
+  local rainfallNoise = sphericalFbm(direction, 510000.0, 1201, 4, planet)
+  -- Cooling with height is per metre, so it has to be retuned whenever the
+  -- elevation range moves. At 0.0025 the new peaks came out 0.75 colder, which
+  -- made everything above 400 m arctic.
+  local temperature = clamp(latitudeTemperature * 0.78 + climateNoise * 0.38 - math.max(0.0, elevationMeters) * 0.0009, 0.0, 1.0)
+  local rainfall = clamp(rainfallNoise * 0.88 + sphericalFbm(direction, 92000.0, 1213, 3, planet) * 0.22 - 0.05, 0.0, 1.0)
+  local biome = sphericalBiome(temperature, rainfall, mountain, land)
+  if land >= 0.36 and land < 0.48 and elevationMeters < 5.0 then
+    biome = temperature < 0.16 and "frozenShore" or "beach"
+  end
+
+  return {
+    elevationMeters = elevationMeters,
+    surfaceRadiusVoxels = planet.radiusVoxels + elevationMeters / planet.voxelSizeMeters,
+    biome = biome,
+    profile = biomeProfiles[biome] or biomeProfiles.plains,
+    temperature = temperature,
+    rainfall = rainfall,
+    land = land,
+    mountain = mountain,
+    ruggedness = rugged,
+    lake = lakeStrength,
+    waterKind = waterKind,
+    waterLevelMeters = waterKind and lakeLevelMeters or planet.seaLevelOffsetMeters,
+    waterSurfaceRadiusVoxels = waterSurfaceRadiusVoxels,
+    hasSnow = temperature < 0.15 and elevationMeters > planet.seaLevelOffsetMeters
+  }
+end
+
+function terrain.surfaceAtPosition(x, y, z, planet)
+  local rx, ry, rz = x - planet.center[1], y - planet.center[2], z - planet.center[3]
+  local distance = math.sqrt(rx * rx + ry * ry + rz * rz)
+  if distance == 0.0 then
+    return terrain.surfaceAtDirection({0.0, 1.0, 0.0}, planet), 0.0, {0.0, 1.0, 0.0}
+  end
+  local direction = {rx / distance, ry / distance, rz / distance}
+  return terrain.surfaceAtDirection(direction, planet), distance, direction
+end
+
+function terrain.biomeAtPosition(x, y, z, planet)
+  local sample = terrain.surfaceAtPosition(x, y, z, planet)
+  return sample.biome
+end
+
+function terrain.grassColorAtPosition(x, y, z, planet)
+  local sample = terrain.surfaceAtPosition(x, y, z, planet)
+  return sampleGrassColor(sample.temperature, sample.rainfall)
+end
+
+local function sphericalSurfaceBlocks(sample)
+  local profile = sample.profile or biomeProfiles.plains
+  local top = blocks[profile.topBlock] or blocks.grass or blocks.stone
+  local filler = blocks[profile.fillerBlock] or blocks.dirt or blocks.stone
+  local under = blocks.stone
+  if sample.biome == "ocean" or sample.biome == "beach" or sample.biome == "desert" then
+    top = blocks.sand or top
+    filler = blocks.sand or filler
+    under = blocks.sandstone or blocks.stone
+  elseif sample.biome == "rockyShore" or sample.biome == "frozenShore" then
+    top = blocks.gravel or blocks.stone
+    filler = sample.biome == "rockyShore" and blocks.stone or (blocks.dirt or blocks.stone)
+  end
+  return top, filler, under
+end
+
+local function sphericalCaveAt(x, y, z, depthVoxels, planet)
+  if depthVoxels < 5.0 or depthVoxels > planet.generatedInteriorDepthMeters / planet.voxelSizeMeters then
+    return false
+  end
+  local large = fbm3(x, y, z, 1231, 3, 0.010)
+  local tunnel = fbm3(x + 3100.0, y - 1700.0, z + 730.0, 1249, 3, 0.028)
+  local detail = fbm3(x - 910.0, y + 2400.0, z - 1800.0, 1259, 2, 0.061)
+  local threshold = depthVoxels < 16.0 and 0.78 or 0.70
+  return large * 0.42 + tunnel * 0.43 + detail * 0.15 > threshold
+end
+
+local function decoratePlanetChunk(chunk, offsetX, offsetY, offsetZ, planet)
+  local grassId = blocks.tall_grass
+  local logId = blocks.oak_log or blocks.spruce_log
+  local leavesId = blocks.oak_leaves or blocks.spruce_leaves
+  if not grassId and not (logId and leavesId) then return end
+
+  local function inChunk(x, y, z)
+    return x >= 0 and x < 16 and y >= 0 and y < 16 and z >= 0 and z < 16
+  end
+
+  for x = 0, 15 do
+    for y = 0, 15 do
+      for z = 0, 15 do
+        local id = chunk:getBlock(x, y, z)
+        if id == blocks.grass or id == blocks.sand or id == blocks.gravel then
+          local wx, wy, wz = offsetX + x + 0.5, offsetY + y + 0.5, offsetZ + z + 0.5
+          local ux, uy, uz = planet:dominantUpStep({wx, wy, wz})
+          local orientedLogId=logId
+          if ux~=0 then orientedLogId=blocks.oak_log_x or blocks.spruce_log_x or logId
+          elseif uz~=0 then orientedLogId=blocks.oak_log_z or blocks.spruce_log_z or logId end
+          local nx, ny, nz = x + ux, y + uy, z + uz
+          if inChunk(nx, ny, nz) and chunk:getBlock(nx, ny, nz) == (blocks.air or 0) then
+            local rootHash = hash3(offsetX + x, offsetY + y, offsetZ + z, 1277)
+            local sample = terrain.surfaceAtPosition(wx, wy, wz, planet)
+            local wooded = sample.biome == "forest" or sample.biome == "rainforest" or sample.biome == "taiga"
+            if grassId and id == blocks.grass and rootHash < 0.075 then
+              chunk:setBlock(nx, ny, nz, grassId)
+            elseif wooded and logId and leavesId and rootHash > 0.9975 then
+              local height = 4 + math.floor(hash3(offsetX + x, offsetY + y, offsetZ + z, 1283) * 3)
+              local topX, topY, topZ = nx, ny, nz
+              local fits = true
+              for level = 0, height - 1 do
+                local tx, ty, tz = nx + ux * level, ny + uy * level, nz + uz * level
+                if not inChunk(tx, ty, tz) then fits = false break end
+              end
+              if fits then
+                for level = 0, height - 1 do
+                  topX, topY, topZ = nx + ux * level, ny + uy * level, nz + uz * level
+                  chunk:setBlock(topX,topY,topZ,orientedLogId)
+                end
+                for lx = topX - 2, topX + 2 do
+                  for ly = topY - 2, topY + 2 do
+                    for lz = topZ - 2, topZ + 2 do
+                      if inChunk(lx, ly, lz) and chunk:getBlock(lx, ly, lz) == (blocks.air or 0) then
+                        local dx, dy, dz = lx - topX, ly - topY, lz - topZ
+                        if dx * dx + dy * dy + dz * dz <= 5 then
+                          chunk:setBlock(lx, ly, lz, leavesId)
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+function terrain.fillPlanetChunk(chunk, offsetX, offsetY, offsetZ, planet, options)
+  options = options or {}
+  local step = options.yieldStep
+  local waterId = blocks.water or blocks.water_still
+  local airId = blocks.air or 0
+  local processed = 0
+
+  for x = 0, 15 do
+    for y = 0, 15 do
+      for z = 0, 15 do
+        local wx, wy, wz = offsetX + x + 0.5, offsetY + y + 0.5, offsetZ + z + 0.5
+        local sample, radialDistance = terrain.surfaceAtPosition(wx, wy, wz, planet)
+        local depth = sample.surfaceRadiusVoxels - radialDistance
+        if depth >= 0.0 and not sphericalCaveAt(wx, wy, wz, depth, planet) then
+          local top, filler, under = sphericalSurfaceBlocks(sample)
+          local id = depth < 1.25 and top or (depth < 5.0 and filler or (depth < 9.0 and under or blocks.stone))
+          if sample.hasSnow and depth < 1.25 and blocks.snow then id = blocks.snow end
+          chunk:setBlock(x, y, z, id or blocks.stone)
+        elseif waterId and (radialDistance <= planet.seaLevelRadiusVoxels or
+            (sample.waterSurfaceRadiusVoxels and radialDistance <= sample.waterSurfaceRadiusVoxels)) then
+          chunk:setBlock(x, y, z, waterId)
+        else
+          chunk:setBlock(x, y, z, airId)
+        end
+
+        processed = processed + 1
+        if step and processed % 256 == 0 then step() end
+      end
+    end
+  end
+
+  decoratePlanetChunk(chunk, offsetX, offsetY, offsetZ, planet)
+  if step then step() end
+end
+
 function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, options)
   options = options or {}
   local step = options.yieldStep
@@ -1513,8 +1951,8 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
 
         if solid then
           chunk:setBlock(x, y, z, blocks.stone)
-        elseif y <= terrain.SEA_LEVEL and waterId then
-          if y == terrain.SEA_LEVEL and column.freezeWater and blocks.ice then
+        elseif column.waterLevel and y <= column.waterLevel and waterId then
+          if y == column.waterLevel and column.freezeWater and blocks.ice then
             chunk:setBlock(x, y, z, blocks.ice)
           else
             chunk:setBlock(x, y, z, waterId)
@@ -1536,28 +1974,21 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
   carveChunkCaves(chunk, offsetX, offsetZ, maxHeight)
   if step then step() end
 
-  for x = -3, width + 2 do
-    for z = -3, depth + 2 do
+  -- Decorate from a halo as wide as the largest branch/crown reach. Every
+  -- chunk evaluates the same world-space tree centers, so trees crossing a
+  -- border continue naturally instead of being sliced into log poles.
+  for x = -9, width + 8 do
+    for z = -9, depth + 8 do
       local treeX = offsetX + x
       local treeZ = offsetZ + z
       local column = terrain.columnAt(treeX, treeZ, maxHeight)
-      local lx = treeX - offsetX
-      local lz = treeZ - offsetZ
-      local groundY = nil
+      -- Always derive the root from the world-space column. Looking up the
+      -- already-built surface only for centers inside this chunk made a border
+      -- tree use a different root height when its crown was rebuilt next door.
+      local groundY = column.height
 
-      if lx >= 0 and lx < 16 and lz >= 0 and lz < 16 then
-        for y = maxHeight, terrain.SEA_LEVEL + 1, -1 do
-          local id = chunk:getBlock(lx, y, lz)
-          if id and id ~= blocks.air and id ~= blocks.water and id ~= blocks.lava and not isLeafBlock(id) then
-            groundY = y
-            break
-          end
-        end
-      else
-        groundY = column.height
-      end
-
-      if groundY and groundY > terrain.SEA_LEVEL + 1 and isTreeCenter(treeX, treeZ, column.biome) then
+      if groundY and not column.waterLevel and groundY > terrain.SEA_LEVEL + 1 and
+          isTreeCenter(treeX, treeZ, column.biome) then
         addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, column.biome, maxHeight)
       end
     end

@@ -1,0 +1,22 @@
+{
+  "Data": {
+    "DayTime": 0,
+    "GameType": 1,
+    "LastPlayed": 1787385811000,
+    "LevelName": "New World",
+    "MapFeatures": true,
+    "RandomSeed": 1449708288,
+    "SpawnX": 0,
+    "SpawnY": 64,
+    "SpawnZ": 0,
+    "Time": 0,
+    "Version": {
+      "Id": 100,
+      "Name": "MineLua Pre-alpha",
+      "Snapshot": true
+    },
+    "generatorName": "default",
+    "generatorVersion": 1,
+    "version": 100
+  }
+}

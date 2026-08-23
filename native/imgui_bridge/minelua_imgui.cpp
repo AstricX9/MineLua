@@ -48,9 +48,32 @@ struct MineLuaDevUiState {
     int preview_mode;
     int preview_rebuild_requested;
     int want_capture_mouse;
+    // Navigation. The loaded world is a ball a hundred metres across and
+    // walking is 5 m/s, so getting anywhere means either a much faster fly
+    // speed or a jump straight to a coordinate.
+    int navigation_open;
+    int fly_enabled;
+    float fly_speed_multiplier;
+    int freeze_streaming;
+    int teleport_requested;
+    int capture_requested;
+    float teleport_latitude;
+    float teleport_longitude;
+    float teleport_altitude;
+    float current_latitude;
+    float current_longitude;
+    float current_altitude;
+    float time_scale;
 };
 
 static bool g_initialized = false;
+
+// The Lua side mirrors MineLuaDevUiState in an ffi.cdef. If the two ever
+// disagree the game writes past the end of the struct and corrupts whatever
+// follows it, silently. Exporting the size lets the mirror check itself.
+MINELUA_EXPORT int ml_imgui_state_size() {
+    return (int)sizeof(MineLuaDevUiState);
+}
 
 static const char* TimeName(float hour) {
     if (hour < 5.0f) return "Night";
@@ -166,6 +189,8 @@ MINELUA_EXPORT void ml_imgui_draw(MineLuaDevUiState* state) {
             ImGui::SameLine();
             if (ImGui::Button("World Generation")) state->generation_open = state->generation_open ? 0 : 1;
             ImGui::SameLine();
+            if (ImGui::Button("Navigation")) state->navigation_open = state->navigation_open ? 0 : 1;
+            ImGui::SameLine();
             if (ImGui::Button(state->preview_mode ? "Exit RTS Preview" : "RTS Preview")) {
                 state->preview_mode = state->preview_mode ? 0 : 1;
                 if (state->preview_mode) state->preview_rebuild_requested = 1;
@@ -214,6 +239,79 @@ MINELUA_EXPORT void ml_imgui_draw(MineLuaDevUiState* state) {
             }
             ImGui::End();
             state->environment_open = environment_open ? 1 : 0;
+        }
+
+        bool navigation_open = state->navigation_open != 0;
+        if (navigation_open) {
+            // Sized to fit under the Environment window at 720p and left
+            // scrollable rather than auto-resizing, so the Clock section at the
+            // bottom stays reachable on a short display.
+            ImGui::SetNextWindowPos(ImVec2(18.0f, 292.0f), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(410.0f, 412.0f), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Navigation", &navigation_open)) {
+                if (ImGui::CollapsingHeader("Free flight", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool flying = state->fly_enabled != 0;
+                    if (ImGui::Checkbox("Fly (no collision)", &flying)) {
+                        state->fly_enabled = flying ? 1 : 0;
+                    }
+                    ImGui::SetNextItemWidth(260.0f);
+                    ImGui::SliderFloat("Speed", &state->fly_speed_multiplier, 1.0f, 4000.0f,
+                        "%.0fx", ImGuiSliderFlags_Logarithmic);
+                    state->fly_speed_multiplier = std::clamp(state->fly_speed_multiplier, 1.0f, 4000.0f);
+                    if (ImGui::SmallButton("1x")) state->fly_speed_multiplier = 1.0f;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("20x")) state->fly_speed_multiplier = 20.0f;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("200x")) state->fly_speed_multiplier = 200.0f;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("2000x")) state->fly_speed_multiplier = 2000.0f;
+
+                    bool freeze = state->freeze_streaming != 0;
+                    if (ImGui::Checkbox("Freeze chunk streaming", &freeze)) {
+                        state->freeze_streaming = freeze ? 1 : 0;
+                    }
+                    ImGui::TextDisabled("Stops generating chunks so a fast fly-through does not");
+                    ImGui::TextDisabled("queue thousands of them. Terrain already loaded stays.");
+                }
+
+                if (ImGui::CollapsingHeader("Teleport", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::Text("Here: %.4f lat, %.4f lon, %.0f m", state->current_latitude,
+                        state->current_longitude, state->current_altitude);
+                    ImGui::SetNextItemWidth(150.0f);
+                    ImGui::InputFloat("Latitude", &state->teleport_latitude, 1.0f, 10.0f, "%.4f");
+                    state->teleport_latitude = std::clamp(state->teleport_latitude, -89.999f, 89.999f);
+                    ImGui::SetNextItemWidth(150.0f);
+                    ImGui::InputFloat("Longitude", &state->teleport_longitude, 1.0f, 10.0f, "%.4f");
+                    ImGui::SetNextItemWidth(150.0f);
+                    ImGui::InputFloat("Altitude (m)", &state->teleport_altitude, 10.0f, 1000.0f, "%.0f");
+                    if (ImGui::Button("Go")) state->teleport_requested = 1;
+                    ImGui::SameLine();
+                    if (ImGui::Button("Copy current")) state->capture_requested = 1;
+                    ImGui::SameLine();
+                    if (ImGui::Button("Low orbit")) {
+                        state->teleport_altitude = 400000.0f;
+                        state->teleport_requested = 1;
+                    }
+                    ImGui::TextDisabled("Altitude is above sea level. The surface is found");
+                    ImGui::TextDisabled("for you when the altitude is below it.");
+                }
+
+                if (ImGui::CollapsingHeader("Clock", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::SetNextItemWidth(260.0f);
+                    ImGui::SliderFloat("Time scale", &state->time_scale, 0.0f, 240.0f, "%.1fx",
+                        ImGuiSliderFlags_Logarithmic);
+                    state->time_scale = std::clamp(state->time_scale, 0.0f, 240.0f);
+                    if (ImGui::SmallButton("Pause")) state->time_scale = 0.0f;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Normal")) state->time_scale = 1.0f;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("60x")) state->time_scale = 60.0f;
+                    ImGui::TextDisabled("A full rotation takes an hour at 1x: thirty minutes");
+                    ImGui::TextDisabled("of daylight and thirty of night at the equator.");
+                }
+            }
+            ImGui::End();
+            state->navigation_open = navigation_open ? 1 : 0;
         }
 
         bool generation_open = state->generation_open != 0;

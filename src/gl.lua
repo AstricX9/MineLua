@@ -32,6 +32,8 @@ void glCullFace(GLenum mode);
 void glPolygonOffset(GLfloat factor, GLfloat units);
 void glBlendFunc(GLenum sfactor, GLenum dfactor);
 void glDepthMask(unsigned char flag);
+void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels);
+void glPixelStorei(GLenum pname, GLint param);
 ]]
 
 -- Load legacy OpenGL (1.1) from Windows
@@ -155,6 +157,7 @@ void glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
   gl.glCullFace = loader.load("glCullFace", "void", "GLenum")
   gl.glPolygonOffset = loader.load("glPolygonOffset", "void", "GLfloat", "GLfloat")
   gl.glBlendFunc = loader.load("glBlendFunc", "void", "GLenum", "GLenum")
+  gl.glBlendFuncSeparate = loader.load("glBlendFuncSeparate", "void", "GLenum", "GLenum", "GLenum", "GLenum")
   gl.glDepthMask = loader.load("glDepthMask", "void", "unsigned char")
 
   -- Framebuffers

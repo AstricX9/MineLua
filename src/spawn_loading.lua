@@ -2,160 +2,71 @@ local World = require("world")
 
 local spawnLoading = {}
 
-local function sortedCoords(centerChunkX, centerChunkZ, radius)
-  local coords = {}
-  for dx = -radius, radius do
-    for dz = -radius, radius do
-      coords[#coords + 1] = {
-        chunkX = centerChunkX + dx,
-        chunkZ = centerChunkZ + dz,
-        dx = dx,
-        dz = dz
-      }
-    end
-  end
-
-  table.sort(coords, function(a, b)
-    local ar = math.max(math.abs(a.dx), math.abs(a.dz))
-    local br = math.max(math.abs(b.dx), math.abs(b.dz))
-    if ar ~= br then
-      return ar < br
-    end
-
-    local ad = a.dx * a.dx + a.dz * a.dz
-    local bd = b.dx * b.dx + b.dz * b.dz
-    if ad ~= bd then
-      return ad < bd
-    end
-
-    if a.chunkX == b.chunkX then
-      return a.chunkZ < b.chunkZ
-    end
-    return a.chunkX < b.chunkX
+local function sortedCoords(cx,cy,cz,radius)
+  local coords={}
+  for dz=-radius,radius do for dy=-radius,radius do for dx=-radius,radius do
+    local d=dx*dx+dy*dy+dz*dz
+    if d<=radius*radius then coords[#coords+1]={chunkX=cx+dx,chunkY=cy+dy,chunkZ=cz+dz,dx=dx,dy=dy,dz=dz,distanceSquared=d} end
+  end end end
+  table.sort(coords,function(a,b)
+    if a.distanceSquared~=b.distanceSquared then return a.distanceSquared<b.distanceSquared end
+    if a.chunkX~=b.chunkX then return a.chunkX<b.chunkX end
+    if a.chunkY~=b.chunkY then return a.chunkY<b.chunkY end
+    return a.chunkZ<b.chunkZ
   end)
-
   return coords
 end
 
-local function chunkEntry(world, chunkX, chunkZ)
-  return world.chunks[World.chunkKey(chunkX, chunkZ)]
-end
+local function entry(world,x,y,z) return world.chunks[World.chunkKey(x,y,z)] end
 
-local function everyChunkInRadius(plan, world, radius, predicate)
-  for dx = -radius, radius do
-    for dz = -radius, radius do
-      local entry = chunkEntry(world, plan.centerChunkX + dx, plan.centerChunkZ + dz)
-      if not predicate(entry) then
-        return false
-      end
-    end
-  end
-
+local function everyChunk(plan,world,radius,predicate)
+  for dz=-radius,radius do for dy=-radius,radius do for dx=-radius,radius do
+    if dx*dx+dy*dy+dz*dz<=radius*radius and not predicate(entry(world,plan.centerChunkX+dx,plan.centerChunkY+dy,plan.centerChunkZ+dz)) then return false end
+  end end end
   return true
 end
 
 function spawnLoading.createPlan(options)
-  options = options or {}
-  local requiredRadius = options.requiredRadius or 1
-  local haloRadius = math.max(requiredRadius, options.haloRadius or 2)
-  local centerChunkX = options.centerChunkX or 0
-  local centerChunkZ = options.centerChunkZ or 0
-
-  return {
-    centerChunkX = centerChunkX,
-    centerChunkZ = centerChunkZ,
-    requiredRadius = requiredRadius,
-    haloRadius = haloRadius,
-    coords = sortedCoords(centerChunkX, centerChunkZ, haloRadius)
-  }
+  options=options or {}
+  local required=options.requiredRadius or 1
+  local halo=math.max(required,options.haloRadius or 2)
+  local cx,cy,cz=options.centerChunkX or 0,options.centerChunkY or 0,options.centerChunkZ or 0
+  return {centerChunkX=cx,centerChunkY=cy,centerChunkZ=cz,requiredRadius=required,haloRadius=halo,coords=sortedCoords(cx,cy,cz,halo)}
 end
 
-function spawnLoading.isCenterChunk(plan, chunkX, chunkZ)
-  return chunkX == plan.centerChunkX and chunkZ == plan.centerChunkZ
+function spawnLoading.isCenterChunk(plan,x,y,z) return x==plan.centerChunkX and y==plan.centerChunkY and z==plan.centerChunkZ end
+function spawnLoading.centerEntry(plan,world) return entry(world,plan.centerChunkX,plan.centerChunkY,plan.centerChunkZ) end
+function spawnLoading.hasTerrainHalo(plan,world) return everyChunk(plan,world,plan.haloRadius,function(e)return e and e.hasTerrain==true end) end
+function spawnLoading.hasRequiredCollision(plan,world) return everyChunk(plan,world,plan.requiredRadius,function(e)return e and e.hasTerrain and e.hasCollision end) end
+
+function spawnLoading.isSpawnPlayable(plan,world,meshes)
+  if not spawnLoading.hasTerrainHalo(plan,world) or not spawnLoading.hasRequiredCollision(plan,world) then return false end
+  local center=spawnLoading.centerEntry(plan,world)
+  if not center or not center.hasInitialLight then return false end
+  return center.isUploaded==true and meshes[World.chunkKey(plan.centerChunkX,plan.centerChunkY,plan.centerChunkZ)]~=nil
 end
 
-function spawnLoading.centerEntry(plan, world)
-  return chunkEntry(world, plan.centerChunkX, plan.centerChunkZ)
-end
-
-function spawnLoading.hasTerrainHalo(plan, world)
-  return everyChunkInRadius(plan, world, plan.haloRadius, function(entry)
-    return entry ~= nil and entry.hasTerrain == true
-  end)
-end
-
-function spawnLoading.hasRequiredCollision(plan, world)
-  return everyChunkInRadius(plan, world, plan.requiredRadius, function(entry)
-    return entry ~= nil and entry.hasTerrain == true and entry.hasCollision == true
-  end)
-end
-
-function spawnLoading.isSpawnPlayable(plan, world, terrainMeshes)
-  if not spawnLoading.hasTerrainHalo(plan, world) then
-    return false
+function spawnLoading.streamingMeshQueue(plan,world,meshes)
+  local queue={}
+  for i=1,#plan.coords do local c=plan.coords[i] local key=World.chunkKey(c.chunkX,c.chunkY,c.chunkZ) local e=world.chunks[key]
+    if e and not meshes[key] then queue[#queue+1]={chunkX=c.chunkX,chunkY=c.chunkY,chunkZ=c.chunkZ,entry=e,rebuild=true} end
   end
-  if not spawnLoading.hasRequiredCollision(plan, world) then
-    return false
-  end
-
-  local center = spawnLoading.centerEntry(plan, world)
-  if not center or not center.hasTerrain or not center.hasCollision then
-    return false
-  end
-  if not center.hasInitialLight and not center.hasInitialLighting then
-    return false
-  end
-
-  local key = World.chunkKey(plan.centerChunkX, plan.centerChunkZ)
-  return center.isUploaded == true and terrainMeshes[key] ~= nil
-end
-
-function spawnLoading.streamingMeshQueue(plan, world, terrainMeshes)
-  local queue = {}
-  for i = 1, #plan.coords do
-    local coord = plan.coords[i]
-    local key = World.chunkKey(coord.chunkX, coord.chunkZ)
-    local entry = world.chunks[key]
-    if entry and not terrainMeshes[key] then
-      queue[#queue + 1] = {
-        chunkX = coord.chunkX,
-        chunkZ = coord.chunkZ,
-        entry = entry,
-        rebuild = true
-      }
-    end
-  end
-
   return queue
 end
 
-function spawnLoading.progress(plan, job)
-  local terrainComplete = (job.generatedChunks or 0) / math.max(1, #plan.coords)
-  local collisionComplete = spawnLoading.hasRequiredCollision(plan, job.world) and 1.0 or terrainComplete
-  local lightingComplete = job.world:lightingReady() and 1.0 or (job.lightingStarted and 0.20 or 0.0)
-  local meshComplete = job.spawnMeshComplete and 1.0 or 0.0
-  local playerReady = spawnLoading.isSpawnPlayable(plan, job.world, job.terrainMeshes) and 1.0 or 0.0
-
-  local progress =
-    terrainComplete * 0.45 +
-    collisionComplete * 0.15 +
-    lightingComplete * 0.20 +
-    meshComplete * 0.15 +
-    playerReady * 0.05
-
-  return math.max(0.0, math.min(0.99, progress))
+function spawnLoading.progress(plan,job)
+  local terrain=(job.generatedChunks or 0)/math.max(1,#plan.coords)
+  local collision=spawnLoading.hasRequiredCollision(plan,job.world) and 1 or terrain
+  local light=job.world:lightingReady() and 1 or (job.lightingStarted and 0.2 or 0)
+  local mesh=job.spawnMeshComplete and 1 or 0
+  local player=spawnLoading.isSpawnPlayable(plan,job.world,job.terrainMeshes) and 1 or 0
+  return math.max(0,math.min(0.99,terrain*.45+collision*.15+light*.20+mesh*.15+player*.05))
 end
 
-function spawnLoading.message(plan, job)
-  if (job.generatedChunks or 0) < #plan.coords then
-    return "Building spawn terrain"
-  end
-  if not job.world:lightingReady() then
-    return "Lighting spawn"
-  end
-  if not job.spawnMeshComplete then
-    return "Uploading spawn"
-  end
+function spawnLoading.message(plan,job)
+  if (job.generatedChunks or 0)<#plan.coords then return "Building spherical spawn terrain" end
+  if not job.world:lightingReady() then return "Lighting spawn" end
+  if not job.spawnMeshComplete then return "Uploading spawn" end
   return "Joining world"
 end
 

@@ -111,6 +111,31 @@ function math3d.cross(a, b)
   }
 end
 
+function math3d.dot(a, b)
+  return a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+end
+
+function math3d.length(v)
+  return math.sqrt(math3d.dot(v, v))
+end
+
+function math3d.add(a, b)
+  return {a[1] + b[1], a[2] + b[2], a[3] + b[3]}
+end
+
+function math3d.subtract(a, b)
+  return {a[1] - b[1], a[2] - b[2], a[3] - b[3]}
+end
+
+function math3d.scale(v, amount)
+  return {v[1] * amount, v[2] * amount, v[3] * amount}
+end
+
+function math3d.projectOnPlane(v, normal)
+  local amount = math3d.dot(v, normal)
+  return {v[1] - normal[1] * amount, v[2] - normal[2] * amount, v[3] - normal[3] * amount}
+end
+
 function math3d.normalize(v)
   local length = math.sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3])
   if length == 0 then

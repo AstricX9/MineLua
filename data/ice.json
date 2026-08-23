@@ -2,6 +2,7 @@
   "name": "Ice",
   "texture": "./textures/blocks/ice.png",
   "properties": {
-    "solid": true
+    "solid": true,
+    "ice": true
   }
 }

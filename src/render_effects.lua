@@ -63,21 +63,206 @@ function effects.createShadowShader()
 #version 460 core
 layout (location = 0) in vec3 aPos;
 layout (location = 3) in vec2 aTexCoord;
+layout (location = 4) in vec3 aInfo;
 out vec2 vTexCoord;
+out vec3 vCoveragePosition;
+out float vMaterial;
 uniform mat4 uModel;
 uniform mat4 lightSpaceMatrix;
+uniform vec3 viewPos;
+uniform float time;
+uniform vec4 foliageParams;
+
+float plantHash(vec2 cell) {
+  return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main() {
   vTexCoord = aTexCoord;
-  gl_Position = lightSpaceMatrix * uModel * vec4(aPos, 1.0);
+  vec3 worldPosition = vec3(uModel * vec4(aPos, 1.0));
+  vec3 coveragePosition = worldPosition;
+  if (aInfo.x > 0.5) {
+    bool isGrass = aInfo.x > 1.5;
+    vec2 plantCell = floor(worldPosition.xz) + vec2(0.5);
+    float cameraDistance = length(plantCell - viewPos.xz);
+    if (isGrass) {
+      float visibility = 1.0 - smoothstep(foliageParams.x, foliageParams.y, cameraDistance);
+      if (plantHash(plantCell) > visibility) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+      }
+    }
+
+    float animationEnd = isGrass ? foliageParams.x : foliageParams.z;
+    float distanceFade = 1.0 - smoothstep(animationEnd * 0.58, animationEnd, cameraDistance);
+    float anchor = pow(clamp(aInfo.y, 0.0, 1.0), 1.35) * distanceFade;
+    vec2 windDirection = normalize(vec2(0.88, 0.34));
+    vec2 crossWind = vec2(-windDirection.y, windDirection.x);
+    float gust = 0.58 + 0.42 * sin(time * 0.43 + dot(plantCell, vec2(0.018, -0.014)));
+    gust = gust * gust * (3.0 - 2.0 * gust);
+    float mainWave = sin(time * 1.35 + dot(worldPosition.xz, vec2(0.24, 0.17)));
+    float turbulence = sin(time * 2.65 + dot(worldPosition.xz, vec2(-0.53, 0.71)) + mainWave * 0.7);
+    float flutter = sin(time * 5.2 + dot(worldPosition.xz, vec2(1.71, -1.27)));
+    float strength = (isGrass ? 0.105 : 0.038) * foliageParams.w;
+    vec2 bend = windDirection * (mainWave * (0.55 + gust * 0.62) + flutter * 0.12)
+      + crossWind * turbulence * 0.22;
+    worldPosition.xz += bend * strength * anchor;
+    worldPosition.y -= abs(mainWave) * strength * anchor * (isGrass ? 0.10 : 0.04);
+  }
+  vCoveragePosition = coveragePosition;
+  vMaterial = aInfo.x;
+  gl_Position = lightSpaceMatrix * vec4(worldPosition, 1.0);
 }
 ]]
 
   local fragSource = [[
 #version 460 core
 in vec2 vTexCoord;
+in vec3 vCoveragePosition;
+in float vMaterial;
 uniform sampler2D tex0;
+
+float stableCoverageNoise(vec3 cell) {
+  cell = fract(cell * 0.1031);
+  cell += dot(cell, cell.yzx + 33.33);
+  return fract((cell.x + cell.y) * cell.z);
+}
+
 void main() {
-  if (texture(tex0, vTexCoord).a < 0.5) discard;
+  float alpha = texture(tex0, vTexCoord).a;
+  bool isLeaf = vMaterial > 0.5 && vMaterial < 1.5;
+  if (isLeaf) {
+    if (alpha < 0.01 || stableCoverageNoise(floor(vCoveragePosition * 32.0)) > alpha * 0.84) discard;
+  } else if (alpha < 0.5) {
+    discard;
+  }
+}
+]]
+
+  return shaderModule.fromSource(vertSource, fragSource)
+end
+
+function effects.createIceShader()
+  local vertSource = [[
+#version 460 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec3 aColor;
+layout (location = 3) in vec2 aTexCoord;
+layout (location = 4) in vec3 aInfo;
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec2 vTexCoord;
+out vec3 vColor;
+out float vThickness;
+out float vVoxelLight;
+uniform mat4 uProjection;
+uniform mat4 uView;
+uniform mat4 uModel;
+void main() {
+  vec4 worldPosition = uModel * vec4(aPos, 1.0);
+  vWorldPos = worldPosition.xyz;
+  vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+  vTexCoord = aTexCoord;
+  vColor = aColor;
+  vThickness = aInfo.y;
+  vVoxelLight = aInfo.z;
+  gl_Position = uProjection * uView * worldPosition;
+}
+]]
+
+  local fragSource = [[
+#version 460 core
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vTexCoord;
+in vec3 vColor;
+in float vThickness;
+in float vVoxelLight;
+out vec4 FragColor;
+uniform mat4 uView;
+uniform vec3 viewPos;
+uniform vec3 sunDir;
+uniform vec3 fogColor;
+uniform vec3 skyZenithColor;
+uniform vec3 lightColor;
+uniform vec2 viewportSize;
+uniform vec2 clipPlanes;
+uniform vec3 absorption;
+uniform vec2 iceParams; // refraction strength, cloudiness
+uniform sampler2D tex0;
+uniform sampler2D sceneColor;
+uniform sampler2D sceneDepth;
+
+float linearDepth(float rawDepth) {
+  float z = rawDepth * 2.0 - 1.0;
+  return (2.0 * clipPlanes.x * clipPlanes.y) /
+    (clipPlanes.y + clipPlanes.x - z * (clipPlanes.y - clipPlanes.x));
+}
+
+float dielectricFresnel(float cosThetaI, float etaI, float etaT) {
+  cosThetaI = clamp(cosThetaI, 0.0, 1.0);
+  float eta = etaI / etaT;
+  float sinThetaTSquared = eta * eta * max(1.0 - cosThetaI * cosThetaI, 0.0);
+  float cosThetaT = sqrt(max(1.0 - sinThetaTSquared, 0.0));
+  float parallel = (etaT * cosThetaI - etaI * cosThetaT) /
+    max(etaT * cosThetaI + etaI * cosThetaT, 1.0e-5);
+  float perpendicular = (etaI * cosThetaI - etaT * cosThetaT) /
+    max(etaI * cosThetaI + etaT * cosThetaT, 1.0e-5);
+  return 0.5 * (parallel * parallel + perpendicular * perpendicular);
+}
+
+vec3 skyRadiance(vec3 direction) {
+  direction = normalize(direction);
+  float altitude = smoothstep(0.0, 0.88, max(direction.y, 0.0));
+  vec3 sky = mix(fogColor, skyZenithColor, altitude);
+  float sunDisc = smoothstep(cos(0.020), cos(0.010), dot(direction, normalize(sunDir)));
+  return sky + lightColor * sunDisc * 2.1;
+}
+
+void main() {
+  vec3 normal = normalize(vNormal);
+  vec3 viewDirection = normalize(viewPos - vWorldPos);
+  if (dot(normal, viewDirection) < 0.0) normal = -normal;
+  float nDotV = max(dot(normal, viewDirection), 0.08);
+
+  vec4 iceTexture = texture(tex0, vTexCoord);
+  float textureLight = dot(iceTexture.rgb, vec3(0.2126, 0.7152, 0.0722));
+  float frost = smoothstep(0.63, 0.96, textureLight) * iceParams.y;
+  float thickness = clamp(max(vThickness, 1.0) / nDotV, 0.65, 12.0);
+
+  vec2 screenUv = gl_FragCoord.xy / viewportSize;
+  float iceDepth = linearDepth(gl_FragCoord.z);
+  vec3 viewNormal = normalize(mat3(uView) * normal);
+  vec2 crackSlope = vec2(dFdx(textureLight), dFdy(textureLight));
+  vec2 distortedUv = screenUv + viewNormal.xy * iceParams.x * (0.45 + thickness * 0.08)
+    + crackSlope * iceParams.x * 0.32;
+  distortedUv = clamp(distortedUv, vec2(0.002), vec2(0.998));
+  float distortedDepth = linearDepth(texture(sceneDepth, distortedUv).r);
+  if (distortedDepth < iceDepth + 0.04) distortedUv = screenUv;
+
+  vec3 transmittedScene = texture(sceneColor, distortedUv).rgb;
+  vec3 transmittance = exp(-absorption * thickness);
+  vec3 iceScatter = mix(vec3(0.19, 0.48, 0.67), vec3(0.48, 0.76, 0.88), frost);
+  vec3 refracted = transmittedScene * transmittance + iceScatter * (1.0 - transmittance);
+
+  const float ICE_IOR = 1.31;
+  float fresnel = dielectricFresnel(nDotV, 1.0, ICE_IOR);
+  vec3 reflectionDirection = reflect(-viewDirection, normal);
+  vec3 reflected = skyRadiance(reflectionDirection);
+
+  vec3 halfVector = normalize(normalize(sunDir) + viewDirection);
+  float specularPower = mix(190.0, 42.0, frost);
+  float sunSpecular = pow(max(dot(normal, halfVector), 0.0), specularPower)
+    * mix(1.15, 0.38, frost);
+  reflected += lightColor * sunSpecular;
+
+  float cloudyLayer = clamp(0.035 + frost * 0.24 + thickness * 0.012, 0.0, 0.42);
+  refracted = mix(refracted, iceScatter * (0.70 + vVoxelLight * 0.30), cloudyLayer);
+  vec3 color = mix(refracted, reflected, clamp(fresnel + frost * 0.055, 0.0, 0.94));
+  color *= mix(0.76, 1.0, clamp(vVoxelLight, 0.0, 1.0));
+  color += vec3(0.42, 0.70, 0.88) * frost * 0.055;
+  FragColor = vec4(color * vColor, 1.0);
 }
 ]]
 
@@ -88,22 +273,42 @@ function effects.createWaterShader()
   local vertSource = [[
 #version 460 core
 layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aShoreData;
 layout (location = 3) in vec2 aWaveData;
 out vec3 vWorldPos;
 out float vWaveExposure;
 out float vShoreDistance;
+out vec3 vShoreData;
+flat out float vSurfaceLevel;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform float waterLevel;
 uniform vec3 cascadeSizes;
 uniform vec3 displacementWeights;
 uniform float openWaterWaveBoost;
+uniform vec4 breakerParams; // height, wavelength, speed, forward curl
+uniform float time;
 uniform sampler2D displacementMap0;
 uniform sampler2D displacementMap1;
 uniform sampler2D displacementMap2;
 
+float breakerProfile(vec2 position, vec2 shoreDirection) {
+  float cycle = fract((dot(position, shoreDirection) - time * breakerParams.z) /
+    max(breakerParams.y, 0.1));
+  float crestCoordinate = fract(cycle + 0.5) - 0.5;
+  float shoulderCoordinate = fract(cycle + 0.27 + 0.5) - 0.5;
+  float crestWidth = crestCoordinate / 0.105;
+  float shoulderWidth = shoulderCoordinate / 0.24;
+  float crest = exp(-0.5 * crestWidth * crestWidth);
+  float shoulder = exp(-0.5 * shoulderWidth * shoulderWidth);
+  return crest - shoulder * 0.18;
+}
+
 void main() {
-  vec3 basePosition = vec3(aPos.x, waterLevel, aPos.z);
+  // Loaded chunks author their own surface Y. This lets lakes and stepped
+  // river reaches live above sea level; far-ocean tiles still arrive at the
+  // global ocean datum.
+  vec3 basePosition = aPos;
   // Wave fetch and shoreline damping are baked from continuous world-space
   // terrain signals. Unlike screen-depth probes these values cannot change as
   // the camera turns or as an occluder crosses the projected sample position.
@@ -124,9 +329,24 @@ void main() {
   displacement += texture(displacementMap1, basePosition.xz / cascadeSizes.y + vec2(0.73, 0.29)).rgb * displacementWeights.y * bodyScale.y;
   displacement += texture(displacementMap2, basePosition.xz / cascadeSizes.z + vec2(0.41, 0.83)).rgb * displacementWeights.z * bodyScale.z;
   vec3 worldPos = basePosition + displacement;
+
+  float directionLength = length(aShoreData.xy);
+  float breaker = clamp(aShoreData.z, 0.0, 1.0);
+  vec2 shoreDirection = directionLength > 0.001
+    ? aShoreData.xy / directionLength
+    : vec2(0.0);
+  if (breaker > 0.001 && directionLength > 0.001) {
+    float profile = breakerProfile(basePosition.xz, shoreDirection);
+    float crest = max(profile, 0.0);
+    worldPos.y += profile * breakerParams.x * breaker;
+    worldPos.xz += shoreDirection * crest * breakerParams.w * breaker;
+  }
+
   vWorldPos = worldPos;
   vWaveExposure = exposure;
   vShoreDistance = shoreDistance;
+  vShoreData = vec3(shoreDirection, breaker);
+  vSurfaceLevel = basePosition.y;
   gl_Position = uProjection * uView * vec4(worldPos, 1.0);
 }
 ]]
@@ -136,6 +356,8 @@ void main() {
 in vec3 vWorldPos;
 in float vWaveExposure;
 in float vShoreDistance;
+in vec3 vShoreData;
+flat in float vSurfaceLevel;
 out vec4 FragColor;
 uniform mat4 uProjection;
 uniform mat4 uView;
@@ -151,7 +373,9 @@ uniform vec2 clipPlanes;
 uniform float waterLevel;
 uniform float time;
 uniform float refractionStrength;
+uniform vec2 snellParams; // window scale, air projection distance
 uniform float openWaterWaveBoost;
+uniform vec4 breakerParams; // height, wavelength, speed, forward curl
 uniform vec3 absorption;
 uniform sampler2D normalMap0;
 uniform sampler2D normalMap1;
@@ -170,6 +394,50 @@ float linearDepth(float rawDepth) {
 float edgeFade(vec2 uv) {
   vec2 edge = min(uv, 1.0 - uv);
   return smoothstep(0.0, 0.08, min(edge.x, edge.y));
+}
+
+float dielectricFresnel(float cosThetaI, float etaI, float etaT) {
+  cosThetaI = clamp(cosThetaI, 0.0, 1.0);
+  float eta = etaI / etaT;
+  float sinThetaTSquared = eta * eta * max(1.0 - cosThetaI * cosThetaI, 0.0);
+  float cosThetaT = sqrt(max(1.0 - sinThetaTSquared, 0.0));
+  float parallel = (etaT * cosThetaI - etaI * cosThetaT) /
+    max(etaT * cosThetaI + etaI * cosThetaT, 1.0e-5);
+  float perpendicular = (etaI * cosThetaI - etaT * cosThetaT) /
+    max(etaI * cosThetaI + etaT * cosThetaT, 1.0e-5);
+  float physicalFresnel = 0.5 * (parallel * parallel + perpendicular * perpendicular);
+
+  // Integrate the steep critical-angle transition over the pixel footprint.
+  float criticalWidth = max(fwidth(sinThetaTSquared) * 1.35, 0.0015);
+  float totalInternalReflection = smoothstep(
+    1.0 - criticalWidth, 1.0 + criticalWidth, sinThetaTSquared
+  );
+  return mix(physicalFresnel, 1.0, totalInternalReflection);
+}
+
+vec3 skyRadiance(vec3 direction) {
+  direction = normalize(direction);
+  float altitude = smoothstep(0.0, 0.88, max(direction.y, 0.0));
+  vec3 sky = mix(fogColor, skyZenithColor, altitude);
+  float sunAngle = dot(direction, normalize(sunDir));
+  float sunDisc = smoothstep(cos(0.018), cos(0.010), sunAngle);
+  return sky + lightColor * sunDisc * 2.4;
+}
+
+vec3 airRadiance(vec3 surfacePosition, vec3 airDirection) {
+  vec3 fallback = skyRadiance(airDirection);
+  vec4 clip = uProjection * uView * vec4(
+    surfacePosition + airDirection * max(snellParams.y, 1.0), 1.0
+  );
+  if (clip.w <= 0.0) return fallback;
+  vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+  if (any(lessThanEqual(uv, vec2(0.001))) || any(greaterThanEqual(uv, vec2(0.999)))) {
+    return fallback;
+  }
+
+  // The current scene is useful only while the refracted air ray remains on
+  // screen. Fade to an environment approximation instead of clamping it.
+  return mix(fallback, texture(sceneColor, uv).rgb, edgeFade(uv));
 }
 
 vec3 traceReflection(vec3 origin, vec3 direction, out float confidence) {
@@ -224,6 +492,18 @@ float geometrySmith(float nDotV, float nDotL, float roughness) {
   return gv * gl;
 }
 
+float breakerProfileAt(vec2 position, vec2 shoreDirection) {
+  float cycle = fract((dot(position, shoreDirection) - time * breakerParams.z) /
+    max(breakerParams.y, 0.1));
+  float crestCoordinate = fract(cycle + 0.5) - 0.5;
+  float shoulderCoordinate = fract(cycle + 0.27 + 0.5) - 0.5;
+  float crestWidth = crestCoordinate / 0.105;
+  float shoulderWidth = shoulderCoordinate / 0.24;
+  float crest = exp(-0.5 * crestWidth * crestWidth);
+  float shoulder = exp(-0.5 * shoulderWidth * shoulderWidth);
+  return crest - shoulder * 0.18;
+}
+
 void main() {
   vec4 gradient0 = texture(normalMap0, vWorldPos.xz / cascadeSizes.x + vec2(0.17, 0.61));
   vec4 gradient1 = texture(normalMap1, vWorldPos.xz / cascadeSizes.y + vec2(0.73, 0.29));
@@ -242,6 +522,17 @@ void main() {
   slope += gradient1.xz / max(gradient1.y, 0.18) * normalWeights.y * bodyScale.y;
   slope += gradient2.xz / max(gradient2.y, 0.18) * normalWeights.z * bodyScale.z;
 
+  float breaker = clamp(vShoreData.z, 0.0, 1.0);
+  float breakerProfileValue = 0.0;
+  if (breaker > 0.001 && length(vShoreData.xy) > 0.001) {
+    vec2 shoreDirection = normalize(vShoreData.xy);
+    breakerProfileValue = breakerProfileAt(vWorldPos.xz, shoreDirection);
+    float profileAhead = breakerProfileAt(vWorldPos.xz + shoreDirection * 0.08, shoreDirection);
+    float profileDerivative = (profileAhead - breakerProfileValue) / 0.08;
+    slope -= shoreDirection * profileDerivative * breakerParams.x * breaker;
+  }
+  vec2 transmissionSlope = slope;
+
   // Short directional ripples fill the frequency gap below the smallest FFT
   // cascade. Keeping these in the normal only avoids geometric shimmer.
   vec2 p = vWorldPos.xz;
@@ -256,22 +547,27 @@ void main() {
   slope += d2 * cos(dot(p, d2) * 5.1 + time * 3.6) * 0.010 * rippleScale;
 
   vec3 interfaceNormal = normalize(vec3(slope.x, 1.0, slope.y));
-  bool underwater = viewPos.y < waterLevel;
+  // Capillary ripples are smaller than the Snell boundary's pixel footprint.
+  // Use the filtered FFT slope for transmission instead of turning those
+  // sub-pixel ripples into jagged silhouettes.
+  vec3 transmissionNormal = normalize(vec3(
+    transmissionSlope.x * 0.72, 1.0, transmissionSlope.y * 0.72
+  ));
+  bool underwater = viewPos.y < vSurfaceLevel;
   vec3 viewDir = normalize(viewPos - vWorldPos);
-  vec3 normal = interfaceNormal;
+  vec3 normal = underwater ? -transmissionNormal : interfaceNormal;
   if (dot(normal, viewDir) < 0.0) normal = -normal;
   float nDotV = max(dot(normal, viewDir), 0.001);
-  float fresnel = 0.0200187 + (1.0 - 0.0200187) * pow(1.0 - nDotV, 5.0);
-
-  // From water to air, rays beyond 48.6 degrees cannot leave the water and
-  // reflect internally. The animated interface normal bends the critical cone,
-  // producing the moving circular boundary of Snell's window without a mask.
-  if (underwater) {
-    const float WATER_IOR = 1.333;
-    float criticalCosine = sqrt(1.0 - 1.0 / (WATER_IOR * WATER_IOR));
-    float snellWindow = smoothstep(criticalCosine - 0.022, criticalCosine + 0.022, nDotV);
-    fresnel = mix(1.0, fresnel, snellWindow);
-  }
+  const float WATER_IOR = 1.333;
+  // A strictly physical 1.333 IOR makes the above-water view feel slightly
+  // compressed at game-scale FOVs. Reduce only the underwater effective IOR
+  // by a small configurable amount, and use it for both Fresnel and refraction
+  // so the transmitted window and its TIR boundary remain exactly aligned.
+  float snellWindowScale = clamp(snellParams.x, 1.0, 1.35);
+  float underwaterIor = 1.0 + (WATER_IOR - 1.0) / snellWindowScale;
+  float fresnel = underwater
+    ? dielectricFresnel(nDotV, underwaterIor, 1.0)
+    : dielectricFresnel(nDotV, 1.0, WATER_IOR);
 
   vec2 screenUv = gl_FragCoord.xy / viewportSize;
   float waterViewDepth = linearDepth(gl_FragCoord.z);
@@ -286,10 +582,17 @@ void main() {
   float distortedDepth = linearDepth(texture(sceneDepth, distortedUv).r);
   if (distortedDepth < waterViewDepth + 0.05) distortedUv = screenUv;
 
-  vec3 transmittedScene = texture(sceneColor, distortedUv).rgb;
-  vec3 transmittance = exp(-absorption * min(waterThickness, 48.0));
   vec3 waterScatter = mix(vec3(0.008, 0.075, 0.105), vec3(0.015, 0.235, 0.270),
     clamp(sunDir.y * 0.7 + 0.35, 0.0, 1.0));
+  vec3 transmittedScene = texture(sceneColor, distortedUv).rgb;
+  if (underwater) {
+    vec3 incident = normalize(vWorldPos - viewPos);
+    vec3 airDirection = refract(incident, -transmissionNormal, underwaterIor);
+    transmittedScene = dot(airDirection, airDirection) > 1.0e-5
+      ? airRadiance(vWorldPos, normalize(airDirection))
+      : waterScatter;
+  }
+  vec3 transmittance = exp(-absorption * min(waterThickness, 48.0));
   vec3 refracted = transmittedScene * transmittance + waterScatter * (1.0 - transmittance);
 
   vec3 reflectionDirection = reflect(-viewDir, normal);
@@ -300,7 +603,9 @@ void main() {
   vec3 reflected = mix(skyFallback, screenReflection, reflectionConfidence);
   if (underwater) {
     vec3 internalReflection = mix(vec3(0.012, 0.085, 0.135), waterScatter, 0.62);
-    reflected = mix(internalReflection, screenReflection, reflectionConfidence);
+    // Screen space omits off-screen and occluded rays, so treat hits as detail
+    // over a stable fallback instead of allowing them to shred the whole image.
+    reflected = mix(internalReflection, screenReflection, reflectionConfidence * 0.28);
   }
 
   float jacobian = min(gradient0.a, min(gradient1.a, gradient2.a));
@@ -308,7 +613,11 @@ void main() {
     smoothstep(0.48, 0.90, exposure);
   float shoreFoam = (1.0 - smoothstep(0.18, 1.65, waterThickness)) *
     step(rawBackgroundDepth, 0.9998);
-  float foam = clamp(foldingFoam * 0.82 + shoreFoam * 0.48, 0.0, 1.0);
+  float breakerFoam = smoothstep(0.28, 0.88, max(breakerProfileValue, 0.0)) * breaker;
+  float foam = clamp(foldingFoam * 0.82 + shoreFoam * 0.48 + breakerFoam * 0.92, 0.0, 1.0);
+  // Foam sits on the air-facing skin. From below it contributes only a faint
+  // extinction silhouette, not the bright silver contour network seen above.
+  if (underwater) foam *= 0.06;
 
   vec3 lightDirection = normalize(sunDir);
   vec3 halfVector = normalize(viewDir + lightDirection);
@@ -617,7 +926,17 @@ void main() {
     displacementWeights = settings.cascadeDisplacementWeights or {0.075, 0.16, 0.40},
     normalWeights = settings.cascadeNormalWeights or {0.48, 0.29, 0.16},
     openWaterWaveBoost = settings.openWaterWaveBoost or 1.08,
+    breakerParams = {
+      settings.shoreBreakerHeight or 0.48,
+      settings.shoreBreakerWavelength or 7.5,
+      settings.shoreBreakerSpeed or 2.2,
+      settings.shoreBreakerCurl or 0.28
+    },
     refractionStrength = settings.refractionStrength or 0.014,
+    snellParams = {
+      settings.snellWindowScale or 1.20,
+      settings.snellProjectionDistance or 1536.0
+    },
     absorption = settings.absorption or {0.16, 0.055, 0.026},
     programs = programs,
     locations = locations
@@ -735,7 +1054,8 @@ uniform vec3 lightColor;
 uniform vec3 fogParams;        // start, end, maximum opacity
 uniform vec3 atmosphereParams; // sea-level density, height falloff, horizon density
 uniform vec3 volumeParams;     // near, far, sunlight scattering strength
-uniform float baseHeight;
+uniform vec3 localUp;
+uniform float cameraAltitude;
 uniform mat4 lightSpaceMatrix;
 
 const ivec3 GRID_SIZE = ivec3(@GRID_X@, @GRID_Y@, @GRID_Z@);
@@ -790,17 +1110,23 @@ void main() {
 
   float targetTransmittance = max(1.0 - fogParams.z, 0.01);
   float distanceExtinction = -log(targetTransmittance) / max(fogParams.y - fogParams.x, 1.0);
-  float altitude = max(worldPosition.y - baseHeight, 0.0);
+  // The froxel grid is camera-relative, but density is radial.  Over this
+  // short volume the tangent-plane altitude is an excellent approximation to
+  // the exact spherical radius and, unlike worldPosition.y, works everywhere
+  // on the planet (including the +/-X and +/-Z hemispheres).
+  float altitude = max(cameraAltitude + dot(worldPosition - cameraPosition, localUp), 0.0);
+  float atmospherePresence = exp(-altitude / 8000.0);
   float extinction = atmosphereParams.x * exp(-altitude * atmosphereParams.y);
-  if (distance > fogParams.x) extinction += distanceExtinction;
+  if (distance > fogParams.x) extinction += distanceExtinction * atmospherePresence;
 
-  float horizon = 1.0 - smoothstep(-0.08, 0.28, abs(ray.y));
-  extinction += horizon * atmosphereParams.z / max(fogParams.y - fogParams.x, 1.0);
+  float rayElevation = dot(ray, localUp);
+  float horizon = 1.0 - smoothstep(-0.08, 0.28, abs(rayElevation));
+  extinction += horizon * atmosphereParams.z * atmospherePresence / max(fogParams.y - fogParams.x, 1.0);
 
-  float skyLift = smoothstep(-0.05, 0.70, ray.y) * 0.34;
+  float skyLift = smoothstep(-0.05, 0.70, rayElevation) * 0.34;
   vec3 ambientFog = mix(fogColor, skyZenithColor, skyLift);
   float sunMu = dot(ray, normalize(sunDir));
-  float daylight = smoothstep(-0.08, 0.20, sunDir.y);
+  float daylight = smoothstep(-0.08, 0.20, dot(sunDir, localUp));
   float phase = rayleighPhase(sunMu) * 0.65 + miePhase(sunMu, 0.76) * 0.42;
   vec3 directFog = lightColor * phase * volumeParams.z * daylight * shadowVisibility(worldPosition);
   vec3 scatteredLight = encodeFogLight(ambientFog + directFog);
@@ -874,7 +1200,8 @@ void main() {
       fogParams = gl.glGetUniformLocation(injection, "fogParams"),
       atmosphereParams = gl.glGetUniformLocation(injection, "atmosphereParams"),
       volumeParams = gl.glGetUniformLocation(injection, "volumeParams"),
-      baseHeight = gl.glGetUniformLocation(injection, "baseHeight"),
+      localUp = gl.glGetUniformLocation(injection, "localUp"),
+      cameraAltitude = gl.glGetUniformLocation(injection, "cameraAltitude"),
       lightSpaceMatrix = gl.glGetUniformLocation(injection, "lightSpaceMatrix")
     },
     integrationLocations = {
@@ -915,6 +1242,7 @@ uniform float time;
 uniform sampler2D bloomTexture;
 uniform vec4 gradeParams;   // exposure, bloomStrength, saturation, contrast
 uniform vec3 tonemapParams; // mode, knee, white
+uniform float anaglyphAmount;
 
 // Exactly identity below `knee`, then compresses smoothly toward `white`.
 // This is the operator that suits a retrofit: the scene was authored to look
@@ -984,6 +1312,11 @@ vec4 sampleIntegratedVolume(float distance) {
 void main() {
   vec2 texel = 1.0 / vec2(textureSize(sceneColor, 0));
   vec3 scene = texture(sceneColor, vUv).rgb;
+  if (anaglyphAmount > 0.5) {
+    vec3 leftEye = texture(sceneColor, clamp(vUv - vec2(texel.x * 2.0, 0.0), 0.0, 1.0)).rgb;
+    vec3 rightEye = texture(sceneColor, clamp(vUv + vec2(texel.x * 2.0, 0.0), 0.0, 1.0)).rgb;
+    scene = vec3(leftEye.r, rightEye.g, rightEye.b);
+  }
   if (blurAmount > 0.001) {
     vec2 radius = texel * blurAmount;
     scene = scene * 0.36;
@@ -1331,14 +1664,52 @@ function effects.copySceneTarget(source, destination)
   gl.glBindFramebuffer(GL_FRAMEBUFFER, source.framebuffer[0])
 end
 
-local function appendWaterVertex(vertices, x, z, waveExposure, shoreDistance)
+function effects.drawIce(shader, meshes, locations, playerCamera, view, projection, sunDir, atmosphere,
+    background, viewportWidth, viewportHeight, nearPlane, farPlane, atlasTex, settings, model)
+  settings = settings or {}
+  gl.glUseProgram(shader)
+  gl.glUniformMatrix4fv(locations.projection, 1, 0, ffi.new("float[16]", projection))
+  gl.glUniformMatrix4fv(locations.view, 1, 0, ffi.new("float[16]", view))
+  gl.glUniformMatrix4fv(locations.model, 1, 0, ffi.new("float[16]", model))
+  gl.glUniform3f(locations.viewPos, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
+  gl.glUniform3f(locations.sunDir, sunDir[1], sunDir[2], sunDir[3])
+  gl.glUniform3f(locations.fogColor, atmosphere.fogColor[1], atmosphere.fogColor[2], atmosphere.fogColor[3])
+  gl.glUniform3f(locations.skyZenithColor, atmosphere.skyZenith[1], atmosphere.skyZenith[2], atmosphere.skyZenith[3])
+  gl.glUniform3f(locations.lightColor, atmosphere.lightColor[1], atmosphere.lightColor[2], atmosphere.lightColor[3])
+  gl.glUniform2f(locations.viewportSize, viewportWidth, viewportHeight)
+  gl.glUniform2f(locations.clipPlanes, nearPlane, farPlane)
+  local absorption = settings.absorption or {0.045, 0.018, 0.008}
+  gl.glUniform3f(locations.absorption, absorption[1], absorption[2], absorption[3])
+  gl.glUniform2f(locations.iceParams,
+    settings.refractionStrength or 0.010,
+    settings.cloudiness or 1.0)
+  gl.glUniform1i(locations.tex0, 0)
+  gl.glUniform1i(locations.sceneColor, 1)
+  gl.glUniform1i(locations.sceneDepth, 2)
+  gl.glActiveTexture(GL_TEXTURE0)
+  gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
+  gl.glActiveTexture(GL_TEXTURE0 + 1)
+  gl.glBindTexture(GL_TEXTURE_2D, background.colorTexture[0])
+  gl.glActiveTexture(GL_TEXTURE0 + 2)
+  gl.glBindTexture(GL_TEXTURE_2D, background.depthTexture[0])
+  gl.glDisable(GL_BLEND)
+  gl.glDepthMask(1)
+  for i = 1, #meshes do
+    rendering.draw(meshes[i])
+  end
+  gl.glActiveTexture(GL_TEXTURE0)
+end
+
+local function appendWaterVertex(vertices, x, y, z, waveExposure, shoreDistance, shoreX, shoreZ, breaker)
   local n = #vertices
   vertices[n + 1] = x
-  vertices[n + 2] = 0.0
+  vertices[n + 2] = y
   vertices[n + 3] = z
-  vertices[n + 4] = 0.0
-  vertices[n + 5] = 1.0
-  vertices[n + 6] = 0.0
+  -- Water does not consume the mesh-normal attribute. It carries the baked
+  -- coastline direction and breaking-wave strength instead.
+  vertices[n + 4] = shoreX or 0.0
+  vertices[n + 5] = shoreZ or 0.0
+  vertices[n + 6] = breaker or 0.0
   vertices[n + 7] = 1.0
   vertices[n + 8] = 1.0
   vertices[n + 9] = 1.0
@@ -1348,30 +1719,31 @@ local function appendWaterVertex(vertices, x, z, waveExposure, shoreDistance)
   vertices[n + 11] = shoreDistance
 end
 
-local function appendWaterQuad(vertices, x0, z0, x1, z1, waveDataAt)
-  local e01, s01 = 1.0, 1.0
-  local e11, s11 = 1.0, 1.0
-  local e10, s10 = 1.0, 1.0
-  local e00, s00 = 1.0, 1.0
+local function appendWaterQuad(vertices, x0, z0, x1, z1, y, waveDataAt)
+  local e01, s01, x01, z01, b01 = 1.0, 1.0, 0.0, 0.0, 0.0
+  local e11, s11, x11, z11, b11 = 1.0, 1.0, 0.0, 0.0, 0.0
+  local e10, s10, x10, z10, b10 = 1.0, 1.0, 0.0, 0.0, 0.0
+  local e00, s00, x00, z00, b00 = 1.0, 1.0, 0.0, 0.0, 0.0
   if waveDataAt then
-    e01, s01 = waveDataAt(x0, z1)
-    e11, s11 = waveDataAt(x1, z1)
-    e10, s10 = waveDataAt(x1, z0)
-    e00, s00 = waveDataAt(x0, z0)
+    e01, s01, x01, z01, b01 = waveDataAt(x0, z1)
+    e11, s11, x11, z11, b11 = waveDataAt(x1, z1)
+    e10, s10, x10, z10, b10 = waveDataAt(x1, z0)
+    e00, s00, x00, z00, b00 = waveDataAt(x0, z0)
   end
-  appendWaterVertex(vertices, x0, z1, e01, s01)
-  appendWaterVertex(vertices, x1, z1, e11, s11)
-  appendWaterVertex(vertices, x1, z0, e10, s10)
-  appendWaterVertex(vertices, x1, z0, e10, s10)
-  appendWaterVertex(vertices, x0, z0, e00, s00)
-  appendWaterVertex(vertices, x0, z1, e01, s01)
+  appendWaterVertex(vertices, x0, y, z1, e01, s01, x01, z01, b01)
+  appendWaterVertex(vertices, x1, y, z1, e11, s11, x11, z11, b11)
+  appendWaterVertex(vertices, x1, y, z0, e10, s10, x10, z10, b10)
+  appendWaterVertex(vertices, x1, y, z0, e10, s10, x10, z10, b10)
+  appendWaterVertex(vertices, x0, y, z0, e00, s00, x00, z00, b00)
+  appendWaterVertex(vertices, x0, y, z1, e01, s01, x01, z01, b01)
 end
 
-function effects.waterChunkVertices(chunk, offsetX, offsetZ, waterLevel, waterId, stillWaterId, tessellation, waveDataAt)
+function effects.waterChunkVertices(chunk, offsetX, offsetZ, waterLevel, waterId, stillWaterId, tessellation, waveDataAt, maxHeight)
   local vertices = {}
-  local sampleY = math.floor(waterLevel)
   tessellation = math.max(1, math.floor(tessellation or 2))
   local step = 1.0 / tessellation
+  maxHeight = math.max(0, math.floor(maxHeight or 255))
+  local surfaceOffset = waterLevel - math.floor(waterLevel)
 
   local function isWater(id)
     return id == waterId or (stillWaterId and id == stillWaterId)
@@ -1379,29 +1751,37 @@ function effects.waterChunkVertices(chunk, offsetX, offsetZ, waterLevel, waterId
 
   local waveCache = {}
   local function cachedWaveDataAt(x, z)
-    if not waveDataAt then return 1.0, 1.0 end
+    if not waveDataAt then return 1.0, 1.0, 0.0, 0.0, 0.0 end
     local key = tostring(x) .. "," .. tostring(z)
     local cached = waveCache[key]
-    if cached then return cached[1], cached[2] end
-    local exposure, shore = waveDataAt(x, z)
-    cached = {exposure, shore}
+    if cached then return cached[1], cached[2], cached[3], cached[4], cached[5] end
+    local exposure, shore, shoreX, shoreZ, breaker = waveDataAt(x, z)
+    cached = {exposure, shore, shoreX, shoreZ, breaker}
     waveCache[key] = cached
-    return exposure, shore
+    return exposure, shore, shoreX, shoreZ, breaker
   end
 
-  -- Water ownership now follows the voxel chunk. A cell is emitted only where
-  -- the fixed water plane intersects an actual water column, so a chunk that is
-  -- not generated and uploaded cannot reveal an infinite surface behind it.
+  -- Water ownership follows the voxel chunk. Find the top exposed liquid voxel
+  -- in every column instead of probing one global Y; this preserves elevated
+  -- lakes and each level reach of a river across chunk boundaries.
   for z = 0, 15 do
     for x = 0, 15 do
-      if isWater(chunk:getBlock(x, sampleY, z)) then
+      local surfaceBlockY = nil
+      for y = maxHeight, 0, -1 do
+        if isWater(chunk:getBlock(x, y, z)) then
+          surfaceBlockY = y
+          break
+        end
+      end
+      if surfaceBlockY then
+        local surfaceY = surfaceBlockY - 1.0 + surfaceOffset
         for subZ = 0, tessellation - 1 do
           for subX = 0, tessellation - 1 do
             local x0 = offsetX + x + subX * step
             local x1 = x0 + step
             local z0 = offsetZ + z + subZ * step
             local z1 = z0 + step
-            appendWaterQuad(vertices, x0, z0, x1, z1, cachedWaveDataAt)
+            appendWaterQuad(vertices, x0, z0, x1, z1, surfaceY, cachedWaveDataAt)
           end
         end
       end
@@ -1414,8 +1794,9 @@ end
 -- Coarse far-ocean tiles extend the horizon without bringing the infinite
 -- plane back. The caller supplies a procedural ocean predicate, so coastline
 -- and inland land cells remain empty even before their full voxel chunks load.
-function effects.waterTileVertices(offsetX, offsetZ, size, coverageSubdivisions, hasWater, meshSubdivisions, waveDataAt)
+function effects.waterTileVertices(offsetX, offsetZ, size, coverageSubdivisions, hasWater, meshSubdivisions, waveDataAt, surfaceY)
   local vertices = {}
+  surfaceY = surfaceY or 62.65
   coverageSubdivisions = math.max(1, math.floor(coverageSubdivisions or 4))
   meshSubdivisions = math.max(coverageSubdivisions, math.floor(meshSubdivisions or coverageSubdivisions))
   local tessellation = math.max(1, math.floor(meshSubdivisions / coverageSubdivisions + 0.5))
@@ -1434,7 +1815,8 @@ function effects.waterTileVertices(offsetX, offsetZ, size, coverageSubdivisions,
             local meshX0 = x0 + subX * meshStep
             local meshZ0 = z0 + subZ * meshStep
             appendWaterQuad(
-              vertices, meshX0, meshZ0, meshX0 + meshStep, meshZ0 + meshStep, waveDataAt
+              vertices, meshX0, meshZ0, meshX0 + meshStep, meshZ0 + meshStep,
+              surfaceY, waveDataAt
             )
           end
         end
@@ -1475,22 +1857,25 @@ function effects.createShadowMap(size)
   }
 end
 
-function effects.lightSpaceMatrix(playerPosition, sunDir, terrainMaxHeight, distance, near, far)
+function effects.lightSpaceMatrix(playerPosition, sunDir, terrainMaxHeight, distance, near, far, localUp)
   local lightDir = math3d.normalize(sunDir)
-  local center = {playerPosition[1], terrainMaxHeight * 0.45, playerPosition[3]}
+  local center = {playerPosition[1],playerPosition[2],playerPosition[3]}
   local eye = {
     center[1] + lightDir[1] * distance,
     center[2] + lightDir[2] * distance,
     center[3] + lightDir[3] * distance
   }
-  local up = math.abs(lightDir[2]) > 0.92 and {0.0, 0.0, 1.0} or {0.0, 1.0, 0.0}
+  local up=localUp or {0.0,1.0,0.0}
+  if math.abs(math3d.dot(lightDir,up))>0.92 then
+    up=math.abs(lightDir[1])<0.8 and {1,0,0} or {0,0,1}
+  end
   local lightView = math3d.lookAt(eye, center, up)
   local lightProjection = math3d.ortho(-distance, distance, -distance, distance, near, far)
 
   return math3d.multiplyMat4(lightProjection, lightView)
 end
 
-function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMeshes, characterMesh, lightSpaceMatrix, model, mapSize, viewportWidth, viewportHeight, atlasTex)
+function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMeshes, characterMesh, lightSpaceMatrix, model, mapSize, viewportWidth, viewportHeight, atlasTex, viewPos, time, foliage)
   gl.glViewport(0, 0, mapSize, mapSize)
   gl.glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer[0])
   gl.glClear(GL_DEPTH_BUFFER_BIT)
@@ -1498,6 +1883,13 @@ function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMes
   gl.glUniformMatrix4fv(locations.lightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
   gl.glUniformMatrix4fv(locations.model, 1, 0, ffi.new("float[16]", model))
   gl.glUniform1i(locations.tex0, 0)
+  gl.glUniform3f(locations.viewPos, viewPos[1], viewPos[2], viewPos[3])
+  gl.glUniform1f(locations.time, time)
+  gl.glUniform4f(locations.foliageParams,
+    foliage.grassCullStart or 64.0,
+    foliage.grassCullEnd or 104.0,
+    foliage.leafWindDistance or 112.0,
+    foliage.foliageWindStrength or 1.0)
   if atlasTex then
     gl.glActiveTexture(GL_TEXTURE0)
     gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
@@ -1507,6 +1899,7 @@ function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMes
 
   for _, mesh in pairs(terrainMeshes) do
     rendering.draw(mesh)
+    if mesh.leafMesh then rendering.draw(mesh.leafMesh) end
   end
   if characterMesh then
     rendering.draw(characterMesh)
@@ -1537,10 +1930,13 @@ function effects.drawWater(waterShader, waterMeshes, locations, playerCamera, vi
   gl.glUniform3f(locations.displacementWeights, displacementWeights[1], displacementWeights[2], displacementWeights[3])
   gl.glUniform3f(locations.normalWeights, normalWeights[1], normalWeights[2], normalWeights[3])
   gl.glUniform1f(locations.openWaterWaveBoost, ocean.openWaterWaveBoost)
+  gl.glUniform4f(locations.breakerParams,
+    ocean.breakerParams[1], ocean.breakerParams[2], ocean.breakerParams[3], ocean.breakerParams[4])
   gl.glUniform2f(locations.viewportSize, viewportWidth, viewportHeight)
   gl.glUniform2f(locations.clipPlanes, nearPlane, farPlane)
   gl.glUniform1f(locations.time, time or 0.0)
   gl.glUniform1f(locations.refractionStrength, ocean.refractionStrength)
+  gl.glUniform2f(locations.snellParams, ocean.snellParams[1], ocean.snellParams[2])
   gl.glUniform3f(locations.absorption, absorption[1], absorption[2], absorption[3])
 
   gl.glUniform1i(locations.displacementMap0, 0)
@@ -1577,7 +1973,7 @@ end
 function effects.renderVolumetricFog(volume, shaders, playerCamera, sunDir, atmosphereState, fov, viewportWidth, viewportHeight, waterLevel, settings, shadowMap, lightSpaceMatrix)
   settings = settings or {}
   local forward = playerCamera:getFront()
-  local worldUp = {0.0, 1.0, 0.0}
+  local worldUp = playerCamera.getLocalUp and playerCamera:getLocalUp() or {0.0, 1.0, 0.0}
   local right = math3d.normalize(math3d.cross(forward, worldUp))
   local up = math3d.normalize(math3d.cross(right, forward))
   local projectionY = math.tan(fov / 2)
@@ -1602,7 +1998,13 @@ function effects.renderVolumetricFog(volume, shaders, playerCamera, sunDir, atmo
   gl.glUniform3f(injectionLocations.fogParams, atmosphereState.fogStart, atmosphereState.fogEnd, settings.maxFogAmount or 0.72)
   gl.glUniform3f(injectionLocations.atmosphereParams, settings.heightFogDensity or 0.0045, settings.heightFogFalloff or 0.055, settings.horizonFog or 0.24)
   gl.glUniform3f(injectionLocations.volumeParams, volumeNear, volumeFar, settings.sunScatter or 0.65)
-  gl.glUniform1f(injectionLocations.baseHeight, settings.fogBaseHeight or waterLevel)
+  gl.glUniform3f(injectionLocations.localUp, worldUp[1], worldUp[2], worldUp[3])
+  local absolutePosition = playerCamera.absolutePosition or playerCamera.position
+  local cameraAltitude = absolutePosition[2] - (settings.fogBaseHeight or waterLevel)
+  if playerCamera.planet then
+    cameraAltitude = playerCamera.planet:altitudeMeters(absolutePosition)
+  end
+  gl.glUniform1f(injectionLocations.cameraAltitude, cameraAltitude)
   gl.glUniformMatrix4fv(injectionLocations.lightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
   gl.glActiveTexture(GL_TEXTURE0)
   gl.glBindTexture(GL_TEXTURE_2D, shadowMap.depthTexture[0])
@@ -1627,7 +2029,7 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   grade = grade or {}
 
   local forward = playerCamera:getFront()
-  local worldUp = {0.0, 1.0, 0.0}
+  local worldUp = playerCamera.getLocalUp and playerCamera:getLocalUp() or {0.0, 1.0, 0.0}
   local right = math3d.normalize(math3d.cross(forward, worldUp))
   local up = math3d.normalize(math3d.cross(right, forward))
   local projectionY = math.tan(fov / 2)
@@ -1662,6 +2064,7 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
     mode = 2.0
   end
   gl.glUniform3f(locations.tonemapParams, mode, grade.tonemapKnee or 0.80, grade.tonemapWhite or 2.2)
+  gl.glUniform1f(locations.anaglyphAmount, grade.anaglyph and 1.0 or 0.0)
 
   gl.glActiveTexture(GL_TEXTURE3)
   gl.glBindTexture(GL_TEXTURE_2D, bloomTexture or sceneTarget.colorTexture[0])

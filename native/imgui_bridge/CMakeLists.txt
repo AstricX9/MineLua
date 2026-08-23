@@ -15,7 +15,7 @@ add_library(minelua_imgui SHARED
 
 # Keep the developer bridge replaceable while a previous game session still
 # has the original DLL mapped (Windows locks loaded DLL files).
-set_target_properties(minelua_imgui PROPERTIES OUTPUT_NAME "minelua_imgui_tools_v2")
+set_target_properties(minelua_imgui PROPERTIES OUTPUT_NAME "minelua_imgui_tools_v3")
 
 target_include_directories(minelua_imgui PRIVATE
   "${IMGUI_DIR}"

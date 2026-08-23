@@ -41,6 +41,19 @@ typedef struct MineLuaDevUiState {
   int preview_mode;
   int preview_rebuild_requested;
   int want_capture_mouse;
+  int navigation_open;
+  int fly_enabled;
+  float fly_speed_multiplier;
+  int freeze_streaming;
+  int teleport_requested;
+  int capture_requested;
+  float teleport_latitude;
+  float teleport_longitude;
+  float teleport_altitude;
+  float current_latitude;
+  float current_longitude;
+  float current_altitude;
+  float time_scale;
 } MineLuaDevUiState;
 
 int ml_imgui_init(void);
@@ -49,9 +62,10 @@ void ml_imgui_new_frame(float width, float height, float delta_time,
   float mouse_x, float mouse_y, int mouse_buttons);
 void ml_imgui_draw(MineLuaDevUiState* state);
 void ml_imgui_render(void);
+int ml_imgui_state_size(void);
 ]]
 
-local native = ffi.load("lib/minelua_imgui_tools_v2.dll")
+local native = ffi.load("lib/minelua_imgui_tools_v3.dll")
 
 local DevMenu = {}
 DevMenu.__index = DevMenu
@@ -59,6 +73,18 @@ DevMenu.__index = DevMenu
 function DevMenu.new()
   if native.ml_imgui_init() == 0 then
     error("Failed to initialize Dear ImGui OpenGL renderer")
+  end
+
+  -- The cdef above is a hand-kept mirror of the C++ struct. A mismatch would
+  -- not fail loudly; it would write past the end of the allocation. Compare
+  -- the sizes instead of trusting that both were edited together.
+  local nativeSize = native.ml_imgui_state_size()
+  local mirroredSize = ffi.sizeof("MineLuaDevUiState")
+  if nativeSize ~= mirroredSize then
+    error(string.format(
+      "Dev UI state layout mismatch: the bridge reports %d bytes, dev_menu.lua describes %d. " ..
+      "Rebuild lib/minelua_imgui_tools_v3.dll with build_imgui.bat, or resync the ffi.cdef.",
+      tonumber(nativeSize), tonumber(mirroredSize)))
   end
 
   local state = ffi.new("MineLuaDevUiState[1]")
@@ -100,6 +126,19 @@ function DevMenu.new()
   state[0].preview_mode = 0
   state[0].preview_rebuild_requested = 0
   state[0].want_capture_mouse = 0
+  state[0].navigation_open = 0
+  state[0].fly_enabled = 0
+  state[0].fly_speed_multiplier = 1.0
+  state[0].freeze_streaming = 0
+  state[0].teleport_requested = 0
+  state[0].capture_requested = 0
+  state[0].teleport_latitude = 0.0
+  state[0].teleport_longitude = 0.0
+  state[0].teleport_altitude = 120.0
+  state[0].current_latitude = 0.0
+  state[0].current_longitude = 0.0
+  state[0].current_altitude = 0.0
+  state[0].time_scale = 1.0
 
   return setmetatable({state = state}, DevMenu)
 end
@@ -131,7 +170,8 @@ function DevMenu:stagedGenerationSettings()
     elevationCooling = tonumber(state.elevation_cooling),
     freezeTemperature = tonumber(state.freeze_temperature),
     grassTintStrength = tonumber(state.grass_tint_strength),
-    treeDensity = tonumber(state.tree_density)
+    treeDensity = tonumber(state.tree_density),
+    grassDensity = graphics.terrainGeneration.grassDensity or 1.35
   }
 end
 
@@ -230,6 +270,63 @@ function DevMenu:processExportRequest()
   file:close()
   self.state[0].export_status = 1
   return true
+end
+
+-- Navigation panel. The world that is actually loaded is a ball roughly 100 m
+-- across, so exploring it on foot at 5 m/s is not a realistic proposition;
+-- these are the controls that make a planet-sized world navigable.
+
+function DevMenu:flyEnabled()
+  return self.state[0].fly_enabled ~= 0
+end
+
+function DevMenu:setFlyEnabled(enabled)
+  self.state[0].fly_enabled = enabled and 1 or 0
+end
+
+function DevMenu:flySpeedMultiplier()
+  return math.max(1.0, tonumber(self.state[0].fly_speed_multiplier) or 1.0)
+end
+
+function DevMenu:freezesStreaming()
+  return self.state[0].freeze_streaming ~= 0
+end
+
+function DevMenu:timeScale()
+  return math.max(0.0, tonumber(self.state[0].time_scale) or 1.0)
+end
+
+-- Latitude and longitude in degrees, altitude in metres above sea level.
+function DevMenu:consumeTeleportRequest()
+  if self.state[0].teleport_requested == 0 then return nil end
+  self.state[0].teleport_requested = 0
+  return tonumber(self.state[0].teleport_latitude),
+    tonumber(self.state[0].teleport_longitude),
+    tonumber(self.state[0].teleport_altitude)
+end
+
+function DevMenu:consumeCaptureRequest()
+  if self.state[0].capture_requested == 0 then return false end
+  self.state[0].capture_requested = 0
+  self.state[0].teleport_latitude = self.state[0].current_latitude
+  self.state[0].teleport_longitude = self.state[0].current_longitude
+  self.state[0].teleport_altitude = self.state[0].current_altitude
+  return true
+end
+
+function DevMenu:setCurrentLocation(latitude, longitude, altitude)
+  local state = self.state[0]
+  state.current_latitude = latitude or 0.0
+  state.current_longitude = longitude or 0.0
+  state.current_altitude = altitude or 0.0
+end
+
+-- Opens the toolstrip with the navigation panel showing. Used by the headless
+-- smoke run: with the menu closed the panel code never executes at all, so a
+-- mistake in it would not surface until someone pressed F4.
+function DevMenu:openNavigation()
+  self.state[0].menu_open = 1
+  self.state[0].navigation_open = 1
 end
 
 function DevMenu:isOpen()

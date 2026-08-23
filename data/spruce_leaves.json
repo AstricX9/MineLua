@@ -5,6 +5,7 @@
   "properties": {
     "solid": true,
     "cutout": true,
-    "leaves": true
+    "leaves": true,
+    "doubleSided": true
   }
 }
