@@ -43,6 +43,17 @@ graphics.player = {
 graphics.world = {
   terrainMaxHeight = 127,
   chunkRenderRadius = 8,
+  -- The loaded region is an ellipsoid around the player, wide across the ground
+  -- and shallow through it. It must reach past chunkRenderRadius, or the
+  -- renderer draws to where the world stops existing.
+  chunkLoadRadius = 9,
+  chunkLoadRadiusVertical = 5,
+  -- Voxels are individually rotated so their local up is radial, addressed on
+  -- a cube-sphere. See src/spherical_grid.lua. Set false for the old globally
+  -- aligned Cartesian lattice.
+  sphericalVoxels = true,
+  -- Column stacks kept loaded around the player, in 16-voxel chunks.
+  gridLoadRadius = 6,
   visualDistance = 320.0
 }
 
@@ -322,5 +333,18 @@ local function loadSettings(path)
 end
 
 mergeSettings(graphics, loadSettings("data/settings.json"))
+
+-- Normalise the load region after the merge. It must reach at least one chunk
+-- past what the renderer draws: if it does not, the renderer draws to where the
+-- world stops existing and the far side of the loaded region appears in frame
+-- as flat plateaus and floating islands.
+local world = graphics.world
+world.chunkRenderRadius = math.max(1, math.floor(world.chunkRenderRadius or 8))
+world.chunkLoadRadius = math.max(
+  math.floor(world.chunkLoadRadius or (world.chunkRenderRadius + 1)),
+  world.chunkRenderRadius + 1)
+world.chunkLoadRadiusVertical = math.max(1, math.min(
+  math.floor(world.chunkLoadRadiusVertical or math.ceil(world.chunkLoadRadius * 0.55)),
+  world.chunkLoadRadius))
 
 return graphics

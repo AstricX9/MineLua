@@ -29,6 +29,15 @@ local OPTIONS = {
     game.autoStartWorld = tonumber(value) or true
     return tonumber(value) and 1 or 0
   end,
+  ["--walk"] = function(value)
+    game.autoWalk = tonumber(value) or 8.0
+    return tonumber(value) and 1 or 0
+  end,
+  ["--cartesian"] = function()
+    -- Falls back to the old globally aligned voxel lattice.
+    require("graphics_settings").world.sphericalVoxels = false
+    return 0
+  end,
   ["--devmenu"] = function()
     game.openDevMenu = true
     return 0

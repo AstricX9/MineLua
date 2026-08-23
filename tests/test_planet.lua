@@ -44,8 +44,16 @@ assert(sample.surfaceRadiusVoxels > 6300000.0, "surface uses Earth-scale global 
 
 local origin = world.planet:snappedRenderOrigin(spawn)
 local renderPosition = {spawn[1] - origin[1], spawn[2] - origin[2], spawn[3] - origin[3]}
-assert(math.abs(renderPosition[1]) <= 128.0 and math.abs(renderPosition[2]) <= 128.0 and math.abs(renderPosition[3]) <= 128.0,
-  "floating origin keeps GPU coordinates local")
+-- Half the origin grid, since the origin snaps to the nearest grid point. The
+-- bound is derived rather than written down, so raising renderOriginGridMeters
+-- does not silently look like a regression.
+local originBound = planet.renderOriginGridMeters / planet.voxelSizeMeters * 0.5 + 1.0
+assert(math.abs(renderPosition[1]) <= originBound and math.abs(renderPosition[2]) <= originBound
+  and math.abs(renderPosition[3]) <= originBound,
+  string.format("floating origin keeps GPU coordinates local (bound %.0f)", originBound))
+-- And they stay small enough for a 32-bit vertex buffer: at this magnitude a
+-- float resolves well under a millimetre.
+assert(originBound < 4096.0, "the origin grid stays inside single-precision comfort")
 
 -- Earth-scale DDA selection: insert one ordinary Cartesian block and hit it
 -- from three metres away. No float conversion is involved in this path.

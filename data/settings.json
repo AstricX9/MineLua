@@ -8,7 +8,9 @@
   "world": {
     "terrainMaxHeight": 127,
     "chunkRenderRadius": 8,
-    "visualDistance": 320.0
+    "visualDistance": 320.0,
+    "chunkLoadRadius": 9,
+    "chunkLoadRadiusVertical": 5
   },
   "planet": {
     "center": [0.0, 0.0, 0.0],
@@ -19,7 +21,7 @@
     "minTerrainElevationMeters": -220.0,
     "maxTerrainElevationMeters": 300.0,
     "generatedInteriorDepthMeters": 192.0,
-    "renderOriginGridMeters": 256.0
+    "renderOriginGridMeters": 2048.0
   },
   "terrainGeneration": {
     "seed": 1,

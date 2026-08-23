@@ -29,7 +29,7 @@ function Planet.new(options)
     minTerrainElevationMeters = tonumber(options.minTerrainElevationMeters) or -220.0,
     maxTerrainElevationMeters = tonumber(options.maxTerrainElevationMeters) or 300.0,
     generatedInteriorDepthMeters = tonumber(options.generatedInteriorDepthMeters) or 192.0,
-    renderOriginGridMeters = tonumber(options.renderOriginGridMeters) or 256.0
+    renderOriginGridMeters = tonumber(options.renderOriginGridMeters) or 2048.0
   }, Planet)
   self.seaLevelRadiusVoxels = self.radiusVoxels + self.seaLevelOffsetMeters / voxelSize
   self.minSurfaceRadiusVoxels = self.radiusVoxels + self.minTerrainElevationMeters / voxelSize

@@ -9,6 +9,10 @@ local World = {}
 World.__index = World
 
 local CHUNK_SIZE = 16
+-- Below this depth every block is stone, so a chunk entirely under it needs no
+-- per-voxel surface evaluation. Must match the deepest band in
+-- terrain.fillPlanetChunk that is not plain stone.
+local SURFACE_BLOCK_DEPTH_METERS = 9.0
 local NEIGHBOURS = {}
 for dz = -1, 1 do
   for dy = -1, 1 do
@@ -22,7 +26,15 @@ function World.new(options)
   options = options or {}
   local self = setmetatable({}, World)
   self.chunks = {}
-  self.chunkRadius = options.chunkRadius3D or math.min(options.chunkRadius or 4, 6)
+  -- The loaded region is an ellipsoid aligned to the local up: wide across the
+  -- ground, shallow through it. A sphere spends most of its volume on solid
+  -- rock underfoot and empty air overhead, and worse, its horizontal reach is
+  -- eaten by however much the ground rises or falls -- so on terrain with any
+  -- relief the render radius outruns it and you see the far side of the loaded
+  -- ball as flat plateaus and floating islands.
+  self.chunkRadius = options.chunkRadius3D or math.max(1, options.chunkRadius or 4)
+  self.chunkRadiusVertical = math.max(1, math.min(
+    options.chunkRadiusVertical or math.ceil(self.chunkRadius * 0.55), self.chunkRadius))
   self.maxHeight = CHUNK_SIZE - 1
   self.generatorType = options.generatorType or "default"
   self.superflatLayers = options.superflatLayers
@@ -51,13 +63,36 @@ function World:createChunk(chunkX, chunkY, chunkZ, generationOptions)
   local key = World.chunkKey(chunkX, chunkY, chunkZ)
   if self.chunks[key] then return self.chunks[key] end
   local offsetX, offsetY, offsetZ = chunkX * CHUNK_SIZE, chunkY * CHUNK_SIZE, chunkZ * CHUNK_SIZE
-  local classification = self.planet:classifyChunk(chunkX, chunkY, chunkZ, CHUNK_SIZE)
+  terrain.setSeed(self.seed)
+  local classification, minDistance, maxDistance =
+    self.planet:classifyChunk(chunkX, chunkY, chunkZ, CHUNK_SIZE)
+  local surfaceCorners
+  if classification == "surface" then
+    -- The planet-wide band is 500 m tall, so it calls nearly everything near
+    -- the ground a surface chunk and every one of those pays for a full
+    -- 4096-voxel generation. Nine terrain samples say what the ground is doing
+    -- over this chunk in particular, and most chunks turn out to be wholly
+    -- above it, or deep enough under it that only the caves matter.
+    local low, high, corners = terrain.chunkSurfaceBounds(chunkX, chunkY, chunkZ, CHUNK_SIZE, self.planet)
+    local voxelSize = self.planet.voxelSizeMeters
+    if minDistance > high then
+      classification = "outside"
+    elseif maxDistance < low - self.planet.generatedInteriorDepthMeters / voxelSize then
+      classification = "interior"
+    elseif maxDistance < low - SURFACE_BLOCK_DEPTH_METERS / voxelSize then
+      classification = "buried"
+      -- Copied because chunkSurfaceBounds reuses its corner table.
+      surfaceCorners = {corners[1], corners[2], corners[3], corners[4],
+        corners[5], corners[6], corners[7], corners[8]}
+    end
+  end
   local uniform = classification == "interior" and (blocks.stone or 1) or 0
   local chunk = Chunk.new(uniform)
   generationOptions = generationOptions or {}
-  terrain.setSeed(self.seed)
   if classification == "surface" then
     terrain.fillPlanetChunk(chunk, offsetX, offsetY, offsetZ, self.planet, generationOptions)
+  elseif classification == "buried" then
+    terrain.fillBuriedChunk(chunk, offsetX, offsetY, offsetZ, self.planet, surfaceCorners, generationOptions)
   end
   local entry = {
     chunk = chunk, chunkX = chunkX, chunkY = chunkY, chunkZ = chunkZ,
@@ -90,15 +125,35 @@ end
 
 function World:createChunkSync(chunkX, chunkY, chunkZ) return self:createChunk(chunkX, chunkY, chunkZ) end
 
+-- Squared ellipsoid score for a chunk offset, measured in the local frame: 1.0
+-- is the boundary. The offset is split into the component along the local up
+-- and the rest, so the region follows the ground rather than the block grid.
+function World:chunkRegionScore(dx, dy, dz, up, radius, vertical)
+  local radial = dx * up[1] + dy * up[2] + dz * up[3]
+  local tx, ty, tz = dx - up[1] * radial, dy - up[2] * radial, dz - up[3] * radial
+  local tangentialSquared = tx * tx + ty * ty + tz * tz
+  return tangentialSquared / (radius * radius) + radial * radial / (vertical * vertical)
+end
+
+function World:chunkWithinLoadRegion(chunkX, chunkY, chunkZ, x, y, z, slack)
+  slack = slack or 0
+  local cx, cy, cz = World.chunkCoord(x), World.chunkCoord(y), World.chunkCoord(z)
+  local up = self.planet:localUp({x, y, z})
+  return self:chunkRegionScore(chunkX - cx, chunkY - cy, chunkZ - cz, up,
+    self.chunkRadius + slack, self.chunkRadiusVertical + slack) <= 1.0
+end
+
 function World:chunkCoordsAroundBlock(x, y, z, radius)
   radius = radius or self.chunkRadius
+  local vertical = math.max(1, math.min(self.chunkRadiusVertical or radius, radius))
   local cx, cy, cz = World.chunkCoord(x), World.chunkCoord(y), World.chunkCoord(z)
+  local up = self.planet:localUp({x, y, z})
   local coords = {}
   for dz = -radius, radius do
     for dy = -radius, radius do
       for dx = -radius, radius do
-        local distanceSquared = dx * dx + dy * dy + dz * dz
-        if distanceSquared <= radius * radius then
+        if self:chunkRegionScore(dx, dy, dz, up, radius, vertical) <= 1.0 then
+          local distanceSquared = dx * dx + dy * dy + dz * dz
           coords[#coords + 1] = {chunkX = cx + dx, chunkY = cy + dy, chunkZ = cz + dz, distanceSquared = distanceSquared}
         end
       end
@@ -236,6 +291,18 @@ end
 
 function World:blockSampler(chunkX, chunkY, chunkZ) return buildNeighbourSampler(self, chunkX, chunkY, chunkZ, false) end
 function World:skyLightSampler(chunkX, chunkY, chunkZ) return buildNeighbourSampler(self, chunkX, chunkY, chunkZ, true) end
+
+-- Point-based collision. The camera used to floor a position into integer
+-- block coordinates itself, which hard-codes a Cartesian lattice into the
+-- physics; asking the world about a *point* lets a different voxel topology
+-- answer for itself.
+function World:isSolidAtPoint(x, y, z)
+  return self:isSolidBlock(math.floor(x), math.floor(y), math.floor(z))
+end
+
+function World:hasCollisionAtPoint(x, y, z)
+  return self:hasCollisionAtBlock(math.floor(x), math.floor(y), math.floor(z))
+end
 
 function World:isSolidBlock(x, y, z)
   local id = self:blockAt(x, y, z)

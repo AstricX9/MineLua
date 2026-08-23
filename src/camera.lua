@@ -129,8 +129,11 @@ end
 
 function Camera:getBodyHeight() return self.eyeHeight+0.18 end
 
+-- Collision is asked about points, never about integer block indices: the
+-- second form assumes a Cartesian lattice and cannot be answered by a
+-- spherical voxel grid.
 local function sampleSolid(world,point)
-  return world:isSolidBlock(math.floor(point[1]),math.floor(point[2]),math.floor(point[3]))
+  return world:isSolidAtPoint(point[1],point[2],point[3])
 end
 
 function Camera:hasBodyClearance(world, eyePosition, allowMissingCollision)
@@ -144,9 +147,9 @@ function Camera:hasBodyClearance(world, eyePosition, allowMissingCollision)
     for j=1,#rings do
       local a,b=rings[j][1]*self.bodyRadius,rings[j][2]*self.bodyRadius
       local point={feet[1]+up[1]*heights[i]+right[1]*a+forward[1]*b,feet[2]+up[2]*heights[i]+right[2]*a+forward[2]*b,feet[3]+up[3]*heights[i]+right[3]*a+forward[3]*b}
-      local bx,by,bz=math.floor(point[1]),math.floor(point[2]),math.floor(point[3])
-      if not allowMissingCollision and not world:hasCollisionAtBlock(bx,by,bz) then return false end
-      if world:hasCollisionAtBlock(bx,by,bz) and sampleSolid(world,point) then return false end
+      local loaded=world:hasCollisionAtPoint(point[1],point[2],point[3])
+      if not allowMissingCollision and not loaded then return false end
+      if loaded and sampleSolid(world,point) then return false end
     end
   end
   return true
@@ -168,10 +171,8 @@ function Camera:groundDistance(world,maxDistance)
   maxDistance=maxDistance or self.eyeHeight+self.stepHeight+0.5
   local px,py,pz=self.position[1],self.position[2],self.position[3]
   local function solidAt(distance)
-    return world:isSolidBlock(
-      math.floor(px+down[1]*distance),
-      math.floor(py+down[2]*distance),
-      math.floor(pz+down[3]*distance))
+    return world:isSolidAtPoint(
+      px+down[1]*distance, py+down[2]*distance, pz+down[3]*distance)
   end
   local low=self.eyeHeight-0.20
   local air=nil
@@ -337,6 +338,15 @@ end
 function Camera:updateMovement(dt,window,world)
   dt=math.min(dt,0.05) self.planet=world.planet self:updateFlightToggle(window) self:movementInput(dt,window) self:updateRadialMovement(dt,window,world)
   local candidate={self.position[1]+self.velocity[1]*dt,self.position[2]+self.velocity[2]*dt,self.position[3]+self.velocity[3]*dt}
+  -- Developer flight is genuinely no-clip, as its label promises. Collision was
+  -- still being tested before, and at a few hundred metres a second you cross
+  -- whole chunks between frames, so you tunnel into rock and then every
+  -- candidate position is solid -- stuck, with no way out but a teleport.
+  if self.noclip then
+    self.position=candidate
+    self:stabilizeHeading()
+    return
+  end
   if self:hasBodyClearance(world,candidate,self.flying) then self.position=candidate else
     local up=self:getLocalUp() local tangent=math3d.projectOnPlane(self.velocity,up)
     local radialOnly={self.position[1]+up[1]*self.radialVelocity*dt,self.position[2]+up[2]*self.radialVelocity*dt,self.position[3]+up[3]*self.radialVelocity*dt}

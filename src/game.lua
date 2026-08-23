@@ -730,8 +730,22 @@ vec3 sunTransmittance(vec3 origin, vec3 rayDir) {
 // fbm sums five unnormalised octaves of noise in [0,1], so it clusters near
 // 0.52 with a standard deviation around 0.15 rather than filling its range.
 // Rescaling here is what lets the coverage threshold below mean something.
+//
+// Three octaves rather than five: the cloud march samples this three times a
+// step, twenty-four steps a pixel, at full resolution. Measured at 2560x1369,
+// the layer cost 6.8 ms a frame -- clouds on 83 fps against 180 fps off. The
+// two octaves dropped here sit below a kilometre in a field whose smallest
+// meaningful feature is the wisp term, so they cost frame time without
+// changing what the sky looks like.
 float cloudField(vec3 p) {
-  return clamp(0.5 + (fbm(p) - 0.52) * 1.8, 0.0, 1.0);
+  float f = noise(p) / 2.0;
+  p = cloudMatrix * p * 1.1;
+  f += noise(p) / 4.0;
+  p = cloudMatrix * p * 1.2;
+  f += noise(p) / 6.0;
+  // Same centre and spread as the five-octave form, so the coverage numbers
+  // below did not have to be retuned.
+  return clamp(0.5 + (f - 0.4583) * 1.55, 0.0, 1.0);
 }
 
 vec4 sphericalCloudLayer(vec3 origin, vec3 rayDir, vec3 sunDirection, float seconds) {
@@ -758,7 +772,7 @@ vec4 sphericalCloudLayer(vec3 origin, vec3 rayDir, vec3 sunDirection, float seco
   if (groundHit > 0.0) rayEnd = min(rayEnd, groundHit);
   if (rayEnd <= rayStart) return vec4(0.0);
 
-  const int CLOUD_STEPS = 24;
+  const int CLOUD_STEPS = 18;
   float stepLength = (rayEnd - rayStart) / float(CLOUD_STEPS);
   vec3 drift = vec3(seconds * 0.0018, seconds * 0.00035, -seconds * 0.0011);
 
@@ -1478,6 +1492,7 @@ local function planetWaterChunkVertices(entry,world)
   return vertices
 end
 
+
 local function uploadTerrainChunkMesh(entry, vertices, options)
   options = options or {}
   entry.renderOrigin = options.world and options.world.renderOrigin or entry.renderOrigin or {0,0,0}
@@ -1531,6 +1546,90 @@ local function releaseTerrainMeshes(terrainMeshes)
     terrainMeshes[key] = nil
   end
 end
+
+-- Starts the spherical voxel world: a GridWorld the physics collides against
+-- and a GridRuntime that keeps it generated and meshed around the player.
+--
+-- Hangs off the module table because this file is at Lua's 200-local ceiling.
+function game.startGridWorld(world, playerCamera, terrainMeshes, radius)
+  local GridWorld = require("grid_world")
+  local GridRuntime = require("grid_runtime")
+  local planet = world.planet
+  local gridWorld = GridWorld.new(planet, world.seed)
+
+  local runtime = GridRuntime.new(gridWorld, {
+    radius = radius or 5,
+    renderOrigin = world.renderOrigin,
+    upload = function(key, vertices)
+      releaseTerrainMesh(terrainMeshes[key])
+      terrainMeshes[key] = #vertices > 0 and uploadTerrainMesh(vertices) or nil
+    end,
+    release = function(key)
+      releaseTerrainMesh(terrainMeshes[key])
+      terrainMeshes[key] = nil
+    end
+  })
+
+  -- Stand the player on the grid terrain before anything else: the Cartesian
+  -- surface under them can sit a metre away from it, which would drop them
+  -- into the ground or leave them hanging.
+  local up = planet:localUp(playerCamera.position)
+  local surfaceRadius = gridWorld:surfaceRadius(up[1], up[2], up[3])
+  local standRadius = surfaceRadius + playerCamera.eyeHeight + 1.0
+  playerCamera.position = {
+    planet.center[1] + up[1] * standRadius,
+    planet.center[2] + up[2] * standRadius,
+    planet.center[3] + up[3] * standRadius
+  }
+  playerCamera.velocity = {0, 0, 0}
+  playerCamera.radialVelocity, playerCamera.velocityY = 0, 0
+  playerCamera.grounded = false
+
+  -- Load the ground under their feet synchronously, so they do not spawn into
+  -- an unloaded hole and fall.
+  runtime:refocus(playerCamera.position)
+  for _ = 1, 9 do
+    if runtime:ready() then break end
+    runtime:update(playerCamera.position)
+  end
+
+  return gridWorld, runtime
+end
+
+-- Break or place a block on the spherical grid.
+function game.updateGridEditInput(window, state, runtime, playerCamera, dt)
+  state.gridEdit = state.gridEdit or {attack = false, use = false, cooldown = 0.0}
+  local edit = state.gridEdit
+  edit.cooldown = math.max(0.0, edit.cooldown - dt)
+
+  local attack = playerCamera:controlDown(window, "attack", "MOUSE1")
+  local use = playerCamera:controlDown(window, "use", "MOUSE2")
+  local wantsBreak = attack and (not edit.attack or edit.cooldown <= 0.0)
+  local wantsPlace = use and not edit.use
+  edit.attack, edit.use = attack, use
+  if not (wantsBreak or wantsPlace) then return end
+
+  local origin = playerCamera.position
+  local hit = runtime.world:raycast(origin, playerCamera:getFront(), playerCamera.reach or 6.0)
+  if not hit then return end
+
+  if wantsBreak then
+    if runtime:setBlock(hit.face, hit.column, hit.row, hit.layer, blocks.air or 0) then
+      edit.cooldown = 0.22
+      state.stats.blocksMined = (state.stats.blocksMined or 0) + 1
+    end
+  elseif wantsPlace and hit.previous then
+    local slot = state.inventory and state.inventory:selectedItem()
+    local id = slot and slot.id
+    if id and id ~= 0 then
+      local previous = hit.previous
+      if runtime:setBlock(previous.face, previous.column, previous.row, previous.layer, id) then
+        state.stats.blocksPlaced = (state.stats.blocksPlaced or 0) + 1
+      end
+    end
+  end
+end
+
 
 local function uploadSkyMesh()
   local vertices = {
@@ -1960,7 +2059,8 @@ end
 local function createWorldLoadingJob(config)
   local seed = tonumber(config.seed) or randomWorldSeed()
   local world = World.new({
-    chunkRadius = CHUNK_RENDER_RADIUS,
+    chunkRadius = graphics.world.chunkLoadRadius,
+    chunkRadiusVertical = graphics.world.chunkLoadRadiusVertical,
     maxHeight = TERRAIN_MAX_H,
     generatorType = config.generatorType,
     seed = seed,
@@ -2320,12 +2420,17 @@ end
 
 local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, y, z)
   local centerChunkX,centerChunkY,centerChunkZ=World.chunkCoord(x),World.chunkCoord(y),World.chunkCoord(z)
+  -- Eviction has to use the same ellipsoid the streamer fills, with one chunk
+  -- of hysteresis. A sphere here would either throw away chunks that were just
+  -- generated or hold on to a shell of them that can never be seen.
+  local up = world.planet:localUp({x, y, z})
   local keepRadius = world.chunkRadius + 1
-  local keepRadiusSq=keepRadius*keepRadius
+  local keepVertical = (world.chunkRadiusVertical or world.chunkRadius) + 1
 
+  if (graphics.world.sphericalVoxels ~= false) then return end
   for key, entry in pairs(world.chunks) do
     local dx,dy,dz=entry.chunkX-centerChunkX,entry.chunkY-centerChunkY,entry.chunkZ-centerChunkZ
-    if dx*dx+dy*dy+dz*dz>keepRadiusSq then
+    if world:chunkRegionScore(dx,dy,dz,up,keepRadius,keepVertical)>1.0 then
       world.chunks[key] = nil
       releaseTerrainMesh(terrainMeshes[key])
       terrainMeshes[key] = nil
@@ -2337,7 +2442,8 @@ local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, y, z)
     local entry = pendingEntries[i]
     local chunkX,chunkY,chunkZ=pendingChunkCoords(entry)
     local dx,dy,dz=(chunkX or centerChunkX)-centerChunkX,(chunkY or centerChunkY)-centerChunkY,(chunkZ or centerChunkZ)-centerChunkZ
-    if chunkX and chunkY and chunkZ and dx*dx+dy*dy+dz*dz>keepRadiusSq then
+    if chunkX and chunkY and chunkZ and
+        world:chunkRegionScore(dx,dy,dz,up,keepRadius,keepVertical)>1.0 then
       table.remove(pendingEntries, i)
     else
       i = i + 1
@@ -2737,7 +2843,7 @@ local function updateDebugFrameStats(state, dt)
   end
 end
 
-local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntries, playerCamera, state, currentTime, queueStats, sky, sunDir)
+local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntries, playerCamera, state, currentTime, queueStats, sky, sunDir, gridWorld)
   queueStats = queueStats or {}
   sky = sky or {}
   sunDir = sunDir or {0.0, 1.0, 0.0}
@@ -2808,6 +2914,12 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     string.format("Eye: %s / %s / %s", formatNumber(pos[1], 3), formatNumber(pos[2], 3), formatNumber(pos[3], 3)),
     string.format("Block: %d %d %d", blockX, blockY, blockZ),
     string.format("Chunk: %d %d %d in %d %d %d",chunkX,chunkY,chunkZ,localX,localY,localZ),
+    -- Which voxel topology is actually underfoot. Without this the two are
+    -- indistinguishable in game, and the only clue is a line printed to the
+    -- console at load.
+    gridWorld
+      and string.format("Voxels: spherical grid, %d chunks loaded", gridWorld:chunkCount())
+      or "Voxels: Cartesian lattice",
     string.format("Planet radius: %.0f m",world.planet.radiusMeters),
     string.format("Player radius: %.3f m",playerRadius),
     string.format("Radial altitude: %.3f m",altitude),
@@ -3065,7 +3177,8 @@ local function applyMenuRuntimeState(window, state, playerCamera, world)
   POST.anaglyph = state.anaglyph == true
 
   if world then
-    world.chunkRadius = CHUNK_RENDER_RADIUS
+    world.chunkRadius = graphics.world.chunkLoadRadius
+    world.chunkRadiusVertical = graphics.world.chunkLoadRadiusVertical
   end
   if playerCamera then
     playerCamera.mouseSensitivity = (graphics.player.mouseSensitivity or 0.085) * (state.sensitivity or 100) / 100
@@ -3473,7 +3586,8 @@ function game.run()
     local moonTexture = createImageTexture("assets/textures/environment/moon_phases.png", true)
     local underwaterOverlayTexture = createImageTexture("assets/textures/blocks/water_overlay.png", false, true)
     local world = World.new({
-      chunkRadius = CHUNK_RENDER_RADIUS,
+      chunkRadius = graphics.world.chunkLoadRadius,
+      chunkRadiusVertical = graphics.world.chunkLoadRadiusVertical,
       maxHeight = TERRAIN_MAX_H,
       generatorType = "default",
       seed = graphics.terrainGeneration.seed or 1,
@@ -3489,6 +3603,7 @@ function game.run()
     local skyMesh = uploadSkyMesh()
     local sunMesh = sunPass.uploadMesh()
     local smokeFrames, smokeElapsed, smokeTotal = 0, 0.0, 0.0
+    local gridWorld, gridRuntime = nil, nil
     if game.openDevMenu then devMenu:openNavigation() end
     local cloudMesh = createCloudMesh("assets/textures/environment/clouds.png")
     local orbitalPlanetMesh = nil
@@ -3804,6 +3919,15 @@ function game.run()
             playerCamera.allowFlight, playerCamera.flying = true, true
             world:updateRenderOrigin(playerCamera.position)
           end
+          if (graphics.world.sphericalVoxels ~= false) then
+            local started = glfw.glfwGetTime()
+            releaseTerrainMeshes(terrainMeshes)
+            terrainMeshes = {}
+            gridWorld, gridRuntime = game.startGridWorld(
+              world, playerCamera, terrainMeshes, graphics.world.gridLoadRadius)
+            print(string.format("Spherical voxel world: %d chunks around spawn in %.2f s",
+              gridWorld:chunkCount(), glfw.glfwGetTime() - started))
+          end
           if game.autoStartWorld then
             local latitude, longitude, altitude = playerCamera:geodeticPosition()
             local sample = terrain.surfaceAtPosition(
@@ -3851,13 +3975,26 @@ function game.run()
         }
         if not previewMode then
           if world:updateRenderOrigin(playerCamera.position) then
-            releaseTerrainMeshes(terrainMeshes)
-            terrainMeshes={}
-            displayState.pendingTerrainEntries={}
-            world:eachChunk(function(_,entry) entry.hasMesh=false entry.hasGPUBuffer=false entry.isUploaded=false entry.renderReady=false end)
+            if gridRuntime then
+              -- The grid runtime owns these meshes. Wiping the table here would
+              -- also rebind it, and the runtime's upload closure still holds
+              -- the old one -- so every later mesh would land in an orphaned
+              -- table and never be drawn again. Let the runtime rebuild in
+              -- place instead, all at once so nothing shows at a stale origin.
+              gridRuntime:setRenderOrigin(world.renderOrigin)
+              gridRuntime:rebuildDirty()
+            else
+              releaseTerrainMeshes(terrainMeshes)
+              terrainMeshes={}
+              displayState.pendingTerrainEntries={}
+              world:eachChunk(function(_,entry) entry.hasMesh=false entry.hasGPUBuffer=false entry.isUploaded=false entry.renderReady=false end)
+            end
+          end
+          if gridRuntime then
+            gridRuntime:update(playerCamera.position)
           end
           local streamVoxelWorld=world.visualLod:levelForPosition(playerCamera.position)=="voxel"
-            and not devMenu:freezesStreaming()
+            and not devMenu:freezesStreaming() and not gridRuntime
           if streamVoxelWorld then
             pruneTerrainMeshes(world,terrainMeshes,displayState.pendingTerrainEntries,playerCamera.position[1],playerCamera.position[2],playerCamera.position[3])
             if #displayState.pendingTerrainEntries < CHUNK_QUEUE_BACKLOG then
@@ -3913,8 +4050,12 @@ function game.run()
           local previousZ = playerCamera.position[3]
           local wasGrounded = playerCamera.grounded
           local fallingVelocity = playerCamera.velocityY or 0
-          playerCamera:update(dt, window, world)
-          updateBlockEditInput(window, displayState, world, displayState.pendingTerrainEntries, playerCamera, dt)
+          playerCamera:update(dt, window, gridWorld or world)
+          if gridRuntime then
+            game.updateGridEditInput(window, displayState, gridRuntime, playerCamera, dt)
+          else
+            updateBlockEditInput(window, displayState, world, displayState.pendingTerrainEntries, playerCamera, dt)
+          end
           local dx = playerCamera.position[1] - previousX
           local dy = playerCamera.position[2] - previousY
           local dz = playerCamera.position[3] - previousZ
@@ -3943,6 +4084,7 @@ function game.run()
             playerCamera.flying = false
           end
           playerCamera.devFlightActive = wantsFlight
+          playerCamera.noclip = wantsFlight
           playerCamera.flySpeedMultiplier = devMenu:flySpeedMultiplier()
 
           devMenu:setCurrentLocation(playerCamera:geodeticPosition())
@@ -3983,6 +4125,22 @@ function game.run()
         local skyRotation = celestial:rotationAngle()
         -- Smoke-run camera aiming, so a capture can look at the sky and the sun
         -- rather than wherever spawn happened to face.
+        -- Smoke-run autopilot: walks tangentially at a fixed speed. Needed to
+        -- reproduce anything that only happens once the player has travelled,
+        -- which includes every render-origin change.
+        if game.autoWalk and not previewMode then
+          local up = playerCamera:getLocalUp()
+          local forward = playerCamera:getHorizontalFront()
+          local advance = game.autoWalk * dt
+          local moved = {
+            playerCamera.position[1] + forward[1] * advance,
+            playerCamera.position[2] + forward[2] * advance,
+            playerCamera.position[3] + forward[3] * advance
+          }
+          playerCamera.position = moved
+          playerCamera.velocity = {forward[1] * game.autoWalk, forward[2] * game.autoWalk, forward[3] * game.autoWalk}
+        end
+
         if game.lookAt == "sun" and not previewMode then
           local up = playerCamera:getLocalUp()
           local elevation = math.max(-1.0, math.min(1.0,
@@ -4056,7 +4214,8 @@ function game.run()
               currentTime,
               queueStats,
               sky,
-              sunDir
+              sunDir,
+              gridWorld
             )
             displayState.debugSampleTimer = 0.0
           end
@@ -4306,10 +4465,17 @@ function game.run()
             local resident = 0
             for _ in pairs(world.chunks) do resident = resident + 1 end
             print(string.format(
-              "  %5.1f fps  %4d chunks resident  %3d queued  %3d meshes  alt %8.1f m  solar %5.2f h",
-              smokeFrames / smokeElapsed, resident, pending, #visibleMeshes,
-              world.planet:altitudeMeters(playerCamera.position),
-              celestial:timeOfDayHours(playerCamera.position, world.planet.center)))
+              "  %5.1f fps  grid %4d chunks %4d meshed %4d pending  drawn %3d  alt %7.2f m",
+              smokeFrames / smokeElapsed,
+              gridWorld and gridWorld:chunkCount() or resident,
+              gridRuntime and (function()
+                local n = 0
+                for _, v in pairs(gridRuntime.meshed) do if v then n = n + 1 end end
+                return n
+              end)() or 0,
+              gridRuntime and (#gridRuntime.pending - gridRuntime.pendingIndex + 1) or pending,
+              #visibleMeshes,
+              world.planet:altitudeMeters(playerCamera.position)))
             smokeFrames, smokeElapsed = 0, 0.0
           end
         end

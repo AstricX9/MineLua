@@ -1767,6 +1767,56 @@ function terrain.surfaceAtDirection(direction, planet)
   }
 end
 
+-- Radial bounds of everything solid or liquid over one chunk's angular
+-- footprint, from nine samples: the eight corners plus the centre.
+--
+-- Planet:classifyChunk can only use the planet-wide elevation band, which is
+-- 500 m tall, so almost every chunk near the surface came back "surface" and
+-- paid for a full 4096-voxel generation even when it was pure air. Asking the
+-- generator what the ground is actually doing here lets the air above and the
+-- rock far below be filled uniformly instead, which is what makes a larger
+-- loaded region affordable.
+-- Only has to cover how far the surface can wander between the sampled points.
+-- The shortest wavelength in the elevation stack is 14 m against a 16 m chunk,
+-- and its amplitude is under a metre, so this is several times what is needed.
+local CHUNK_SURFACE_MARGIN_METERS = 6.0
+
+-- Corner order is the standard trilinear one: bit 1 is x, bit 2 is y, bit 4 is
+-- z. Reused between calls, so classifying a chunk costs no allocation.
+local chunkCorners = {0, 0, 0, 0, 0, 0, 0, 0}
+
+function terrain.chunkSurfaceBounds(chunkX, chunkY, chunkZ, chunkSize, planet)
+  local minX, minY, minZ = chunkX * chunkSize, chunkY * chunkSize, chunkZ * chunkSize
+  local maxX, maxY, maxZ = minX + chunkSize, minY + chunkSize, minZ + chunkSize
+  local low, high = math.huge, -math.huge
+
+  local function sample(x, y, z)
+    local rx, ry, rz = x - planet.center[1], y - planet.center[2], z - planet.center[3]
+    local distance = sqrt(rx * rx + ry * ry + rz * rz)
+    if distance <= 0.0 then return planet.radiusVoxels end
+    local result = terrain.surfaceAtDirection({rx / distance, ry / distance, rz / distance}, planet)
+    local solid = result.surfaceRadiusVoxels
+    -- Water counts as content: a chunk above the sea floor but below sea level
+    -- is full of water, not air.
+    local wet = result.waterSurfaceRadiusVoxels or planet.seaLevelRadiusVoxels
+    if solid < low then low = solid end
+    if solid > high then high = solid end
+    if wet > high then high = wet end
+    return solid
+  end
+
+  for index = 0, 7 do
+    chunkCorners[index + 1] = sample(
+      index % 2 == 0 and minX or maxX,
+      floor(index / 2) % 2 == 0 and minY or maxY,
+      floor(index / 4) % 2 == 0 and minZ or maxZ)
+  end
+  sample((minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5)
+
+  local margin = CHUNK_SURFACE_MARGIN_METERS / planet.voxelSizeMeters
+  return low - margin, high + margin, chunkCorners
+end
+
 function terrain.surfaceAtPosition(x, y, z, planet)
   local rx, ry, rz = x - planet.center[1], y - planet.center[2], z - planet.center[3]
   local distance = math.sqrt(rx * rx + ry * ry + rz * rz)
@@ -1780,6 +1830,13 @@ end
 function terrain.biomeAtPosition(x, y, z, planet)
   local sample = terrain.surfaceAtPosition(x, y, z, planet)
   return sample.biome
+end
+
+-- Grass tint straight from a surface sample, so a caller that already has one
+-- does not pay for the whole terrain evaluation again. grass_top is a
+-- greyscale mask: without this it renders stone-coloured.
+function terrain.grassColorForSample(sample)
+  return sampleGrassColor(sample.temperature, sample.rainfall)
 end
 
 function terrain.grassColorAtPosition(x, y, z, planet)
@@ -1812,6 +1869,24 @@ local function sphericalCaveAt(x, y, z, depthVoxels, planet)
   local detail = fbm3(x - 910.0, y + 2400.0, z - 1800.0, 1259, 2, 0.061)
   local threshold = depthVoxels < 16.0 and 0.78 or 0.70
   return large * 0.42 + tunnel * 0.43 + detail * 0.15 > threshold
+end
+
+-- Public wrapper, so a generator that addresses voxels some other way can
+-- carve the same caves rather than growing a second, drifting copy of them.
+function terrain.caveAt(x, y, z, depthVoxels, planet)
+  return sphericalCaveAt(x, y, z, depthVoxels, planet)
+end
+
+-- The block a voxel gets from how far below the surface it sits. Shared so the
+-- grid generator and the Cartesian one cannot disagree about where soil stops
+-- and stone starts.
+function terrain.blockForDepth(sample, depthVoxels)
+  local top, filler, under = sphericalSurfaceBlocks(sample)
+  if sample.hasSnow and depthVoxels < 1.25 and blocks.snow then return blocks.snow end
+  if depthVoxels < 1.25 then return top or blocks.stone end
+  if depthVoxels < 5.0 then return filler or blocks.stone end
+  if depthVoxels < 9.0 then return under or blocks.stone end
+  return blocks.stone
 end
 
 local function decoratePlanetChunk(chunk, offsetX, offsetY, offsetZ, planet)
@@ -1873,6 +1948,50 @@ local function decoratePlanetChunk(chunk, offsetX, offsetY, offsetZ, planet)
       end
     end
   end
+end
+
+-- Everything in this chunk is at least nine metres below the surface, so every
+-- voxel is stone and only the cave field decides otherwise. Skipping the
+-- per-voxel surface evaluation is the whole point: that is about forty-five
+-- octaves of noise a voxel, against eight for the caves.
+--
+-- Cave depth still has to be continuous across chunk boundaries or the tunnels
+-- would step at every border, so it is interpolated from the eight corner
+-- surface radii. Neighbouring chunks share those corners exactly.
+function terrain.fillBuriedChunk(chunk, offsetX, offsetY, offsetZ, planet, corners, options)
+  options = options or {}
+  local step = options.yieldStep
+  local stoneId = blocks.stone
+  local airId = blocks.air or 0
+  local centerX, centerY, centerZ = planet.center[1], planet.center[2], planet.center[3]
+  local c1, c2, c3, c4 = corners[1], corners[2], corners[3], corners[4]
+  local c5, c6, c7, c8 = corners[5], corners[6], corners[7], corners[8]
+  local processed = 0
+
+  for x = 0, 15 do
+    local u = (x + 0.5) / 16.0
+    local x00, x10 = lerp(c1, c2, u), lerp(c3, c4, u)
+    local x01, x11 = lerp(c5, c6, u), lerp(c7, c8, u)
+    for y = 0, 15 do
+      local v = (y + 0.5) / 16.0
+      local y0, y1 = lerp(x00, x10, v), lerp(x01, x11, v)
+      for z = 0, 15 do
+        local w = (z + 0.5) / 16.0
+        local surfaceRadius = lerp(y0, y1, w)
+        local wx, wy, wz = offsetX + x + 0.5, offsetY + y + 0.5, offsetZ + z + 0.5
+        local rx, ry, rz = wx - centerX, wy - centerY, wz - centerZ
+        local depth = surfaceRadius - sqrt(rx * rx + ry * ry + rz * rz)
+        if sphericalCaveAt(wx, wy, wz, depth, planet) then
+          chunk:setBlock(x, y, z, airId)
+        else
+          chunk:setBlock(x, y, z, stoneId)
+        end
+        processed = processed + 1
+        if step and processed % 256 == 0 then step() end
+      end
+    end
+  end
+  if step then step() end
 end
 
 function terrain.fillPlanetChunk(chunk, offsetX, offsetY, offsetZ, planet, options)
