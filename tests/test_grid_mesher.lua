@@ -174,6 +174,51 @@ if water then
     string.format("the stone under water keeps all six faces, saw %d", #beside / STRIDE))
 end
 
+-- 6c. Ambient occlusion. A corner tucked against neighbouring blocks must come
+--     out darker than one in the open. This is where the world gets its depth:
+--     the lighting module is a stub that hands out full sky light nearly
+--     everywhere, so AO does the visual work.
+local function topFaceLight(neighbours)
+  local mesh = GridMesher.meshChunk(grid, face, chunkColumn, chunkRow, chunkLayer, {
+    renderOrigin = renderOrigin,
+    blockAt = function(f, c, r, l)
+      if f ~= face then return 0 end
+      if c == soloColumn and r == soloRow and l == soloLayer then return stone end
+      for _, n in ipairs(neighbours) do
+        if c == soloColumn + n[1] and r == soloRow + n[2] and l == soloLayer + n[3] then
+          return stone
+        end
+      end
+      return 0
+    end
+  })
+  -- Light lives in the last float of each vertex; the top face is emitted
+  -- first. Report the darkest and brightest of its four corners.
+  local low, high = math.huge, -math.huge
+  for index = 1, 6 do
+    local value = mesh[(index - 1) * STRIDE + STRIDE]
+    low, high = math.min(low, value), math.max(high, value)
+  end
+  return low, high
+end
+
+local openLow, openHigh = topFaceLight({})
+assert(math.abs(openHigh - openLow) < 1e-9, "an isolated block has no occlusion anywhere on its top")
+
+-- One block beside and above, shading two of the top corners.
+local shadedLow, shadedHigh = topFaceLight({{1, 0, 1}})
+assert(shadedLow < openLow - 0.01,
+  string.format("a shaded corner is darker (%.4f against %.4f)", shadedLow, openLow))
+assert(shadedHigh > shadedLow,
+  "and the far corners of the same face stay brighter, so it is a gradient not a flat dim")
+
+-- Blocks on both sides of a corner give the hardest crease.
+local creaseLow = topFaceLight({{1, 0, 1}, {0, 1, 1}})
+assert(creaseLow < shadedLow,
+  string.format("two occluders darken a corner further (%.4f against %.4f)", creaseLow, shadedLow))
+print(string.format("AO: open %.3f, one occluder %.3f, corner crease %.3f",
+  openLow, shadedLow, creaseLow))
+
 -- 7. Cost, on a chunk that is all surface.
 local clock = os.clock
 local started = clock()

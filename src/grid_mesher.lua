@@ -49,11 +49,32 @@ local FACE_QUADS = {
   {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}
 }
 
+-- Ambient occlusion levels by how many of the three blocks around a corner are
+-- solid. This is where a voxel world gets its depth: the Cartesian lighting
+-- module is a stub that hands out 15 nearly everywhere, so AO was always doing
+-- the visual work.
+local AO_LEVELS = {1.00, 0.82, 0.67, 0.52}
+local AO_BOTH_SIDES = 0.45
+
+-- Sky light falls off with depth below the column's highest solid block, so
+-- caves read as caves. Fifteen is open sky.
+local SKY_LIGHT_MAX = 15.0
+local SKY_LIGHT_FALLOFF = 1.6
+-- How far above a chunk to look for the block that shades it.
+local SKY_PROBE_HEIGHT = 24
+
+-- Minecraft's light curve: level 15 is full, and each step down is a fixed
+-- ratio rather than a linear drop.
+local function lightCurve(level)
+  local darkness = 1.0 - math.max(0.0, math.min(15.0, level)) / 15.0
+  return (1.0 - darkness) / (darkness * 3.0 + 1.0)
+end
+
 local CORNER_ORDER = {1, 2, 3, 3, 4, 1}
 local CORNER_HIGH_U = {false, true, true, false}
 local CORNER_HIGH_V = {true, true, false, false}
 
-local solidLookup, cutoutLookup, leavesLookup, liquidLookup
+local solidLookup, cutoutLookup, leavesLookup, liquidLookup, opaqueLookup
 local lookupCount = -1
 
 local function ensureLookups()
@@ -61,18 +82,65 @@ local function ensureLookups()
   for _ in pairs(blocks.list) do count = count + 1 end
   if count == lookupCount then return end
   lookupCount = count
-  solidLookup, cutoutLookup, leavesLookup, liquidLookup = {}, {}, {}, {}
+  solidLookup, cutoutLookup, leavesLookup, liquidLookup, opaqueLookup = {}, {}, {}, {}, {}
   for id, def in pairs(blocks.list) do
     local p = def.properties
     solidLookup[id] = (p and p.solid and not p.cutout) or false
     cutoutLookup[id] = (p and p.cutout) or false
     leavesLookup[id] = (p and p.leaves) or false
     liquidLookup[id] = (p and p.liquid) or false
+    -- Only fully opaque blocks occlude: leaves and cutouts must not.
+    opaqueLookup[id] = (p and p.solid and not p.cutout and not p.leaves
+      and not p.liquid and not p.ice) or false
   end
 end
 
 -- Which way a face points, and which two axes span it, given the voxel frame.
 -- axis 1 is up (radial), 2 the column axis, 3 the row axis.
+-- Steps to a neighbouring voxel in grid coordinates. Tangential steps go
+-- through the grid, which carries a cube-sphere face seam correctly; the radial
+-- step is a layer.
+local function neighbourVoxel(grid, face, column, row, layer, columnStep, rowStep, layerStep)
+  if columnStep == 0 and rowStep == 0 then
+    return face, column, row, layer + layerStep
+  end
+  local nf, nc, nr = grid:neighbour(face, column, row, columnStep, rowStep)
+  return nf, nc, nr, layer + layerStep
+end
+
+-- The two axes that span a face, as grid steps. Axis 1 is radial, 2 the column
+-- axis and 3 the row axis, matching FACES.
+local FACE_SPAN_STEPS = {
+  -- {normal step}, {first span axis step}, {second span axis step}
+  {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}},
+  {{0, 0, -1}, {1, 0, 0}, {0, 1, 0}},
+  {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}},
+  {{-1, 0, 0}, {0, 1, 0}, {0, 0, 1}},
+  {{0, 1, 0}, {1, 0, 0}, {0, 0, 1}},
+  {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}}
+}
+
+-- Classic voxel ambient occlusion: for each corner of a face, look at the two
+-- blocks beside it and the one diagonally across. Two solid sides mean a hard
+-- crease, so the corner goes darkest regardless of the diagonal.
+local function cornerOcclusion(grid, blockAt, opaque, face, column, row, layer, faceIndex, spanA, spanB)
+  local steps = FACE_SPAN_STEPS[faceIndex]
+  local normal, axisA, axisB = steps[1], steps[2], steps[3]
+  local function sample(a, b)
+    local dc = normal[1] + axisA[1] * a + axisB[1] * b
+    local dr = normal[2] + axisA[2] * a + axisB[2] * b
+    local dl = normal[3] + axisA[3] * a + axisB[3] * b
+    local nf, nc, nr, nl = neighbourVoxel(grid, face, column, row, layer, dc, dr, dl)
+    return opaque[blockAt(nf, nc, nr, nl)] == true
+  end
+  local sideA = sample(spanA, 0)
+  local sideB = sample(0, spanB)
+  if sideA and sideB then return AO_BOTH_SIDES end
+  local corner = sample(spanA, spanB)
+  local occupied = (sideA and 1 or 0) + (sideB and 1 or 0) + (corner and 1 or 0)
+  return AO_LEVELS[occupied + 1]
+end
+
 local function faceBasis(face, ux, uy, uz, rx, ry, rz, fx, fy, fz)
   local definition = FACES[face]
   local sign = definition.sign
@@ -114,6 +182,16 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
       local gridColumn, gridRow = baseColumn + column, baseRow + row
       local ux, uy, uz, rx, ry, rz, fx, fy, fz = grid:voxelFrame(gridFace, gridColumn, gridRow)
 
+      -- Highest opaque block in this column, scanned from well above the chunk.
+      -- Anything at or below it is out of direct sky and darkens with depth.
+      local skyTopLayer = baseLayer - 1
+      for probe = baseLayer + CHUNK_SIZE + SKY_PROBE_HEIGHT, baseLayer, -1 do
+        if opaqueLookup[blockAt(gridFace, gridColumn, gridRow, probe)] then
+          skyTopLayer = probe
+          break
+        end
+      end
+
       for layer = 0, CHUNK_SIZE - 1 do
         local gridLayer = baseLayer + layer
         local id = blockAt(gridFace, gridColumn, gridRow, gridLayer)
@@ -130,7 +208,15 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
             local cy = center[2] + uy * radius - renderOrigin[2]
             local cz = center[3] + uz * radius - renderOrigin[3]
             local material = leavesLookup[id] and MATERIAL_LEAVES or MATERIAL_SOLID
-            local light = lightAt and lightAt(gridFace, gridColumn, gridRow, gridLayer) or 1.0
+            local skyLevel = SKY_LIGHT_MAX
+            -- Strictly below: a block is not its own occluder, or every
+            -- surface in open sky would come out a third dark.
+            if gridLayer < skyTopLayer then
+              skyLevel = SKY_LIGHT_MAX - (skyTopLayer - gridLayer + 1) * SKY_LIGHT_FALLOFF
+              if skyLevel < 0.0 then skyLevel = 0.0 end
+            end
+            local light = lightAt and lightAt(gridFace, gridColumn, gridRow, gridLayer)
+              or lightCurve(skyLevel)
             local tintRed, tintGreen, tintBlue
             if definition.biomeTint and tintAt then
               tintRed, tintGreen, tintBlue = tintAt(gridFace, gridColumn, gridRow)
@@ -174,6 +260,8 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
                 for index = 1, 6 do
                   local corner = CORNER_ORDER[index]
                   local sa, sb = quad[corner][1], quad[corner][2]
+                  local ao = cornerOcclusion(grid, blockAt, opaqueLookup,
+                    gridFace, gridColumn, gridRow, gridLayer, face, sa, sb)
                   local vx = ox + ax * sa * half + bx * sb * half
                   local vy = oy + ay * sa * half + by * sb * half
                   local vz = oz + az * sa * half + bz * sb * half
@@ -183,8 +271,10 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
                   vertices[n + 10] = CORNER_HIGH_U[corner] and uv.u1 or uv.u0
                   vertices[n + 11] = CORNER_HIGH_V[corner] and uv.v1 or uv.v0
                   vertices[n + 12] = material
-                  vertices[n + 13] = 1.0
-                  vertices[n + 14] = light
+                  -- Spare channel carries AO so unlit ground keeps its corner
+                  -- definition instead of flattening to one ambient value.
+                  vertices[n + 13] = ao
+                  vertices[n + 14] = light * ao
                   n = n + 14
                 end
               end
