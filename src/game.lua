@@ -1564,6 +1564,10 @@ function game.startGridWorld(world, playerCamera, terrainMeshes, radius)
 
   local runtime = GridRuntime.new(gridWorld, {
     radius = radius or 5,
+    -- glfwGetTime, not os.clock: the latter ticks about every 15 ms on
+    -- Windows, three times the budget it is meant to enforce.
+    clock = glfw.glfwGetTime,
+    budgetSeconds = (graphics.world.gridFrameBudgetMs or 4.0) / 1000.0,
     renderOrigin = world.renderOrigin,
     upload = function(key, vertices, leaves)
       releaseTerrainMesh(terrainMeshes[key])
@@ -2070,31 +2074,78 @@ local function randomWorldSeed()
   return seed ~= 0 and seed or 1
 end
 
-local function findPlanetSpawnDirection(planet, preferred)
-  preferred = math3d.normalize(preferred or {0.0, 0.0, 1.0})
-  local first = terrain.surfaceAtDirection(preferred, planet)
-  if first.land > 0.50 and first.elevationMeters > planet.seaLevelOffsetMeters + 1.5 then
-    return preferred
-  end
+-- Somewhere worth waking up: temperate, comfortably inland, comfortably above
+-- the sea, and not up a mountain.
+--
+-- The previous rule asked only for land above sea level, which let spawn land
+-- in open desert, on a one-block shoal, or on a beach with the tide at the
+-- door. This scores candidates instead, and checks the surroundings so the
+-- spot is part of a landmass rather than a speck in the ocean.
+local spawnPicker = {}
+spawnPicker.biomeScore = {
+  plains = 100, forest = 95, savanna = 70, shrubland = 65, taiga = 55,
+  rainforest = 40, tundra = 15, beach = -40, desert = -60,
+  mountains = -70, rockyShore = -80, frozenShore = -90, ocean = -1000
+}
 
-  -- Deterministic Fibonacci coverage finds the nearest viable land direction
-  -- without introducing longitude seams or assuming that +Z happens to be a
-  -- continent for every seed.
-  local best, bestScore
+function spawnPicker.score(planet, direction)
+  local sample = terrain.surfaceAtDirection(direction, planet)
+  if sample.land <= 0.62 then return nil end
+  if sample.elevationMeters < planet.seaLevelOffsetMeters + 4.0 then return nil end
+  if sample.elevationMeters > 140.0 then return nil end
+
+  -- Is this actually part of a landmass? Four probes a few hundred metres out.
+  local east, _, north = planet:tangentFrame(
+    {direction[1] * planet.radiusVoxels, direction[2] * planet.radiusVoxels,
+     direction[3] * planet.radiusVoxels})
+  local dryNeighbours = 0
+  local spread = 400.0 / planet.radiusMeters
+  for _, offset in ipairs({{spread, 0}, {-spread, 0}, {0, spread}, {0, -spread}}) do
+    local probe = math3d.normalize({
+      direction[1] + east[1] * offset[1] + north[1] * offset[2],
+      direction[2] + east[2] * offset[1] + north[2] * offset[2],
+      direction[3] + east[3] * offset[1] + north[3] * offset[2]})
+    local near = terrain.surfaceAtDirection(probe, planet)
+    if near.elevationMeters > planet.seaLevelOffsetMeters + 1.0 then
+      dryNeighbours = dryNeighbours + 1
+    end
+  end
+  if dryNeighbours < 3 then return nil end
+
+  return (spawnPicker.biomeScore[sample.biome] or 0)
+    + dryNeighbours * 12.0
+    - math.abs(sample.elevationMeters - 40.0) * 0.15
+    - sample.mountain * 60.0, sample
+end
+
+function spawnPicker.find(planet, preferred)
+  preferred = math3d.normalize(preferred or {0.0, 0.0, 1.0})
+  local best, bestScore, bestSample
+
+  -- Deterministic Fibonacci coverage: no longitude seam, and no assumption
+  -- that +Z happens to be a continent for this seed.
   local golden = math.pi * (3.0 - math.sqrt(5.0))
-  for i = 0, 255 do
-    local y = 1.0 - (i + 0.5) * (2.0 / 256.0)
+  for i = 0, 511 do
+    local y = 1.0 - (i + 0.5) * (2.0 / 512.0)
     local radius = math.sqrt(math.max(0.0, 1.0 - y * y))
     local angle = i * golden
     local direction = {math.cos(angle) * radius, y, math.sin(angle) * radius}
-    local sample = terrain.surfaceAtDirection(direction, planet)
-    if sample.land > 0.50 and sample.elevationMeters > planet.seaLevelOffsetMeters + 1.5 then
-      local proximity = math3d.dot(direction, preferred)
-      local score = proximity * 100.0 + math.min(sample.elevationMeters, 48.0) * 0.08 - sample.mountain * 4.0
-      if not bestScore or score > bestScore then best, bestScore = direction, score end
+    local score, sample = spawnPicker.score(planet, direction)
+    if score then
+      -- Nearness to the preferred direction is a tiebreak, not the deciding
+      -- term: a good site far away beats a desert underfoot.
+      score = score + math3d.dot(direction, preferred) * 25.0
+      if not bestScore or score > bestScore then
+        best, bestScore, bestSample = direction, score, sample
+      end
     end
   end
-  return best or preferred
+
+  if best then
+    print(string.format("Spawn: %s, %.0f m above sea level", bestSample.biome, bestSample.elevationMeters))
+    return best
+  end
+  return preferred
 end
 
 local function createWorldLoadingJob(config)
@@ -2108,7 +2159,7 @@ local function createWorldLoadingJob(config)
     planet = graphics.planet,
     deferInitialChunks = true
   })
-  local spawnDirection = findPlanetSpawnDirection(world.planet, config.spawnDirection or {0.0, 0.0, 1.0})
+  local spawnDirection = spawnPicker.find(world.planet, config.spawnDirection or {0.0, 0.0, 1.0})
   world.spawnDirection = spawnDirection
   world.spawnAltitudeMeters = math.max(0.0, tonumber(config.spawnAltitudeMeters) or 0.0)
   local spawnOffsetVoxels = (graphics.player.eyeHeight or 1.62) + 1.0 + world.spawnAltitudeMeters / world.planet.voxelSizeMeters

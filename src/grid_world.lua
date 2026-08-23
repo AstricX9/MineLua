@@ -78,6 +78,42 @@ function GridWorld:ensureStack(face, chunkColumn, chunkRow, padding)
   return made
 end
 
+-- The chunk jobs for one column stack, without generating any of them.
+--
+-- Splitting this from generateChunk is what lets the runtime stop between
+-- chunks: a whole stack is the surface samples plus about seven chunks, and
+-- doing that atomically is a twenty millisecond hitch.
+function GridWorld:stackChunkJobs(face, chunkColumn, chunkRow, padding)
+  padding = padding or 1
+  local samples = self:columnSamples(face, chunkColumn, chunkRow)
+  local grid = self.grid
+  local voxel = grid.voxelSizeMeters
+  local lowLayer = floor((samples.lowRadius - grid.referenceRadius) / voxel / CHUNK_SIZE)
+  local highLayer = floor((samples.highRadius - grid.referenceRadius) / voxel / CHUNK_SIZE)
+  local jobs = {}
+  for chunkLayer = lowLayer - padding, highLayer + padding do
+    if not self.chunks[chunkKey(face, chunkColumn, chunkRow, chunkLayer)] then
+      jobs[#jobs + 1] = {face = face, chunkColumn = chunkColumn,
+        chunkRow = chunkRow, chunkLayer = chunkLayer, samples = samples}
+    end
+  end
+  return jobs
+end
+
+function GridWorld:generateChunk(job)
+  local key = chunkKey(job.face, job.chunkColumn, job.chunkRow, job.chunkLayer)
+  if self.chunks[key] then return false end
+  terrain.setSeed(self.seed)
+  local chunk, classification = GridTerrain.fillChunk(
+    self.grid, job.face, job.chunkColumn, job.chunkRow, job.chunkLayer, self.planet,
+    {samples = job.samples})
+  if classification == "empty" then return false end
+  self.chunks[key] = {chunk = chunk, classification = classification,
+    face = job.face, chunkColumn = job.chunkColumn,
+    chunkRow = job.chunkRow, chunkLayer = job.chunkLayer}
+  return true
+end
+
 -- Voxel address of a world point: face, column, row and layer.
 --
 -- Layer k occupies the shell (top(k) - voxel, top(k)], which is why this

@@ -53,13 +53,39 @@ for _ in pairs(uploaded) do meshCount = meshCount + 1 end
 print(string.format("loaded in %d frames: %d chunks, %d meshes", frames, world:chunkCount(), meshCount))
 assert(world:chunkCount() > 0 and meshCount > 0, "the runtime generated and meshed terrain")
 
--- 1. Budgeting. No single update may do an unbounded amount of work, or
---    walking into new ground would stall the frame instead of costing a slice.
-local before = world:chunkCount()
-runtime.pendingIndex = 1
-local generated, meshed = runtime:update(position)
-assert(generated <= runtime.stackBudget, "stack generation respects its budget")
-assert(meshed <= runtime.meshBudget, "meshing respects its budget")
+-- 1. Budgeting, by wall clock. A column stack is its surface samples plus
+--    about seven chunks -- roughly twenty milliseconds -- so a budget counted
+--    in stacks was a visible hitch every time the player crossed into new
+--    ground. An update may overrun by at most the one chunk it was midway
+--    through when the clock ran out.
+--
+--    Driven by an injected clock rather than a real one: os.clock on Windows
+--    ticks about every 15 ms, which is three times the budget and cannot
+--    measure it at all.
+local fakeNow = 0.0
+runtime.clock = function() return fakeNow end
+runtime.budgetSeconds = 0.004
+-- Somewhere entirely new, so there is a full ring of work waiting.
+local far = {position[1] + 3000.0, position[2], position[3]}
+runtime:refocus(far)
+
+local worstUnits = 0
+for _ = 1, 30 do
+  local startedAt = fakeNow
+  -- Each unit of work advances the clock by a millisecond.
+  local realUpdate = runtime.update
+  local ticks = 0
+  runtime.clock = function() ticks = ticks + 1 fakeNow = startedAt + ticks * 0.001 return fakeNow end
+  realUpdate(runtime, far)
+  worstUnits = math.max(worstUnits, fakeNow - startedAt)
+end
+print(string.format("worst update: %.0f ms of simulated work against a %.0f ms budget",
+  worstUnits * 1000.0, runtime.budgetSeconds * 1000.0))
+assert(worstUnits < runtime.budgetSeconds * 3.0,
+  string.format("an update stops near its budget (worst %.0f ms)", worstUnits * 1000.0))
+runtime.clock = os.clock
+runtime:refocus(position)
+for _ = 1, 400 do runtime:update(position) end
 
 -- 2. Raycast finds the ground under the player and reports the block above it.
 local eye = {up[1] * (surfaceRadius + 3.0), up[2] * (surfaceRadius + 3.0), up[3] * (surfaceRadius + 3.0)}

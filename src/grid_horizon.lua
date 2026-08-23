@@ -53,6 +53,13 @@ local function surfacePoint(planet, centre, east, north, offsetEast, offsetNorth
     colour = BIOME_COLORS.ocean
   elseif sample.hasSnow then
     colour = {0.82, 0.86, 0.86}
+  else
+    -- Snapped to the voxel layer the blocks actually stop at. Sampling the
+    -- analytic surface instead leaves the shell up to a voxel out, which is
+    -- what made it stick through the ground near the seam.
+    local voxel = planet.voxelSizeMeters
+    shellRadius = planet.radiusVoxels
+      + math.floor((shellRadius - planet.radiusVoxels) / voxel) * voxel
   end
   shellRadius = shellRadius - sink
   return dx * shellRadius, dy * shellRadius, dz * shellRadius, dx, dy, dz, colour
@@ -65,9 +72,13 @@ function GridHorizon.build(planet, position, options)
   local inner = options.inner or 96.0
   local outer = options.outer or 4000.0
   local segments = options.segments or 96
-  -- Dropped slightly so voxel terrain always wins where the two overlap,
-  -- instead of the shell poking through the blocks it hides behind.
-  local sink = options.sink or 2.0
+  -- Sunk by more than the shell can wander between samples. Rings are chords,
+  -- so between two samples the shell cuts across whatever the ground does in
+  -- between; at six metre spacing that was up to a metre, and the shell stuck
+  -- up through the blocks. Fine inner rings keep that error small and this
+  -- absorbs the rest. The cost is a ledge of the same size at the outer seam,
+  -- eighty metres away, where it is not visible.
+  local sink = options.sink or 0.6
   local renderOrigin = options.renderOrigin or {0.0, 0.0, 0.0}
 
   local centre = {normalize(
@@ -77,46 +88,75 @@ function GridHorizon.build(planet, position, options)
   local east, _, north = planet:tangentFrame(position)
 
   -- Ring radii: fine at the inner edge, geometric outward.
-  local radii, distance, step = {inner}, inner, options.step or 6.0
+  local radii, distance, step = {inner}, inner, options.step or 1.5
   while distance < outer do
     distance = distance + step
     step = step * 1.06
     radii[#radii + 1] = distance
   end
 
-  local vertices, n = {}, 0
-  local cache = {}
-  local function corner(ringIndex, segment)
-    local key = ringIndex * (segments + 1) + segment
-    local hit = cache[key]
-    if hit then return hit end
-    local angle = segment / segments * math.pi * 2.0
+  -- Sample the whole grid first, then derive normals from it. Using the radial
+  -- direction as the normal -- which is what the orbital shader was built for --
+  -- gives every vertex the same normal at this scale, so nothing catches the
+  -- light and kilometres of landscape read as one flat sheet of colour.
+  local ringCount = #radii
+  local points = {}
+  for ringIndex = 1, ringCount do
     local ringRadius = radii[ringIndex]
-    local value = {surfacePoint(planet, centre, east, north,
-      cos(angle) * ringRadius, sin(angle) * ringRadius, sink)}
-    cache[key] = value
-    return value
+    local ring = {}
+    for segment = 0, segments - 1 do
+      local angle = segment / segments * math.pi * 2.0
+      ring[segment] = {surfacePoint(planet, centre, east, north,
+        cos(angle) * ringRadius, sin(angle) * ringRadius, sink)}
+    end
+    points[ringIndex] = ring
   end
 
-  local function push(value)
-    local colour = value[7]
-    vertices[n + 1] = value[1] - renderOrigin[1] + planet.center[1]
-    vertices[n + 2] = value[2] - renderOrigin[2] + planet.center[2]
-    vertices[n + 3] = value[3] - renderOrigin[3] + planet.center[3]
-    vertices[n + 4], vertices[n + 5], vertices[n + 6] = value[4], value[5], value[6]
+  local function at(ringIndex, segment)
+    local ring = points[math.max(1, math.min(ringCount, ringIndex))]
+    return ring[segment % segments]
+  end
+
+  -- Normal from the cross product of the two grid tangents through a vertex.
+  local function normalAt(ringIndex, segment)
+    local outward = at(ringIndex + 1, segment)
+    local inward = at(ringIndex - 1, segment)
+    local ahead = at(ringIndex, segment + 1)
+    local behind = at(ringIndex, segment - 1)
+    local ax, ay, az = outward[1] - inward[1], outward[2] - inward[2], outward[3] - inward[3]
+    local bx, by, bz = ahead[1] - behind[1], ahead[2] - behind[2], ahead[3] - behind[3]
+    local nx, ny, nz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+    if nx * nx + ny * ny + nz * nz < 1e-12 then
+      local point = at(ringIndex, segment)
+      return point[4], point[5], point[6]
+    end
+    nx, ny, nz = normalize(nx, ny, nz)
+    -- Point it outward, whichever way the cross product came out.
+    local point = at(ringIndex, segment)
+    if nx * point[4] + ny * point[5] + nz * point[6] < 0.0 then
+      return -nx, -ny, -nz
+    end
+    return nx, ny, nz
+  end
+
+  local vertices, n = {}, 0
+  local function push(ringIndex, segment)
+    local point = at(ringIndex, segment)
+    local colour = point[7]
+    local nx, ny, nz = normalAt(ringIndex, segment)
+    vertices[n + 1] = point[1] - renderOrigin[1] + planet.center[1]
+    vertices[n + 2] = point[2] - renderOrigin[2] + planet.center[2]
+    vertices[n + 3] = point[3] - renderOrigin[3] + planet.center[3]
+    vertices[n + 4], vertices[n + 5], vertices[n + 6] = nx, ny, nz
     vertices[n + 7], vertices[n + 8], vertices[n + 9] = colour[1], colour[2], colour[3]
     vertices[n + 10], vertices[n + 11] = 0.0, 0.0
     n = n + 11
   end
 
-  for ringIndex = 1, #radii - 1 do
+  for ringIndex = 1, ringCount - 1 do
     for segment = 0, segments - 1 do
-      local a = corner(ringIndex, segment)
-      local b = corner(ringIndex, segment + 1)
-      local c = corner(ringIndex + 1, segment + 1)
-      local d = corner(ringIndex + 1, segment)
-      push(a) push(d) push(c)
-      push(c) push(b) push(a)
+      push(ringIndex, segment) push(ringIndex + 1, segment) push(ringIndex + 1, segment + 1)
+      push(ringIndex + 1, segment + 1) push(ringIndex, segment + 1) push(ringIndex, segment)
     end
   end
 

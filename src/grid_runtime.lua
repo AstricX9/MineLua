@@ -23,8 +23,17 @@ function GridRuntime.new(gridWorld, options)
     radius = options.radius or 5,
     -- Generating a stack is a few milliseconds; meshing one chunk is about
     -- one. These are per frame.
-    stackBudget = options.stackBudget or 2,
-    meshBudget = options.meshBudget or 6,
+    -- Budgeted by wall clock, not by count. A column stack is its surface
+    -- samples plus about seven chunks, roughly twenty milliseconds, so a
+    -- count-based budget of two stacks a frame was a thirty fps hitch every
+    -- time the player crossed into new ground.
+    budgetSeconds = options.budgetSeconds or 0.004,
+    -- Must be high resolution. os.clock on Windows ticks about every 15 ms,
+    -- which is three times the budget -- the loop would blow straight past it
+    -- and only notice a frame later. The caller passes glfwGetTime.
+    clock = options.clock or os.clock,
+    workQueue = {},
+    workIndex = 1,
     upload = assert(options.upload, "grid runtime needs an upload callback"),
     release = assert(options.release, "grid runtime needs a release callback"),
     renderOrigin = options.renderOrigin or {0.0, 0.0, 0.0},
@@ -100,6 +109,7 @@ function GridRuntime:refocus(position)
   end
   table.sort(wanted, function(a, b) return a.distance < b.distance end)
   self.pending, self.pendingIndex = wanted, 1
+  self.workQueue, self.workIndex = {}, 1
   return true
 end
 
@@ -151,20 +161,29 @@ end
 function GridRuntime:update(position)
   if self:refocus(position) then self:evict() end
 
-  -- Generate the nearest outstanding stacks.
+  local deadline = self.clock() + self.budgetSeconds
+
+  -- Generate the nearest outstanding stacks, one chunk at a time so the work
+  -- can stop between them rather than mid-stack.
   local generated = 0
-  while self.pendingIndex <= #self.pending and generated < self.stackBudget do
-    local want = self.pending[self.pendingIndex]
-    self.pendingIndex = self.pendingIndex + 1
-    if self.world:ensureStack(self.centreFace, want.column, want.row) > 0 then
-      generated = generated + 1
+  while self.clock() < deadline do
+    if self.workIndex > #self.workQueue then
+      if self.pendingIndex > #self.pending then break end
+      local want = self.pending[self.pendingIndex]
+      self.pendingIndex = self.pendingIndex + 1
+      self.workQueue, self.workIndex = self.world:stackChunkJobs(
+        self.centreFace, want.column, want.row), 1
+    else
+      local job = self.workQueue[self.workIndex]
+      self.workIndex = self.workIndex + 1
+      if self.world:generateChunk(job) then generated = generated + 1 end
     end
   end
 
-  -- Mesh anything new or changed.
+  -- Mesh anything new or changed, on the same clock.
   local meshedThisFrame = 0
   for key in pairs(self.dirty) do
-    if meshedThisFrame >= self.meshBudget then break end
+    if self.clock() >= deadline then break end
     self.dirty[key] = nil
     local entry = self.world.chunks[key]
     if entry then
@@ -178,7 +197,7 @@ function GridRuntime:update(position)
     meshedThisFrame = meshedThisFrame + 1
   end
   for key, entry in pairs(self.world.chunks) do
-    if meshedThisFrame >= self.meshBudget then break end
+    if self.clock() >= deadline then break end
     if self.meshed[key] == nil then
       local vertices, leaves = self:meshChunk(entry)
       self.upload(key, vertices, leaves)
@@ -192,7 +211,7 @@ end
 
 -- True once the ring around the player is loaded, so spawn can wait for ground.
 function GridRuntime:ready()
-  return self.pendingIndex > #self.pending
+  return self.pendingIndex > #self.pending and self.workIndex > #self.workQueue
 end
 
 function GridRuntime:setBlock(face, column, row, layer, id)

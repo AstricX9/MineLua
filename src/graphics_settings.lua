@@ -59,6 +59,8 @@ graphics.world = {
   -- square of the radius; the shell covers kilometres for tens of milliseconds.
   horizonDistance = 3000.0,
   horizonSegments = 96,
+  -- Wall-clock budget per frame for grid generation and meshing together.
+  gridFrameBudgetMs = 4.0,
   visualDistance = 320.0
 }
 
