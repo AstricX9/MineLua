@@ -981,6 +981,11 @@ in vec3 vPosition;
 out vec4 FragColor;
 uniform vec3 sunDir;
 uniform vec3 viewPos;
+// The blue limb is the planet's edge seen from space. From the ground every
+// distant surface is viewed edge-on, so it saturates and turns the landscape
+// teal -- hence the switch. Aerial perspective down here is the atmosphere
+// post pass's job.
+uniform float limbStrength;
 void main(){
   vec3 N=normalize(vNormal);
   vec3 V=normalize(viewPos-vPosition);
@@ -988,7 +993,7 @@ void main(){
   float twilight=smoothstep(-0.18,0.08,dot(N,normalize(sunDir)));
   vec3 surface=vColor*(0.055+daylight*0.95)*mix(vec3(0.28,0.36,0.52),vec3(1.0),twilight);
   float limb=pow(1.0-max(dot(N,V),0.0),4.0);
-  surface+=vec3(0.10,0.34,0.72)*limb*(0.18+twilight*0.42);
+  surface+=vec3(0.10,0.34,0.72)*limb*(0.18+twilight*0.42)*limbStrength;
   FragColor=vec4(surface,1.0);
 }
 ]]
@@ -1601,6 +1606,35 @@ function game.startGridWorld(world, playerCamera, terrainMeshes, radius)
   end
 
   return gridWorld, runtime
+end
+
+-- Rebuilds the distant terrain shell if the player has moved far enough from
+-- where it was last built. Kept on displayState because this file is at Lua's
+-- 200-local ceiling.
+function game.updateHorizon(state, world, playerCamera)
+  local GridHorizon = require("grid_horizon")
+  local outer = graphics.world.horizonDistance or 3000.0
+  if outer <= 0.0 then return end
+  local position = playerCamera.position
+  local previous = state.horizonBuiltAt
+  local originMoved = state.horizonOrigin ~= world.renderOriginRevision
+  if previous and not originMoved then
+    local dx = position[1] - previous[1]
+    local dy = position[2] - previous[2]
+    local dz = position[3] - previous[3]
+    if dx * dx + dy * dy + dz * dz < 64.0 * 64.0 then return end
+  end
+
+  local vertices = GridHorizon.build(world.planet, position, {
+    inner = (graphics.world.gridLoadRadius or 6) * 16.0 * 0.85,
+    outer = outer,
+    segments = graphics.world.horizonSegments or 96,
+    renderOrigin = world.renderOrigin
+  })
+  if state.horizonMesh then rendering.release(state.horizonMesh) end
+  state.horizonMesh = uploadMesh(vertices)
+  state.horizonBuiltAt = {position[1], position[2], position[3]}
+  state.horizonOrigin = world.renderOriginRevision
 end
 
 -- Break or place a block on the spherical grid.
@@ -3726,7 +3760,8 @@ function game.run()
       view = gl.glGetUniformLocation(orbitalPlanetShader, "uView"),
       offset = gl.glGetUniformLocation(orbitalPlanetShader, "planetOffset"),
       sunDir = gl.glGetUniformLocation(orbitalPlanetShader, "sunDir"),
-      viewPos = gl.glGetUniformLocation(orbitalPlanetShader, "viewPos")
+      viewPos = gl.glGetUniformLocation(orbitalPlanetShader, "viewPos"),
+      limbStrength = gl.glGetUniformLocation(orbitalPlanetShader, "limbStrength")
     }
     local orbitalCloudLocations = {
       projection = gl.glGetUniformLocation(orbitalCloudShader, "uProjection"),
@@ -3999,6 +4034,7 @@ function game.run()
           end
           if gridRuntime then
             gridRuntime:update(playerCamera.position)
+            game.updateHorizon(displayState, world, playerCamera)
           end
           local streamVoxelWorld=world.visualLod:levelForPosition(playerCamera.position)=="voxel"
             and not devMenu:freezesStreaming() and not gridRuntime
@@ -4307,6 +4343,7 @@ function game.run()
           gl.glUniform3f(orbitalPlanetLocations.offset,planetOffset[1],planetOffset[2],planetOffset[3])
           gl.glUniform3f(orbitalPlanetLocations.sunDir,sunDir[1],sunDir[2],sunDir[3])
           gl.glUniform3f(orbitalPlanetLocations.viewPos,viewPosition[1],viewPosition[2],viewPosition[3])
+          gl.glUniform1f(orbitalPlanetLocations.limbStrength,1.0)
           rendering.draw(orbitalPlanetMesh)
           if displayState.clouds ~= false and orbitalCloudMesh then
             gl.glUseProgram(orbitalCloudShader)
@@ -4323,6 +4360,22 @@ function game.run()
             gl.glDepthMask(1)
             gl.glDisable(GL_BLEND)
           end
+          gl.glDisable(GL_CULL_FACE)
+        end
+
+        if displayState.horizonMesh and not previewMode then
+          -- Distant terrain goes down before the voxels, and sits two metres
+          -- low, so blocks always win where the two overlap.
+          gl.glEnable(GL_CULL_FACE)
+          gl.glCullFace(GL_BACK)
+          gl.glUseProgram(orbitalPlanetShader)
+          gl.glUniformMatrix4fv(orbitalPlanetLocations.projection,1,0,ffi.new("float[16]",projection))
+          gl.glUniformMatrix4fv(orbitalPlanetLocations.view,1,0,ffi.new("float[16]",view))
+          gl.glUniform3f(orbitalPlanetLocations.offset,0.0,0.0,0.0)
+          gl.glUniform3f(orbitalPlanetLocations.sunDir,sunDir[1],sunDir[2],sunDir[3])
+          gl.glUniform3f(orbitalPlanetLocations.viewPos,viewPosition[1],viewPosition[2],viewPosition[3])
+          gl.glUniform1f(orbitalPlanetLocations.limbStrength,0.0)
+          rendering.draw(displayState.horizonMesh)
           gl.glDisable(GL_CULL_FACE)
         end
 
@@ -4503,6 +4556,7 @@ function game.run()
     rendering.release(characterMesh)
     rendering.release(skyMesh)
     rendering.release(sunMesh)
+    if displayState.horizonMesh then rendering.release(displayState.horizonMesh) end
     rendering.release(cloudMesh)
     hudOverlay:release()
   end)

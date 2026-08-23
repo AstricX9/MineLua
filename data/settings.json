@@ -8,7 +8,7 @@
   "world": {
     "terrainMaxHeight": 127,
     "chunkRenderRadius": 8,
-    "visualDistance": 320.0,
+    "visualDistance": 4096.0,
     "chunkLoadRadius": 9,
     "chunkLoadRadiusVertical": 5
   },
@@ -47,10 +47,15 @@
   },
   "atmosphere": {
     "sunCycleSpeed": 0.005235987755982989,
-    "cloudDensity": 1.35,
-    "cloudBottom": 1200.0,
-    "cloudTop": 2250.0,
-    "sunGlare": 0.58
+    "cloudDensity": 0.8,
+    "cloudBottom": 1500.0,
+    "cloudTop": 2400.0,
+    "sunGlare": 0.58,
+    "fogStart": 900.0,
+    "fogEnd": 3400.0,
+    "heightFogDensity": 0.00035,
+    "distanceFogDensity": 0.00012,
+    "horizonFog": 0.22
   },
   "water": {
     "level": 62.65

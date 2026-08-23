@@ -54,6 +54,11 @@ graphics.world = {
   sphericalVoxels = true,
   -- Column stacks kept loaded around the player, in 16-voxel chunks.
   gridLoadRadius = 6,
+  -- Beyond the voxels, terrain is drawn as a smooth shell sampled straight
+  -- from the generator. Voxel chunks cost about 2.3 ms each and grow with the
+  -- square of the radius; the shell covers kilometres for tens of milliseconds.
+  horizonDistance = 3000.0,
+  horizonSegments = 96,
   visualDistance = 320.0
 }
 
