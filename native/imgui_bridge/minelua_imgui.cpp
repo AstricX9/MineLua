@@ -414,9 +414,9 @@ MINELUA_EXPORT void ml_imgui_draw(MineLuaDevUiState* state) {
                 }
 
                 if (state->export_status > 0) {
-                    ImGui::TextColored(ImVec4(0.45f, 0.90f, 0.52f, 1.0f), "Saved: data/worldgen_tuning.json");
+                    ImGui::TextColored(ImVec4(0.45f, 0.90f, 0.52f, 1.0f), "Saved: data/config/worldgen_tuning.json");
                 } else if (state->export_status < 0) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.35f, 1.0f), "Could not save data/worldgen_tuning.json");
+                    ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.35f, 1.0f), "Could not save data/config/worldgen_tuning.json");
                 }
             }
             ImGui::End();

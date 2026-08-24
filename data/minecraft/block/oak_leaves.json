@@ -1,0 +1,13 @@
+{
+  "name": "Oak Leaves",
+  "texture": "./textures/blocks/leaves_oak.png",
+  "colormap": "./textures/colormap/foliage.png",
+  "biomeTint": true,
+  "properties": {
+    "solid": true,
+    "cutout": true,
+    "leaves": true,
+    "doubleSided": true,
+    "drop": "stick"
+  }
+}

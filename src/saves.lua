@@ -1,15 +1,23 @@
 local ffi = require("ffi")
+local filesystem = require("filesystem")
+local json = require("json")
 
 local saves = {}
 
 local SAVE_ROOT = "saves"
 local VERSION_NAME = "MineLua Pre-alpha"
 local VERSION_ID = 100
+local PLAYER_DATA_VERSION = 1
 
 if ffi.os == "Windows" then
-  ffi.cdef[[int _mkdir(const char *dirname);]]
+  ffi.cdef[[
+    int _mkdir(const char *dirname);
+    int RemoveDirectoryA(const char *pathName);
+  ]]
 else
-  ffi.cdef[[int mkdir(const char *path, unsigned int mode);]]
+  ffi.cdef[[
+    int mkdir(const char *path, unsigned int mode);
+  ]]
 end
 
 local function mkdir(path)
@@ -47,13 +55,36 @@ local function encodeJson(value, indent)
     return "null"
   end
 
+  local count = 0
+  local maximum = 0
+  local isArray = true
+  for key in pairs(value) do
+    count = count + 1
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      isArray = false
+    else
+      maximum = math.max(maximum, key)
+    end
+  end
+  isArray = isArray and count > 0 and maximum == count
+
+  local nextIndent = indent + 2
+  if isArray then
+    local lines = {"["}
+    for index = 1, maximum do
+      local suffix = index < maximum and "," or ""
+      lines[#lines + 1] = string.rep(" ", nextIndent) .. encodeJson(value[index], nextIndent) .. suffix
+    end
+    lines[#lines + 1] = string.rep(" ", indent) .. "]"
+    return table.concat(lines, "\n")
+  end
+
   local keys = {}
   for key in pairs(value) do
     keys[#keys + 1] = key
   end
   table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
 
-  local nextIndent = indent + 2
   local lines = {"{"}
   for i = 1, #keys do
     local key = keys[i]
@@ -70,7 +101,48 @@ local function writeFile(path, content)
   file:close()
 end
 
-local function pathExists(path)
+local function readFile(path)
+  local file = io.open(path, "rb")
+  if not file then return nil end
+  local content = file:read("*a")
+  file:close()
+  return content
+end
+
+local pathExists
+
+local function directoryNames(path)
+  local names = {}
+  for _, entry in ipairs(filesystem.entries(path)) do
+    if entry.isDirectory and not entry.isReparsePoint then
+      names[#names + 1] = entry.name
+    end
+  end
+  return names
+end
+
+local function decodeJsonString(value)
+  if not value then return nil end
+  return value:gsub("\\n", "\n"):gsub("\\r", "\r"):gsub("\\t", "\t")
+    :gsub('\\"', '"'):gsub("\\\\", "\\")
+end
+
+local function jsonString(content, key)
+  return decodeJsonString(content and content:match('"' .. key .. '"%s*:%s*"(.-)"'))
+end
+
+local function jsonNumber(content, key)
+  return tonumber(content and content:match('"' .. key .. '"%s*:%s*(-?%d+%.?%d*)'))
+end
+
+local function jsonBoolean(content, key)
+  local value = content and content:match('"' .. key .. '"%s*:%s*(%a+)')
+  if value == "true" then return true end
+  if value == "false" then return false end
+  return nil
+end
+
+pathExists = function(path)
   if os.rename(path, path) then
     return true
   end
@@ -169,8 +241,12 @@ function saves.createWorld(options)
 
   writeFile(path .. "/level.dat", encodeJson(level) .. "\n")
   writeFile(path .. "/mineLua.json", encodeJson({
+    allowCheats = options.allowCheats == true,
+    bonusChest = options.bonusChest == true,
     gameMode = options.gameMode or "survival",
+    generateStructures = options.generateStructures ~= false,
     generatorType = options.generatorType or "default",
+    lastPlayed = now * 1000,
     seed = options.seed or 1,
     saveFormat = "minecraft-like",
     worldName = worldName
@@ -182,6 +258,118 @@ function saves.createWorld(options)
     seed = options.seed or 1,
     worldName = worldName
   }
+end
+
+function saves.listWorlds()
+  ensureDir(SAVE_ROOT)
+  local worlds = {}
+
+  for _, folderName in ipairs(directoryNames(SAVE_ROOT)) do
+    local path = SAVE_ROOT .. "/" .. folderName
+    local metadata = readFile(path .. "/mineLua.json")
+    local level = readFile(path .. "/level.dat")
+    if metadata or level then
+      local worldName = jsonString(metadata, "worldName") or jsonString(level, "LevelName") or folderName
+      local gameMode = jsonString(metadata, "gameMode")
+      if not gameMode then gameMode = jsonNumber(level, "GameType") == 1 and "creative" or "survival" end
+      local generatorType = jsonString(metadata, "generatorType")
+      if not generatorType then generatorType = jsonString(level, "generatorName") == "flat" and "superflat" or "default" end
+      local lastPlayed = jsonNumber(metadata, "lastPlayed") or jsonNumber(level, "LastPlayed") or 0
+      local versionName = jsonString(level, "Name") or VERSION_NAME
+      local modeLabel = gameMode == "creative" and "Creative Mode" or "Survival Mode"
+
+      worlds[#worlds + 1] = {
+        path = path,
+        folderName = folderName,
+        worldName = worldName,
+        gameMode = gameMode,
+        generatorType = generatorType,
+        seed = jsonNumber(metadata, "seed") or jsonNumber(level, "RandomSeed") or 1,
+        generateStructures = jsonBoolean(metadata, "generateStructures") ~= false,
+        allowCheats = jsonBoolean(metadata, "allowCheats") == true,
+        bonusChest = jsonBoolean(metadata, "bonusChest") == true,
+        lastPlayed = lastPlayed,
+        lastPlayedText = lastPlayed > 0 and os.date("%d/%m/%Y %I:%M %p", math.floor(lastPlayed / 1000)) or "Unknown date",
+        summary = modeLabel .. ", Version: " .. versionName
+      }
+    end
+  end
+
+  table.sort(worlds, function(a, b)
+    if a.lastPlayed == b.lastPlayed then return a.worldName:lower() < b.worldName:lower() end
+    return a.lastPlayed > b.lastPlayed
+  end)
+  return worlds
+end
+
+local function removeDirectory(path)
+  if ffi.os == "Windows" then
+    return ffi.C.RemoveDirectoryA((path:gsub("/", "\\"))) ~= 0
+  end
+  return os.remove(path)
+end
+
+local function deleteTree(path)
+  for _, entry in ipairs(filesystem.entries(path)) do
+    local child = path .. "/" .. entry.name
+    local ok, err
+    if entry.isDirectory and not entry.isReparsePoint then
+      ok, err = deleteTree(child)
+    elseif entry.isDirectory then
+      ok = removeDirectory(child)
+      err = ok and nil or "unable to remove directory link"
+    else
+      ok, err = os.remove(child)
+    end
+    if not ok then return false, err or ("unable to remove " .. child) end
+  end
+
+  if not removeDirectory(path) then
+    return false, "unable to remove world folder"
+  end
+  return true
+end
+
+function saves.deleteWorld(worldSave)
+  if type(worldSave) ~= "table" then return false, "invalid world" end
+  local folderName = tostring(worldSave.folderName or "")
+  if folderName == "" or folderName == "." or folderName == ".." or folderName:find("[/\\]") then
+    return false, "invalid world folder"
+  end
+
+  local expectedPath = SAVE_ROOT .. "/" .. folderName
+  local suppliedPath = tostring(worldSave.path or ""):gsub("\\", "/"):gsub("/+$", "")
+  if suppliedPath ~= expectedPath then
+    return false, "world is outside the saves directory"
+  end
+  if not readFile(expectedPath .. "/mineLua.json") and not readFile(expectedPath .. "/level.dat") then
+    return false, "folder is not a MineLua world"
+  end
+
+  return deleteTree(expectedPath)
+end
+
+function saves.savePlayer(worldSave, playerState)
+  assert(worldSave and worldSave.path, "A world save path is required")
+  ensureDir(worldSave.path .. "/playerdata")
+  writeFile(worldSave.path .. "/playerdata/minelua.json", encodeJson({
+    format = "minelua-player",
+    version = PLAYER_DATA_VERSION,
+    savedAt = os.time() * 1000,
+    state = playerState or {}
+  }) .. "\n")
+end
+
+function saves.loadPlayer(worldSave)
+  if not worldSave or not worldSave.path then return nil end
+  local content = readFile(worldSave.path .. "/playerdata/minelua.json")
+  if not content then return nil end
+
+  local ok, document = pcall(json.decode, content)
+  if not ok or type(document) ~= "table" or type(document.state) ~= "table" then
+    return nil
+  end
+  return document.state, document.version
 end
 
 function saves.folderForWorldName(worldName)

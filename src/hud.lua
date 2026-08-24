@@ -5,6 +5,8 @@ local rendering = require("rendering")
 local texture = require("texture")
 local uiMenu = require("ui_menu")
 local blocks = require("blocks")
+local items = require("items")
+local itemMesh = require("item_mesh")
 
 local hud = {}
 hud.__index = hud
@@ -143,6 +145,20 @@ local function appendSprite(vertices, width, height, x, y, w, h, sx, sy, sw, sh,
     {ndcX(x + w, width), ndcY(y + h, height)},
     {ndcX(x, width), ndcY(y + h, height)}
   }, color or COLORS.white, {{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}}, 1.0, fallSpeed or 0.0)
+end
+
+local function appendRotatedSprite(vertices, width, height, x, y, w, h, sx, sy, sw, sh, tw, th, color, angle, pivotX, pivotY)
+  local cosine, sine = math.cos(angle or 0.0), math.sin(angle or 0.0)
+  pivotX, pivotY = pivotX or (x + w * 0.5), pivotY or (y + h * 0.5)
+  local function rotate(px, py)
+    local dx, dy = px - pivotX, py - pivotY
+    return {ndcX(pivotX + dx * cosine - dy * sine, width), ndcY(pivotY + dx * sine + dy * cosine, height)}
+  end
+  appendQuad(vertices, {
+    rotate(x, y), rotate(x + w, y), rotate(x + w, y + h), rotate(x, y + h)
+  }, color or COLORS.white, {
+    {sx/tw,sy/th},{(sx+sw)/tw,sy/th},{(sx+sw)/tw,(sy+sh)/th},{sx/tw,(sy+sh)/th}
+  }, 1.0, 0.0)
 end
 
 local function appendSpriteUv(vertices, width, height, x, y, w, h, u0, v0, u1, v1, color)
@@ -409,11 +425,15 @@ local function appendButton(meshes, width, height, scale, button, mouseX, mouseY
   appendCenteredText(meshes.font, width, height, scale, button.label, button.x + button.w * 0.5, button.y + 6, textColor)
 end
 
-local function appendSlider(meshes, width, height, scale, x, y, w, label, value)
-  local button = {label = label, x = x, y = y, w = w, h = 20}
-  appendButton(meshes, width, height, scale, button, -1, -1)
-  local knobX = x + math.floor((w - 4) * value)
-  appendScaledSprite(meshes.widgets, width, height, scale, knobX, y, 4, 20, 0, 66, 4, 20, 256, 256, COLORS.white)
+local function appendSlider(meshes, width, height, scale, button, mouseX, mouseY)
+  appendButton(meshes, width, height, scale, button, mouseX, mouseY)
+  local minimum = button.minValue or 0
+  local maximum = button.maxValue or 1
+  local value = math.max(minimum, math.min(maximum, button.value or minimum))
+  local amount = (value - minimum) / math.max(1, maximum - minimum)
+  local knobX = button.x + math.floor((button.w - 8) * amount)
+  appendScaledSprite(meshes.widgets, width, height, scale, knobX, button.y, 4, 20, 0, 66, 4, 20, 256, 256, COLORS.white)
+  appendScaledSprite(meshes.widgets, width, height, scale, knobX + 4, button.y, 4, 20, 196, 66, 4, 20, 256, 256, COLORS.white)
 end
 
 local function appendTextBox(meshes, width, height, scale, x, y, w, h, text)
@@ -429,36 +449,39 @@ local function appendMinecraftLogo(meshes, width, height, scale, cx)
   appendScaledSprite(meshes.logo, width, height, scale, x + 155, y, 155, 44, 0, 45, 155, 44, 256, 256, COLORS.white)
 end
 
-local function appendPixelHeart(vertices, width, height, x, y, filled)
-  appendSprite(vertices, width, height, x, y, 18, 18, 16, 0, 9, 9, 256, 256, COLORS.white)
-  if filled then appendSprite(vertices, width, height, x, y, 18, 18, 52, 0, 9, 9, 256, 256, COLORS.white) end
+local function appendStandaloneIcon(vertices, width, height, x, y, nativeWidth, nativeHeight)
+  local scale = 2
+  appendSprite(
+    vertices, width, height,
+    x + (9 - nativeWidth), y + (9 - nativeHeight),
+    nativeWidth * scale, nativeHeight * scale,
+    0, 0, nativeWidth, nativeHeight, nativeWidth, nativeHeight, COLORS.white
+  )
 end
 
-local function appendHunger(vertices, width, height, x, y, filled)
-  appendSprite(vertices, width, height, x, y, 18, 18, 16, 27, 9, 9, 256, 256, COLORS.white)
-  if filled then appendSprite(vertices, width, height, x, y, 18, 18, 52, 27, 9, 9, 256, 256, COLORS.white) end
+local function appendStatusIcon(meshes, kind, width, height, x, y, value)
+  appendStandaloneIcon(meshes[kind .. "Empty"], width, height, x, y, 9, 9)
+  if value >= 2 then
+    appendStandaloneIcon(meshes[kind], width, height, x, y, 7, 7)
+  elseif value >= 1 then
+    local halfWidth = kind == "hunger" and 6 or 7
+    appendStandaloneIcon(meshes[kind .. "Half"], width, height, x, y, halfWidth, 7)
+  end
 end
 
-local function appendArmor(vertices, width, height, x, y, filled)
-  appendSprite(vertices, width, height, x, y, 18, 18, 16, 9, 9, 9, 256, 256, COLORS.white)
-  if filled then appendSprite(vertices, width, height, x, y, 18, 18, 34, 9, 9, 9, 256, 256, COLORS.white) end
-end
-
-local function appendStatusBars(vertices, width, height, state)
+local function appendStatusBars(meshes, width, height, state)
   state = state or {}
   local center = math.floor(width * 0.5)
   local left = center - 184
   local right = center + 24
   local y = height - 86
+  local health = math.max(0, math.min(20, state.health or 20))
+  local hunger = math.max(0, math.min(20, state.hunger or 20))
 
   for i = 0, 9 do
-    appendPixelHeart(vertices, width, height, left + i * 18, y, (state.health or 20) > i * 2)
-    appendHunger(vertices, width, height, right + i * 18, y, (state.hunger or 20) > i * 2)
-    appendArmor(vertices, width, height, left + i * 18, y - 18, (state.armor or 0) > i * 2)
+    appendStatusIcon(meshes, "heart", width, height, left + i * 18, y, health - i * 2)
+    appendStatusIcon(meshes, "hunger", width, height, right + i * 18, y, hunger - i * 2)
   end
-
-  appendSprite(vertices, width, height, center - 182, height - 64, 364, 10, 0, 64, 182, 5, 256, 256, COLORS.white)
-  appendSprite(vertices, width, height, center - 182, height - 64, 180, 10, 0, 69, 182, 5, 256, 256, COLORS.white)
 end
 
 local function appendHand(vertices, width, height, time, swing)
@@ -495,27 +518,22 @@ local function appendHotbar(vertices, width, height, selectedSlot)
 end
 
 local function appendCrosshair(vertices, width, height)
-  local size = 24
+  local size = 18
   local cx = math.floor(width * 0.5 - size * 0.5)
   local cy = math.floor(height * 0.5 - size * 0.5)
-  appendSprite(vertices, width, height, cx, cy, size, size, 0, 0, 16, 16, 256, 256, COLORS.white)
+  appendSprite(vertices, width, height, cx, cy, size, size, 0, 0, 9, 9, 9, 9, COLORS.white)
 end
 
 local function appendInventoryItem(vertices, width, height, x, y, size, stack)
   if not stack then return end
-  local definition = blocks.mapping[stack.item]
+  local definition = blocks.mapping[stack.item] or items.mapping[stack.item]
   local uv = definition and definition.uvs and (definition.uvs.top or definition.uvs.side)
-  if not uv then
-    if stack.item == "stick" then
-      appendQuad(vertices,{{ndcX(x+size*.28,width),ndcY(y+size*.85,height)},{ndcX(x+size*.42,width),ndcY(y+size*.91,height)},{ndcX(x+size*.76,width),ndcY(y+size*.13,height)},{ndcX(x+size*.62,width),ndcY(y+size*.07,height)}},{0.42,0.24,0.08,1},{{0,0},{0,0},{0,0},{0,0}},0,0)
-    end
-    return
-  end
+  if not uv then return end
 
   local properties = definition.properties or {}
   local topUv = definition.uvs.top or uv
   local sideUv = definition.uvs.side or uv
-  if properties.solid and topUv and sideUv then
+  if properties.solid and not itemMesh.isSprite(definition) and topUv and sideUv then
     -- Minecraft's inventory renderer presents blocks as a lit isometric cube,
     -- not as a flat sample of the top texture. Keep all geometry in the HUD
     -- batch so this remains cheap even for the 45-slot creative grid.
@@ -527,8 +545,8 @@ local function appendInventoryItem(vertices, width, height, x, y, size, stack)
     local bottom = {x + size * 0.50, y + size * 0.88}
     local bottomLeft = {x + size * 0.09, y + size * 0.64}
     local colors = definition.colors or {}
-    local topColor = colors.top or definition.color or {1,1,1}
-    local sideColor = colors.side or definition.color or {1,1,1}
+    local topColor = definition.biomeTint and definition.color or colors.top or definition.color or {1,1,1}
+    local sideColor = definition.biomeTint and definition.color or colors.side or definition.color or {1,1,1}
     local function shade(color, amount)
       return {color[1] * amount, color[2] * amount, color[3] * amount, 1.0}
     end
@@ -552,20 +570,33 @@ local function buildMeshes(width, height, selectedSlot, state, time)
     color = {},
     skin = {},
     widgets = {},
-    icons = {},
+    heartEmpty = {},
+    heartHalf = {},
+    heart = {},
+    hungerEmpty = {},
+    hungerHalf = {},
+    hunger = {},
+    crosshair = {},
     terrain = {},
     font = {}
   }
 
+  local function hotbarStack(index)
+    if state and state.inventory and state.inventory.slots then return state.inventory.slots[index] end
+    local id = state and state.hotbarBlocks and state.hotbarBlocks[index]
+    local definition = id and blocks.list[id]
+    return definition and {item = definition.key, count = 1} or nil
+  end
+
   appendHand(meshes.skin, width, height, time, state and state.handSwing)
-  local held=state and state.inventory and state.inventory.slots[selectedSlot]
+  local held = hotbarStack(selectedSlot)
   if held then appendInventoryItem(meshes.terrain,width,height,width-142,height-190,72,held) end
-  if not state or state.worldGameMode ~= "creative" then appendStatusBars(meshes.icons, width, height, state) end
+  if not state or state.worldGameMode ~= "creative" then appendStatusBars(meshes, width, height, state) end
   appendHotbar(meshes.widgets, width, height, selectedSlot)
-  appendCrosshair(meshes.icons, width, height)
+  appendCrosshair(meshes.crosshair, width, height)
   local center, x, y = math.floor(width*0.5), math.floor(width*0.5)-174, height-54
   for index=1,9 do
-    local stack = state and state.inventory and state.inventory.slots[index]
+    local stack = hotbarStack(index)
     appendInventoryItem(meshes.terrain,width,height,x+(index-1)*40+5,y+5,30,stack)
     if stack and stack.count > 1 then appendText(meshes.font,width,height,1,tostring(stack.count),x+(index-1)*40+22,y+25,TEXT_WHITE) end
   end
@@ -628,26 +659,34 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
   if screen == "pause" then
     appendCenteredText(meshes.font, width, height, scale, "Game menu", cx, 40, TEXT_WHITE)
   elseif screen == "select_world" then
-    appendCenteredText(meshes.font, width, height, scale, "Singleplayer", cx, 20, TEXT_WHITE)
-    appendScaledRect(meshes.color, width, height, scale, 0, 32, logicalWidth, logicalHeight - 96, COLORS.panel)
-    appendText(meshes.font, width, height, scale, "Gather resources, craft, survive", cx - 100, 52, TEXT_MUTED)
-    appendText(meshes.font, width, height, scale, "Build freely with flight enabled", cx - 100, 88, TEXT_MUTED)
-    appendText(meshes.font, width, height, scale, "Start 120 km up with orbital flight", cx - 100, 124, TEXT_MUTED)
+    appendCenteredText(meshes.font, width, height, scale, "Select World", cx, 20, TEXT_WHITE)
+    appendScaledRect(meshes.color, width, height, scale, 0, 32, logicalWidth, logicalHeight - 88, COLORS.panel)
+    if #(menuState.savedWorlds or {}) == 0 then
+      appendCenteredText(meshes.font, width, height, scale, "No saved worlds yet", cx, 74, TEXT_WHITE)
+      appendCenteredText(meshes.font, width, height, scale, "Create one to begin", cx, 90, TEXT_MUTED)
+    end
+    if menuState.statusMessage and menuState.statusMessage ~= "" then
+      appendCenteredText(meshes.font, width, height, scale, menuState.statusMessage, cx, logicalHeight - 68, TEXT_MUTED)
+    end
+  elseif screen == "confirm_delete_world" then
+    local world = menuState.pendingDeleteWorld or {}
+    appendCenteredText(meshes.font, width, height, scale, "Delete World?", cx, 54, TEXT_WHITE)
+    appendCenteredText(meshes.font, width, height, scale,
+      "'" .. tostring(world.worldName or "Selected World") .. "' will be lost forever!", cx, 82, TEXT_WHITE)
+    appendCenteredText(meshes.font, width, height, scale, "This cannot be undone.", cx, 98, TEXT_MUTED)
   elseif screen == "create_world" then
     appendCenteredText(meshes.font, width, height, scale, "Create New World", cx, 20, TEXT_WHITE)
-    appendText(meshes.font, width, height, scale, "World Name", cx - 100, 47, TEXT_MUTED)
-    appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, "New World")
-    appendText(meshes.font, width, height, scale, "Will be saved in: New World", cx - 100, 85, TEXT_MUTED)
     if menuState.moreWorldOptions then
-      appendText(meshes.font, width, height, scale, "Seed for the World Generator", cx - 100, 104, TEXT_MUTED)
-      appendTextBox(meshes, width, height, scale, cx - 100, 116, 200, 20, menuState.worldSeedText or "")
-      appendText(meshes.font, width, height, scale, "Leave blank for a random seed", cx - 100, 140, TEXT_MUTED)
-      if (menuState.worldGeneratorType or "default") == "superflat" then
-        appendText(meshes.font, width, height, scale, "Flat grass, dirt and stone layers", cx - 100, 200, TEXT_MUTED)
-      else
-        appendText(meshes.font, width, height, scale, "Biomes, hills, oceans and trees", cx - 100, 200, TEXT_MUTED)
-      end
+      appendText(meshes.font, width, height, scale, "Seed for the World Generator", cx - 100, 47, TEXT_MUTED)
+      appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, menuState.worldSeedText or "")
+      appendText(meshes.font, width, height, scale, "Leave blank for a random seed", cx - 100, 84, TEXT_MUTED)
+      appendText(meshes.font, width, height, scale, "Villages, dungeons, etc.", cx - 155, 124, TEXT_MUTED)
+      appendText(meshes.font, width, height, scale, "Commands like /gamemode", cx - 155, 160, TEXT_MUTED)
     else
+      local worldName = menuState.worldNameText or "New World"
+      appendText(meshes.font, width, height, scale, "World Name", cx - 100, 47, TEXT_MUTED)
+      appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, worldName)
+      appendText(meshes.font, width, height, scale, "Will be saved in: " .. worldName, cx - 100, 85, TEXT_MUTED)
       if (menuState.worldGameMode or "survival") == "creative" then
         appendText(meshes.font, width, height, scale, "Unlimited resources and free flying", cx - 100, 124, TEXT_MUTED)
       else
@@ -687,7 +726,29 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
 
   local buttons = uiMenu.buttons(screen, logicalWidth, logicalHeight, menuState)
   for i = 1, #buttons do
-    appendButton(meshes, width, height, scale, buttons[i], mouseX, mouseY)
+    local button = buttons[i]
+    if button.worldIndex then
+      local world = (menuState.savedWorlds or {})[button.worldIndex]
+      if world then
+        local selected = button.worldIndex == menuState.selectedWorldIndex
+        local hovered = isHovered(button, mouseX, mouseY)
+        local border = selected and {0.78, 0.78, 0.78, 1.0} or {0.12, 0.12, 0.12, 1.0}
+        local fill = hovered and {0.24, 0.24, 0.24, 0.94} or {0.04, 0.04, 0.04, 0.88}
+        appendScaledRect(meshes.color, width, height, scale, button.x, button.y, button.w, button.h, border)
+        appendScaledRect(meshes.color, width, height, scale, button.x + 1, button.y + 1, button.w - 2, button.h - 2, fill)
+        appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 3, 28, 28,
+          world.generatorType == "superflat" and {0.34, 0.65, 0.20, 1.0} or {0.16, 0.43, 0.72, 1.0})
+        appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 19, 28, 12, {0.20, 0.52, 0.16, 1.0})
+        appendText(meshes.font, width, height, scale, tostring(world.worldName):sub(1, 34), button.x + 36, button.y + 3, TEXT_WHITE)
+        appendText(meshes.font, width, height, scale,
+          (tostring(world.folderName):sub(1, 18) .. " - " .. tostring(world.lastPlayedText)), button.x + 36, button.y + 13, TEXT_MUTED)
+        appendText(meshes.font, width, height, scale, tostring(world.summary), button.x + 36, button.y + 23, TEXT_MUTED)
+      end
+    elseif button.kind == "slider" then
+      appendSlider(meshes, width, height, scale, button, mouseX, mouseY)
+    else
+      appendButton(meshes, width, height, scale, button, mouseX, mouseY)
+    end
   end
 
   return meshes
@@ -782,6 +843,37 @@ local function inventoryLayout(width, height, creative)
   return {x=math.floor((width-w)/2),y=math.floor((height-h)/2),w=w,h=h,scale=scale}
 end
 
+local function inventoryRect(layout, sourceX, sourceY, sourceSize)
+  local scale = layout.scale
+  return {
+    x = layout.x + sourceX * scale,
+    y = layout.y + sourceY * scale,
+    w = sourceSize * scale,
+    h = sourceSize * scale
+  }
+end
+
+local function appendInventorySteve(vertices, width, height, layout, mouseX, mouseY, time)
+  local centerX = layout.x + 50 * layout.scale
+  local centerY = layout.y + 43 * layout.scale
+  local lookX = math.max(-1.0, math.min(1.0, ((mouseX or centerX) - centerX) / 150.0))
+  local lookY = math.max(-1.0, math.min(1.0, ((mouseY or centerY) - centerY) / 150.0))
+  local idle = math.sin((time or 0.0) * 2.1)
+  local bob = idle * 1.25
+
+  local headX, headY = centerX - 16 + lookX * 3.0, layout.y + 47 + bob + lookY * 2.0
+  local headAngle = lookX * 0.11
+  appendRotatedSprite(vertices,width,height,headX,headY,32,32,8,8,8,8,64,64,COLORS.white,headAngle)
+  appendRotatedSprite(vertices,width,height,headX,headY,32,32,40,8,8,8,64,64,{1,1,1,0.94},headAngle)
+
+  local bodyX, bodyY = centerX - 16, layout.y + 79 + bob
+  appendRotatedSprite(vertices,width,height,bodyX,bodyY,32,48,20,20,8,12,64,64,COLORS.white,idle*0.012)
+
+  local armSwing = math.sin((time or 0.0) * 1.55) * 0.055
+  appendRotatedSprite(vertices,width,height,bodyX-16,bodyY,16,48,44,20,4,12,64,64,COLORS.white,-0.055-armSwing,bodyX,bodyY+3)
+  appendRotatedSprite(vertices,width,height,bodyX+32,bodyY,16,48,36,52,4,12,64,64,COLORS.white,0.055+armSwing,bodyX+32,bodyY+3)
+end
+
 local CREATIVE_TABS = {
   {id="building", item="cobblestone", x=0},
   {id="nature", item="oak_leaves", x=56},
@@ -815,32 +907,61 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
     local filtered = state and state.creativeFiltered or {}
     for row=0,4 do for col=0,8 do
       local x,y=creativeSlotPosition(layout,row,col)
-      if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="creative",index=row*9+col+1,item=filtered[row*9+col+1]} end
+      if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="creative",index=row*9+col+1,item=filtered[row*9+col+1],x=x,y=y,w=32,h=32} end
     end end
     for col=0,8 do
       local x,y=layout.x+18+col*36,layout.y+224
-      if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1} end
+      if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1,x=x,y=y,w=32,h=32} end
     end
     return nil
   end
 
+  if screen == "crafting_table" then
+    for row=0,2 do for col=0,2 do
+      local rect=inventoryRect(layout,30+col*18,17+row*18,16)
+      if pointIn(mouseX,mouseY,rect.x,rect.y,rect.w,rect.h) then
+        return {kind="craft",index=1+row*3+col,x=rect.x,y=rect.y,w=rect.w,h=rect.h}
+      end
+    end end
+    local result=inventoryRect(layout,124,35,16)
+    if pointIn(mouseX,mouseY,result.x,result.y,result.w,result.h) then
+      return {kind="result",x=result.x,y=result.y,w=result.w,h=result.h}
+    end
+  end
+
   for row=0,2 do for col=0,8 do
     local x,y=layout.x+16+col*36,layout.y+168+row*36
-    if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=10+row*9+col} end
+    if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=10+row*9+col,x=x,y=y,w=32,h=32} end
   end end
   for col=0,8 do
     local x,y=layout.x+16+col*36,layout.y+284
-    if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1} end
+    if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1,x=x,y=y,w=32,h=32} end
+  end
+  if screen == "crafting_table" then return nil end
+  for row=0,3 do
+    local rect=inventoryRect(layout,8,8+row*18,16)
+    if pointIn(mouseX,mouseY,rect.x,rect.y,rect.w,rect.h) then
+      return {kind="armor",index=row+1,x=rect.x,y=rect.y,w=rect.w,h=rect.h}
+    end
+  end
+  local offhand=inventoryRect(layout,77,62,16)
+  if pointIn(mouseX,mouseY,offhand.x,offhand.y,offhand.w,offhand.h) then
+    return {kind="offhand",x=offhand.x,y=offhand.y,w=offhand.w,h=offhand.h}
   end
   for row=0,1 do for col=0,1 do
-    local x,y=layout.x+176+col*36,layout.y+52+row*36
-    if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="craft",index=1+row*2+col} end
+    local rect=inventoryRect(layout,98+col*18,18+row*18,16)
+    if pointIn(mouseX,mouseY,rect.x,rect.y,rect.w,rect.h) then
+      return {kind="craft",index=1+row*2+col,x=rect.x,y=rect.y,w=rect.w,h=rect.h}
+    end
   end end
-  if pointIn(mouseX,mouseY,layout.x+288,layout.y+70,40,40) then return {kind="result"} end
+  local result=inventoryRect(layout,154,28,16)
+  if pointIn(mouseX,mouseY,result.x,result.y,result.w,result.h) then
+    return {kind="result",x=result.x,y=result.y,w=result.w,h=result.h}
+  end
   return nil
 end
 
-local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY)
+local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time)
   local creative = screen == "creative_inventory"
   local layout = inventoryLayout(width,height,creative)
   local meshes={panel={},creativePanel={},creativeTabs={},color={},overlay={},terrain={},font={},skin={}}
@@ -886,15 +1007,7 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY)
     end
   else
     appendSprite(meshes.panel,width,height,layout.x,layout.y,layout.w,layout.h,0,0,176,166,176,166,COLORS.white)
-    local px,py,s=layout.x+58,layout.y+28,5
-    appendSprite(meshes.skin,width,height,px,py,8*s,8*s,8,8,8,8,64,64,COLORS.white)
-    appendSprite(meshes.skin,width,height,px,py,8*s,8*s,40,8,8,8,64,64,COLORS.white)
-    appendSprite(meshes.skin,width,height,px,py+8*s,8*s,12*s,20,20,8,12,64,64,COLORS.white)
-    appendSprite(meshes.skin,width,height,px-4*s,py+8*s,4*s,12*s,44,20,4,12,64,64,COLORS.white)
-    appendSprite(meshes.skin,width,height,px+8*s,py+8*s,4*s,12*s,36,52,4,12,64,64,COLORS.white)
-    appendSprite(meshes.skin,width,height,px,py+20*s,4*s,12*s,4,20,4,12,64,64,COLORS.white)
-    appendSprite(meshes.skin,width,height,px+4*s,py+20*s,4*s,12*s,20,52,4,12,64,64,COLORS.white)
-    appendText(meshes.font,width,height,2,"Crafting",layout.x+172,layout.y+22,TEXT_WHITE)
+    if screen ~= "crafting_table" then appendInventorySteve(meshes.skin,width,height,layout,mouseX,mouseY,time) end
     local inv=state.inventory
     for row=0,2 do for col=0,8 do
       local index=10+row*9+col local x,y=layout.x+16+col*36,layout.y+168+row*36
@@ -906,11 +1019,18 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY)
       appendInventoryItem(meshes.terrain,width,height,x,y,32,stack)
       if stack and stack.count>1 then appendText(meshes.font,width,height,1,tostring(stack.count),x+18,y+20,TEXT_WHITE) end
     end
-    for row=0,1 do for col=0,1 do
-      appendInventoryItem(meshes.terrain,width,height,layout.x+176+col*36,layout.y+52+row*36,32,inv.crafting[1+row*2+col])
+    local gridSize=screen=="crafting_table" and 3 or 2
+    local gridX,gridY=screen=="crafting_table" and 30 or 98,screen=="crafting_table" and 17 or 18
+    for row=0,gridSize-1 do for col=0,gridSize-1 do
+      local rect=inventoryRect(layout,gridX+col*18,gridY+row*18,16)
+      appendInventoryItem(meshes.terrain,width,height,rect.x,rect.y,rect.w,inv.crafting[1+row*gridSize+col])
     end end
-    appendInventoryItem(meshes.terrain,width,height,layout.x+292,layout.y+74,32,inv:craftResult())
-    appendText(meshes.font,width,height,1,inv.recipeHint or "",layout.x+16,layout.y+142,TEXT_MUTED)
+    local result=inventoryRect(layout,screen=="crafting_table" and 124 or 154,screen=="crafting_table" and 35 or 28,16)
+    appendInventoryItem(meshes.terrain,width,height,result.x,result.y,result.w,inv:craftResult())
+  end
+  local hovered=hud.inventorySlotAt(screen,width,height,mouseX or -1,mouseY or -1,state)
+  if hovered and hovered.x then
+    appendRect(meshes.overlay,width,height,hovered.x,hovered.y,hovered.w,hovered.h,{1.0,1.0,1.0,0.24})
   end
   local cursor=state.inventory.cursor
   if cursor then
@@ -1015,12 +1135,19 @@ function hud.create(skinPath)
     textureLocation = gl.glGetUniformLocation(shader, "uTexture"),
     textures = {
       widgets = createTexture("assets/textures/gui/widgets.png"),
-      icons = createTexture("assets/textures/gui/icons.png"),
+      heartEmpty = createTexture("assets/textures/gui/icons/heart_empty.png"),
+      heartHalf = createTexture("assets/textures/gui/icons/heart_half.png"),
+      heart = createTexture("assets/textures/gui/icons/heart.png"),
+      hungerEmpty = createTexture("assets/textures/gui/icons/hunger_empty.png"),
+      hungerHalf = createTexture("assets/textures/gui/icons/hunger_half.png"),
+      hunger = createTexture("assets/textures/gui/icons/hunger.png"),
+      crosshair = createTexture("assets/textures/gui/icons/crosshair.png"),
       font = createTexture("assets/textures/font/ascii.png"),
       background = createTexture("assets/textures/gui/options_background.png", true),
       logo = createTexture("assets/textures/gui/title/minecraft.png"),
       skin = createTexture(skinPath or "assets/textures/entity/steve.png"),
       inventory = createTexture("assets/textures/gui/container/inventory.png"),
+      craftingTable = createTexture("assets/textures/gui/container/crafting_table.png"),
       creativeItems = createTexture("assets/textures/gui/container/creative_inventory/tab_items.png"),
       creativeSearch = createTexture("assets/textures/gui/container/creative_inventory/tab_item_search.png"),
       creativeInventory = createTexture("assets/textures/gui/container/creative_inventory/tab_inventory.png"),
@@ -1068,7 +1195,13 @@ function hud:ensureMeshes(width, height, selectedSlot, state, time)
     color = upload(rawMeshes.color),
     skin = upload(rawMeshes.skin),
     widgets = upload(rawMeshes.widgets),
-    icons = upload(rawMeshes.icons),
+    heartEmpty = upload(rawMeshes.heartEmpty),
+    heartHalf = upload(rawMeshes.heartHalf),
+    heart = upload(rawMeshes.heart),
+    hungerEmpty = upload(rawMeshes.hungerEmpty),
+    hungerHalf = upload(rawMeshes.hungerHalf),
+    hunger = upload(rawMeshes.hunger),
+    crosshair = upload(rawMeshes.crosshair),
     terrain = upload(rawMeshes.terrain),
     font = upload(rawMeshes.font)
   }
@@ -1099,7 +1232,13 @@ function hud:draw(width, height, time, selectedSlot, state, atlasTexture)
   self:drawMesh(self.meshes.color, self.textures.white)
   self:drawMesh(self.meshes.skin, self.textures.skin)
   self:drawMesh(self.meshes.widgets, self.textures.widgets)
-  self:drawMesh(self.meshes.icons, self.textures.icons)
+  self:drawMesh(self.meshes.heartEmpty, self.textures.heartEmpty)
+  self:drawMesh(self.meshes.heartHalf, self.textures.heartHalf)
+  self:drawMesh(self.meshes.heart, self.textures.heart)
+  self:drawMesh(self.meshes.hungerEmpty, self.textures.hungerEmpty)
+  self:drawMesh(self.meshes.hungerHalf, self.textures.hungerHalf)
+  self:drawMesh(self.meshes.hunger, self.textures.hunger)
+  self:drawMesh(self.meshes.crosshair, self.textures.crosshair)
   if atlasTexture then self:drawMesh(self.meshes.terrain, atlasTexture) end
   self:drawMesh(self.meshes.font, self.textures.font)
 
@@ -1108,10 +1247,10 @@ function hud:draw(width, height, time, selectedSlot, state, atlasTexture)
   gl.glEnable(GL_DEPTH_TEST)
 end
 
-function hud:drawInventory(width,height,screen,state,mouseX,mouseY,atlasTexture)
-  local key=table.concat({screen,width,height,state.inventoryVersion or 0,state.creativeTab or "building",state.inventory.search or "",math.floor(mouseX or 0),math.floor(mouseY or 0)},":")
+function hud:drawInventory(width,height,screen,state,mouseX,mouseY,atlasTexture,time)
+  local key=table.concat({screen,width,height,state.inventoryVersion or 0,state.creativeTab or "building",state.inventory.search or "",math.floor(mouseX or 0),math.floor(mouseY or 0),math.floor((time or 0)*12)},":")
   if not self.inventoryMeshes or self.inventoryKey~=key then
-    local raw=buildInventoryMeshes(width,height,screen,state,mouseX or 0,mouseY or 0)
+    local raw=buildInventoryMeshes(width,height,screen,state,mouseX or 0,mouseY or 0,time or 0)
     rendering.releaseGroup(self.inventoryMeshes)
     self.inventoryMeshes={
       panel=upload(raw.panel),creativePanel=upload(raw.creativePanel),creativeTabs=upload(raw.creativeTabs),
@@ -1122,7 +1261,7 @@ function hud:drawInventory(width,height,screen,state,mouseX,mouseY,atlasTexture)
   gl.glDisable(GL_DEPTH_TEST) gl.glEnable(GL_BLEND) gl.glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA) gl.glDepthMask(0)
   gl.glUseProgram(self.shader) gl.glUniform1f(self.timeLocation,0) gl.glUniform1i(self.textureLocation,0)
   self:drawMesh(self.inventoryMeshes.color,self.textures.white)
-  self:drawMesh(self.inventoryMeshes.panel,self.textures.inventory)
+  self:drawMesh(self.inventoryMeshes.panel,screen=="crafting_table" and self.textures.craftingTable or self.textures.inventory)
   local creativeBackground = state.creativeTab == "search" and self.textures.creativeSearch or self.textures.creativeItems
   self:drawMesh(self.inventoryMeshes.creativePanel,creativeBackground)
   self:drawMesh(self.inventoryMeshes.creativeTabs,self.textures.creativeTabs)
@@ -1307,6 +1446,32 @@ function hud.menuButtonAt(screen, width, height, mouseX, mouseY, menuState)
     local button = buttons[i]
     if button.enabled ~= false and isHovered(button, logicalMouseX, logicalMouseY) then
       return button.id
+    end
+  end
+
+  return nil
+end
+
+function hud.menuSliderValueAt(screen, width, height, mouseX, mouseY, menuState, activeSlider)
+  if not screen then
+    return nil
+  end
+
+  local scale = guiScale(width, height)
+  local logicalWidth = math.floor(width / scale)
+  local logicalHeight = math.floor(height / scale)
+  local logicalMouseX = mouseX / scale
+  local logicalMouseY = mouseY / scale
+  local buttons = uiMenu.buttons(screen, logicalWidth, logicalHeight, menuState)
+  for i = 1, #buttons do
+    local slider = buttons[i]
+    if slider.kind == "slider" and slider.enabled ~= false and
+        ((activeSlider and slider.id == activeSlider) or
+         (not activeSlider and isHovered(slider, logicalMouseX, logicalMouseY))) then
+      local amount = math.max(0.0, math.min(1.0, (logicalMouseX - slider.x) / math.max(1, slider.w - 1)))
+      local minimum = slider.minValue or 0
+      local maximum = slider.maxValue or 1
+      return slider.id, math.floor(minimum + amount * (maximum - minimum) + 0.5)
     end
   end
 

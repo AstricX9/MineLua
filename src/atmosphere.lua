@@ -10,86 +10,19 @@ function atmosphere.sunDirection(time, cycleSpeed)
   }
 end
 
--- Transmittance from an observer to the top of the atmosphere along the sun
--- ray, per channel. The sky shader already does this per pixel for its own
--- purposes; the sun mesh is one object, so its extinction is worth computing
--- once on the CPU rather than duplicating the march in another shader.
---
--- This is what makes the sun set instead of hanging white on the horizon: the
--- ray is blocked once it meets the ground, and before that the long slanted
--- path strips the blue out of it.
-local PLANET_RADIUS = 6371000.0
-local ATMOSPHERE_RADIUS = 6471000.0
-local RAYLEIGH_SCALE_HEIGHT = 8000.0
-local MIE_SCALE_HEIGHT = 1200.0
-local RAYLEIGH_BETA = {5.802e-6, 13.558e-6, 33.100e-6}
-local MIE_BETA = 21.0e-6 * 1.1
-local TRANSMITTANCE_STEPS = 12
-
-function atmosphere.sunTransmittance(altitudeMeters, sunElevation)
-  altitudeMeters = math.max(altitudeMeters or 0.0, 0.0)
-  sunElevation = math.max(-1.0, math.min(1.0, sunElevation or 1.0))
-  local radius = PLANET_RADIUS + altitudeMeters
-
-  -- The observer sits on the local vertical, so the sun ray is
-  -- (sinElevation along up, cosElevation across) and both sphere hits reduce to
-  -- a quadratic in the elevation cosine.
-  local b = radius * sunElevation
-  local function farHit(sphereRadius)
-    local discriminant = b * b - (radius * radius - sphereRadius * sphereRadius)
-    if discriminant < 0.0 then return nil end
-    return -b + math.sqrt(discriminant)
-  end
-  local function nearHit(sphereRadius)
-    local discriminant = b * b - (radius * radius - sphereRadius * sphereRadius)
-    if discriminant < 0.0 then return nil end
-    local t = -b - math.sqrt(discriminant)
-    return t > 0.0 and t or nil
-  end
-
-  if nearHit(PLANET_RADIUS) then return {0.0, 0.0, 0.0} end
-  local rayLength = farHit(ATMOSPHERE_RADIUS)
-  if not rayLength or rayLength <= 0.0 then return {1.0, 1.0, 1.0} end
-
-  local stepSize = rayLength / TRANSMITTANCE_STEPS
-  local depthRayleigh, depthMie = 0.0, 0.0
-  for i = 0, TRANSMITTANCE_STEPS - 1 do
-    local distance = (i + 0.5) * stepSize
-    -- Height of a point at `distance` along the ray, from the law of cosines.
-    local sampleRadius = math.sqrt(radius * radius + distance * distance + 2.0 * b * distance)
-    local height = math.max(sampleRadius - PLANET_RADIUS, 0.0)
-    depthRayleigh = depthRayleigh + math.exp(-height / RAYLEIGH_SCALE_HEIGHT) * stepSize
-    depthMie = depthMie + math.exp(-height / MIE_SCALE_HEIGHT) * stepSize
-  end
-
-  return {
-    math.exp(-(RAYLEIGH_BETA[1] * depthRayleigh + MIE_BETA * depthMie)),
-    math.exp(-(RAYLEIGH_BETA[2] * depthRayleigh + MIE_BETA * depthMie)),
-    math.exp(-(RAYLEIGH_BETA[3] * depthRayleigh + MIE_BETA * depthMie))
-  }
-end
-
--- localUp is the observer's radial direction. Every term below wants the sun's
--- height *above their horizon*, and this used to read sunDir[2] for it, which
--- is only the same thing in a flat world whose up is +Y. On a planet an
--- equatorial observer has an up of roughly +Z, so sunDir[2] stayed near zero
--- around the clock: permanent dusk, a sky stuck at mauve, and a midnight lit
--- like late afternoon.
-function atmosphere.forSun(sunDir, fogStart, fogEnd, localUp)
-  local up = localUp or {0.0, 1.0, 0.0}
-  local elevation = sunDir[1] * up[1] + sunDir[2] * up[2] + sunDir[3] * up[3]
-  local daylight = math3d.smoothstep(-0.18, 0.08, elevation)
+function atmosphere.forSun(sunDir, fogStart, fogEnd)
+  local daylight = math3d.smoothstep(-0.18, 0.08, sunDir[2])
   local day = daylight
-  local moonAmount = math3d.smoothstep(-0.05, 0.18, -elevation)
-  local night = 1.0 - math3d.smoothstep(-0.26, 0.04, elevation)
-  local horizon = math3d.smoothstep(0.38, -0.02, math.abs(elevation))
+  local moonAmount = math3d.smoothstep(-0.05, 0.18, -sunDir[2])
+  local night = 1.0 - math3d.smoothstep(-0.26, 0.04, sunDir[2])
+  local horizon = math3d.smoothstep(0.38, -0.02, math.abs(sunDir[2]))
   local lowSun = horizon * (1.0 - night)
 
   local dayFog = {0.72, 0.84, 1.00}
   local duskFog = {0.78, 0.38, 0.24}
   local nightFog = {0.025, 0.040, 0.075}
   local moonFog = {0.055, 0.075, 0.120}
-  local fogColor = math3d.mixColor(nightFog, moonFog, night * math3d.smoothstep(0.10, 0.85, -elevation))
+  local fogColor = math3d.mixColor(nightFog, moonFog, night * math3d.smoothstep(0.10, 0.85, -sunDir[2]))
   fogColor = math3d.mixColor(fogColor, dayFog, day)
   fogColor = math3d.mixColor(fogColor, duskFog, lowSun * 0.68)
 
@@ -125,9 +58,8 @@ function atmosphere.forSun(sunDir, fogStart, fogEnd, localUp)
     moonAmount = moonAmount,
     ambientFloor = ambientFloor,
     cloudColor = math3d.mixColor(cloudNightColor, cloudDayColor, daylight),
-    sunElevation = elevation,
     skyZenith = math3d.mixColor({0.02, 0.03, 0.08}, {0.34, 0.58, 0.92}, day),
-    shadowStrength = math3d.mix(0.02, 0.46, day) * math3d.smoothstep(-0.03, 0.18, elevation)
+    shadowStrength = math3d.mix(0.02, 0.46, day) * math3d.smoothstep(-0.03, 0.18, sunDir[2])
   }
 end
 

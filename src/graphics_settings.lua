@@ -25,55 +25,28 @@ graphics.player = {
   groundFriction = 46.0,
   airFriction = 2.0,
   flyFriction = 18.0,
-  gravity = 9.81,
-  jumpSpeed = 6.4,
-  stepHeight = 1.08,
+  gravity = 19.5,
+  -- Clears a full voxel with margin after discrete gravity integration.
+  jumpSpeed = 7.4,
+  stepHeight = 0.60,
+  swimUpSpeed = 4.6,
+  swimSinkSpeed = 0.65,
+  swimAcceleration = 18.0,
   groundSnap = 0.36,
   coyoteTime = 0.10,
   jumpBufferTime = 0.12,
   mouseSensitivity = 0.085,
   reach = 6.0,
-  -- Any standard 64x64 Java Edition skin can be dropped here. Use "slim"
-  -- for three-pixel Alex arms and "classic" for four-pixel Steve arms.
-  skinPath = "assets/textures/entity/steve.png",
-  skinModel = "classic",
   showDebugBody = false
 }
 
 graphics.world = {
   terrainMaxHeight = 127,
   chunkRenderRadius = 8,
-  -- The loaded region is an ellipsoid around the player, wide across the ground
-  -- and shallow through it. It must reach past chunkRenderRadius, or the
-  -- renderer draws to where the world stops existing.
-  chunkLoadRadius = 9,
-  chunkLoadRadiusVertical = 5,
-  -- Voxels are individually rotated so their local up is radial, addressed on
-  -- a cube-sphere. See src/spherical_grid.lua. Set false for the old globally
-  -- aligned Cartesian lattice.
-  sphericalVoxels = true,
-  -- Column stacks kept loaded around the player, in 16-voxel chunks.
-  gridLoadRadius = 6,
-  -- Beyond the voxels, terrain is drawn as a smooth shell sampled straight
-  -- from the generator. Voxel chunks cost about 2.3 ms each and grow with the
-  -- square of the radius; the shell covers kilometres for tens of milliseconds.
-  horizonDistance = 3000.0,
-  horizonSegments = 96,
-  -- Wall-clock budget per frame for grid generation and meshing together.
-  gridFrameBudgetMs = 4.0,
+  -- Default menu Render Distance. This is a square outer chunk range; chunks
+  -- fill progressively from the local full-detail radius to this LOD horizon.
+  distantChunkRadius = 24,
   visualDistance = 320.0
-}
-
-graphics.planet = {
-  center = {0.0, 0.0, 0.0},
-  radiusMeters = 6371000.0,
-  voxelSizeMeters = 1.0,
-  seaLevelOffsetMeters = 0.0,
-  gravityAcceleration = 9.81,
-  minTerrainElevationMeters = -96.0,
-  maxTerrainElevationMeters = 160.0,
-  generatedInteriorDepthMeters = 192.0,
-  renderOriginGridMeters = 256.0
 }
 
 graphics.performance = {
@@ -87,6 +60,10 @@ graphics.performance = {
   terrainFrameBudgetMs = 8.0,
   chunkQueueBudget = 4,
   chunkQueueBacklog = 16,
+  distantGenerationSteps = 8,
+  distantBuildBudget = 2,
+  distantFrameBudgetMs = 3.0,
+  distantQueueRingBudget = 4,
   lightingStepBudget = 10,
   loadingChunkBudget = 2,
   loadingLightingStepBudget = 14,
@@ -94,27 +71,6 @@ graphics.performance = {
   loadingRequiredRadius = 1,
   loadingHaloRadius = 2,
   initialSpawnRadius = 1
-}
-
--- The astronomical model behind day and night. See src/celestial.lua: the sun
--- is one astronomical unit away and 696,000 km across, and the sky turns
--- because the planet does. dayLengthSeconds is the only speed control -- 3600
--- gives thirty minutes of daylight and thirty of night at the equator.
-graphics.celestial = {
-  dayLengthSeconds = 3600.0,
-  yearLengthSeconds = 3600.0 * 365.25,
-  axialTiltRadians = 0.40910517666747087,
-  orbitRadiusMeters = 149597870700.0,
-  sunRadiusMeters = 695700000.0,
-  -- Start mid-morning rather than in the dark. A spawn near longitude 90
-  -- reads about 09:00 at this phase.
-  rotationPhase = 0.125,
-  orbitPhase = 0.0,
-  -- Multiplies the sun mesh only. The true angular radius is about five pixels
-  -- at 720p and a 70 degree field of view, which is correct and small; raise
-  -- this if a blocky world wants a more legible sun.
-  sunSizeScale = 1.0,
-  sunBrightness = 24.0
 }
 
 graphics.atmosphere = {
@@ -126,9 +82,8 @@ graphics.atmosphere = {
   skyColor = {0.53, 0.81, 0.92},
   skyExposure = 0.62,
   cloudDensity = 1.35,
-  -- Smooth render-only shells.  These are radial altitudes, not global Y.
-  cloudBottom = 1800.0,
-  cloudTop = 4200.0,
+  cloudBottom = 132.0,
+  cloudTop = 136.0,
   sunGlare = 0.58,
   maxFogAmount = 0.72,
   -- Extinction per block at sea level and its exponential falloff with height.
@@ -201,13 +156,7 @@ graphics.terrain = {
   exposure = 1.04,
   topLight = 1.00,
   sideLight = 0.82,
-  bottomLight = 0.58,
-  foliageWindStrength = 1.0,
-  -- Grass is smoothly thinned between these radii and completely absent past
-  -- the end distance. Its animation fades out by the start distance.
-  grassCullStart = 64.0,
-  grassCullEnd = 104.0,
-  leafWindDistance = 112.0
+  bottomLight = 0.58
 }
 
 graphics.shadows = {
@@ -215,6 +164,26 @@ graphics.shadows = {
   distance = 60.0,
   near = 8.0,
   far = 132.0
+}
+
+-- Real dielectric constants for transmissive voxel materials. The renderer
+-- uses these with Fresnel reflection, Beer-Lambert absorption, refraction and
+-- a GGX highlight instead of treating ice/glass as tinted opaque stone.
+graphics.dielectrics = {
+  ice = {
+    ior = 1.31,
+    roughness = 0.16,
+    absorption = {0.045, 0.018, 0.008},
+    refractionStrength = 0.010,
+    cloudiness = 0.72
+  },
+  glass = {
+    ior = 1.52,
+    roughness = 0.035,
+    absorption = {0.008, 0.004, 0.002},
+    refractionStrength = 0.006,
+    cloudiness = 0.04
+  }
 }
 
 graphics.water = {
@@ -228,11 +197,6 @@ graphics.water = {
   choppiness = 0.88,
   displacementScale = 1.0,
   nearTessellation = 2,
-  farChunkRadius = 18,
-  farCoverageSubdivisions = 4,
-  farTileSubdivisions = 8,
-  farBuildBudget = 8,
-  farBuildBudgetMs = 2.0,
   -- Reuse the physically evolved FFT field at three decorrelated world scales.
   -- The smallest two chiefly provide surface detail; the largest carries swell.
   cascadeSizes = {36.0, 144.0, 576.0},
@@ -241,64 +205,82 @@ graphics.water = {
   -- Stable world-space fetch makes open ocean strongest without changing when
   -- the camera turns. Enclosed water keeps animated short ripples.
   openWaterWaveBoost = 1.08,
-  -- Analytic shoreline profile layered over FFT swell. Bathymetry determines
-  -- where it appears and bends its travel direction toward the coast.
-  shoreBreakerHeight = 0.48,
-  shoreBreakerWavelength = 7.5,
-  shoreBreakerSpeed = 2.2,
-  shoreBreakerCurl = 0.28,
   refractionStrength = 0.014,
-  -- 1.0 is the physical 1.333-IOR Snell window. A subtle expansion preserves
-  -- TIR while making the above-water view less vertically compressed in play.
-  snellWindowScale = 1.20,
-  snellProjectionDistance = 1536.0,
   -- Project FFT-driven light concentration onto submerged voxel faces.
   causticStrength = 0.42,
   -- Beer-Lambert absorption per metre: red disappears first in natural water.
   absorption = {0.16, 0.055, 0.026}
 }
 
-graphics.ice = {
-  -- Clear ice is only weakly absorptive; red is removed first, producing the
-  -- subtle blue-green tint of real thick ice rather than an opaque blue cube.
-  absorption = {0.045, 0.018, 0.008},
-  refractionStrength = 0.010,
-  cloudiness = 1.0
-}
-
 graphics.terrainGeneration = {
   seed = 1,
   seaLevel = 63,
   continentScale = 0.0025,
+  continentSize = 1.0,
   biomeScale = 0.00092,
   regionScale = 0.00125,
   mountainScale = 0.00078,
+  mountainFrequency = 1.0,
   riverScale = 0.00115,
   forestScale = 0.00165,
   macroWarpScale = 0.00062,
   macroWarpAmount = 360.0,
   detailScale = 0.026,
+  continentThreshold = 0.455,
+  continentFragmentation = 0.28,
+  continentalShelfWidth = 0.115,
+  terrainVerticalScale = 1.0,
+  oceanDepthScale = 42.0,
+  mountainHeight = 49.0,
+  foothillHeight = 9.0,
+  plateauFrequency = 0.18,
+  plateauHeight = 18.0,
+  basinDepth = 9.0,
   reliefGain = 2.4,
   localReliefGain = 2.0,
   -- Procedural erosion approximation. It damps short-wavelength relief and
   -- rounds mountain crests without changing the continent layout.
-  erosionStrength = 0.0,
-  -- Inland hydrology owns local elevations. Lakes are discrete, level basin
-  -- cells; rivers use broader stepped drainage reaches between them and sea.
-  riverCarveStrength = 0.94,
-  lakeCarveStrength = 0.92,
-  lakeCellSize = 176.0,
-  lakeBasinChance = 0.34,
+  erosionStrength = 0.28,
+  riverCarveStrength = 0.86,
+  lakeCarveStrength = 0.78,
   mountainSharpness = 1.65,
-  shorelineWidth = 5.0,
-  rockyShoreThreshold = 0.24,
+  shorelineWidth = 7.0,
+  rockyShoreThreshold = 0.46,
   biomeClimateInfluence = 0.34,
   snowTemperature = 0.18,
+  snowMinElevation = 12.0,
   elevationCooling = 0.0045,
+  altitudeLapseRate = 0.0045,
+  globalTemperatureOffset = 0.0,
+  equatorTemperature = 0.96,
+  poleTemperature = 0.06,
+  temperatureNoiseStrength = 0.16,
+  continentalTemperatureStrength = 0.08,
+  climateLatitudeScale = 0.000075,
+  globalMoistureOffset = 0.0,
+  rainfallScale = 1.0,
+  rainShadowStrength = 0.42,
+  rainShadowSampleDistance = 420.0,
+  prevailingWindAngle = 0.35,
   freezeTemperature = 0.08,
+  riverDensity = 1.0,
+  riverFrequency = 1.0,
+  riverGridSize = 56.0,
+  riverMinimumAccumulation = 5.5,
+  riverAccumulationDepth = 56,
+  riverWidthScale = 0.72,
+  lakeFrequency = 0.20,
+  lakeMinimumAccumulation = 4.0,
+  volcanism = 0.35,
+  volcanicFeatureScale = 0.00042,
+  volcanoHeight = 36.0,
+  calderaDepth = 14.0,
+  geologicalFeatureFrequency = 0.20,
+  surfaceDetailStrength = 1.0,
+  worldWaterEnabled = true,
   grassTintStrength = 0.92,
-  treeDensity = 0.78,
-  grassDensity = 1.35
+  treeDensity = 0.95,
+  grassDensity = 1.25
 }
 
 local function isArray(value)
@@ -339,19 +321,6 @@ local function loadSettings(path)
   return nil
 end
 
-mergeSettings(graphics, loadSettings("data/settings.json"))
-
--- Normalise the load region after the merge. It must reach at least one chunk
--- past what the renderer draws: if it does not, the renderer draws to where the
--- world stops existing and the far side of the loaded region appears in frame
--- as flat plateaus and floating islands.
-local world = graphics.world
-world.chunkRenderRadius = math.max(1, math.floor(world.chunkRenderRadius or 8))
-world.chunkLoadRadius = math.max(
-  math.floor(world.chunkLoadRadius or (world.chunkRenderRadius + 1)),
-  world.chunkRenderRadius + 1)
-world.chunkLoadRadiusVertical = math.max(1, math.min(
-  math.floor(world.chunkLoadRadiusVertical or math.ceil(world.chunkLoadRadius * 0.55)),
-  world.chunkLoadRadius))
+mergeSettings(graphics, loadSettings("data/config/settings.json"))
 
 return graphics

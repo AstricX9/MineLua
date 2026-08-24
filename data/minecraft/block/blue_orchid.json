@@ -1,0 +1,14 @@
+{
+  "name": "Blue Orchid",
+  "texture": "./textures/blocks/flower_blue_orchid.png",
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "flower": true,
+    "cross": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true
+  }
+}

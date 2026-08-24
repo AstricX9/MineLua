@@ -16,7 +16,7 @@ local M = {}
 
 local BASE_SIZE = 64
 local DETAIL_SIZE = 32
-local CACHE_PATH = "data/cloud_noise.bin"
+local CACHE_PATH = "data/cache/cloud_noise.bin"
 local CACHE_VERSION = 2
 
 local floor, sqrt, min, max = math.floor, math.sqrt, math.min, math.max

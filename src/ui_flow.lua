@@ -23,7 +23,7 @@ local CONTROL_CHOICES = {
   inventory = {"E", "R"}
 }
 
-local function queueWorldStart(state, gameMode, generatorType, worldName, spawnAltitudeMeters)
+local function queueWorldStart(state, gameMode, generatorType, worldName, existingWorld)
   state.worldGameMode = gameMode or state.worldGameMode or "survival"
   state.worldGeneratorType = generatorType or state.worldGeneratorType or "default"
   state.pendingNewWorldConfig = {
@@ -31,7 +31,11 @@ local function queueWorldStart(state, gameMode, generatorType, worldName, spawnA
     generatorType = state.worldGeneratorType,
     seed = tonumber(state.worldSeedText),
     worldName = worldName or "New World",
-    spawnAltitudeMeters = spawnAltitudeMeters or 0.0
+    generateStructures = state.generateStructures ~= false,
+    allowCheats = state.allowCheats == true,
+    bonusChest = state.bonusChest == true,
+    renderDistance = state.renderDistance,
+    existingWorld = existingWorld
   }
   state.hasWorld = false
   state.screen = "loading"
@@ -48,7 +52,7 @@ function flow.back(state)
     state.screen = "pause"
   elseif state.screen == "pause" then
     state.screen = nil
-  elseif state.screen == "inventory" or state.screen == "creative_inventory" then
+  elseif state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" then
     state.screen = nil
   elseif state.screen == "select_world" or state.screen == "multiplayer" or state.screen == "texture_packs" then
     state.screen = "main"
@@ -56,6 +60,9 @@ function flow.back(state)
     returnFromOptions(state)
   elseif state.screen == "create_world" then
     state.screen = "select_world"
+  elseif state.screen == "confirm_delete_world" then
+    state.screen = "select_world"
+    state.pendingDeleteWorld = nil
   elseif state.screen == "video" or state.screen == "controls" then
     state.screen = "options"
   elseif state.screen == "achievements" or state.screen == "stats" then
@@ -70,6 +77,7 @@ function flow.applyAction(state, action)
 
   if action == "singleplayer" then
     state.screen = "select_world"
+    state.refreshWorldListRequested = true
   elseif action == "multiplayer" then
     state.screen = "multiplayer"
   elseif action == "texture_packs" then
@@ -80,13 +88,15 @@ function flow.applyAction(state, action)
   elseif action == "start_creative" then
     queueWorldStart(state, "creative", "default", "Creative World")
     return "started_world"
-  elseif action == "start_space" then
-    queueWorldStart(state, "creative", "default", "Orbital World", 120000.0)
-    return "started_world"
   elseif action == "create_world" then
     state.screen = "create_world"
     state.moreWorldOptions = false
-    state.worldSeedText = state.worldSeedText or ""
+    state.worldNameText = "New World"
+    state.worldNamePristine = true
+    state.worldSeedText = ""
+    state.generateStructures = true
+    state.allowCheats = false
+    state.bonusChest = false
   elseif action == "mode_survival" then
     state.worldGameMode = "survival"
   elseif action == "mode_creative" then
@@ -95,6 +105,12 @@ function flow.applyAction(state, action)
     state.moreWorldOptions = not state.moreWorldOptions
   elseif action == "toggle_generator" then
     state.worldGeneratorType = state.worldGeneratorType == "superflat" and "default" or "superflat"
+  elseif action == "toggle_structures" then
+    state.generateStructures = not state.generateStructures
+  elseif action == "toggle_cheats" then
+    state.allowCheats = not state.allowCheats
+  elseif action == "toggle_bonus_chest" then
+    state.bonusChest = not state.bonusChest
   elseif action == "options" then
     state.menuParentScreen = state.screen == "pause" and "pause" or "main"
     state.screen = "options"
@@ -116,6 +132,37 @@ function flow.applyAction(state, action)
     state.screen = "pause"
   elseif action == "back_select" then
     state.screen = "select_world"
+  elseif action == "previous_world_page" then
+    state.worldListPage = math.max(1, (state.worldListPage or 1) - 1)
+  elseif action == "next_world_page" then
+    state.worldListPage = (state.worldListPage or 1) + 1
+  elseif action:match("^select_saved_world_%d+$") then
+    state.selectedWorldIndex = tonumber(action:match("(%d+)$"))
+  elseif action == "play_selected_world" then
+    local selected = (state.savedWorlds or {})[state.selectedWorldIndex or 0]
+    if selected then
+      state.worldSeedText = tostring(selected.seed or 1)
+      state.generateStructures = selected.generateStructures ~= false
+      state.allowCheats = selected.allowCheats == true
+      state.bonusChest = selected.bonusChest == true
+      queueWorldStart(state, selected.gameMode, selected.generatorType, selected.worldName, selected)
+      return "started_world"
+    end
+  elseif action == "delete_selected_world" then
+    local selected = (state.savedWorlds or {})[state.selectedWorldIndex or 0]
+    if selected then
+      state.pendingDeleteWorld = selected
+      state.screen = "confirm_delete_world"
+    end
+  elseif action == "confirm_delete_world" then
+    if state.pendingDeleteWorld then
+      state.deleteWorldRequested = state.pendingDeleteWorld
+      state.pendingDeleteWorld = nil
+      state.screen = "select_world"
+    end
+  elseif action == "cancel_delete_world" then
+    state.pendingDeleteWorld = nil
+    state.screen = "select_world"
   elseif action == "back_to_game" then
     state.screen = nil
     state.menuParentScreen = nil
@@ -126,7 +173,9 @@ function flow.applyAction(state, action)
     state.hasWorld = false
     return "quit_to_title"
   elseif action == "start_world" then
-    queueWorldStart(state, state.worldGameMode, state.worldGeneratorType, "New World")
+    local worldName = tostring(state.worldNameText or "New World"):gsub("^%s+", ""):gsub("%s+$", "")
+    if worldName == "" then worldName = "New World" end
+    queueWorldStart(state, state.worldGameMode, state.worldGeneratorType, worldName)
     return "started_world"
   elseif action == "quit" then
     return "quit_game"
@@ -144,8 +193,6 @@ function flow.applyAction(state, action)
     state.difficulty = cycleValue(state.difficulty, {"Peaceful", "Easy", "Normal", "Hard"})
   elseif action == "toggle_graphics" then
     state.graphicsMode = state.graphicsMode == "Fast" and "Fancy" or "Fast"
-  elseif action == "cycle_render_distance" then
-    state.renderDistance = cycleValue(state.renderDistance, {4, 6, 8, 10, 12})
   elseif action == "toggle_smooth_lighting" then
     state.smoothLighting = not state.smoothLighting
   elseif action == "toggle_vsync" then
@@ -176,6 +223,12 @@ function flow.applyAction(state, action)
   end
 
   return nil
+end
+
+function flow.applySlider(state, slider, value)
+  if slider == "render_distance" then
+    state.renderDistance = math.max(4, math.min(128, math.floor((tonumber(value) or 4) + 0.5)))
+  end
 end
 
 return flow

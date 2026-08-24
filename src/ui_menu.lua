@@ -1,5 +1,8 @@
 local menu = {}
 
+menu.RENDER_DISTANCE_MIN = 4
+menu.RENDER_DISTANCE_MAX = 128
+
 local function onOff(value)
   return value == false and "OFF" or "ON"
 end
@@ -36,28 +39,55 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
       {id = "quit_to_title", label = "Quit to title", x = cx - 100, y = y + 96, w = 200, h = 20}
     }
   elseif screen == "select_world" then
+    local worlds = menuState.savedWorlds or {}
+    local listTop = 36
+    local listBottom = logicalHeight - 78
+    local rowHeight = 36
+    local perPage = math.max(1, math.floor((listBottom - listTop) / rowHeight))
+    local pageCount = math.max(1, math.ceil(#worlds / perPage))
+    local page = math.max(1, math.min(menuState.worldListPage or 1, pageCount))
+    local first = (page - 1) * perPage + 1
+    local last = math.min(#worlds, first + perPage - 1)
+    local buttons = {}
+    for index = first, last do
+      buttons[#buttons + 1] = {
+        id = "select_saved_world_" .. index, label = "", x = cx - 160,
+        y = listTop + (index - first) * rowHeight, w = 320, h = 34, worldIndex = index
+      }
+    end
+    if pageCount > 1 then
+      buttons[#buttons + 1] = {id = "previous_world_page", label = "<", x = cx - 184, y = listTop, w = 20, h = 20, enabled = page > 1}
+      buttons[#buttons + 1] = {id = "next_world_page", label = ">", x = cx + 164, y = listTop, w = 20, h = 20, enabled = page < pageCount}
+    end
+    buttons[#buttons + 1] = {id = "play_selected_world", label = "Play Selected World", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil}
+    buttons[#buttons + 1] = {id = "create_world", label = "Create New World", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
+    buttons[#buttons + 1] = {id = "delete_selected_world", label = "Delete", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil}
+    buttons[#buttons + 1] = {id = "back_main", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20}
+    return buttons
+  elseif screen == "confirm_delete_world" then
     return {
-      {id = "start_survival", label = "New Survival World", x = cx - 100, y = 64, w = 200, h = 20},
-      {id = "start_creative", label = "New Creative World", x = cx - 100, y = 100, w = 200, h = 20},
-      {id = "start_space", label = "New Space World", x = cx - 100, y = 136, w = 200, h = 20},
-      {id = "create_world", label = "Create New World...", x = cx - 100, y = 172, w = 200, h = 20},
-      {id = "back_main", label = "Cancel", x = cx - 100, y = logicalHeight - 28, w = 200, h = 20}
+      {id = "confirm_delete_world", label = "Delete", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20},
+      {id = "cancel_delete_world", label = "Cancel", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
     }
   elseif screen == "create_world" then
     local mode = menuState.worldGameMode or "survival"
     local generator = menuState.worldGeneratorType or "default"
     local modeLabel = mode == "creative" and "Game Mode: Creative" or "Game Mode: Survival"
     local generatorLabel = generator == "superflat" and "World Type: Superflat" or "World Type: Default"
-    local moreLabel = menuState.moreWorldOptions and "Done" or "More World Options..."
     local buttons = {
       {id = "start_world", label = "Create New World", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20},
-      {id = "back_select", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20},
-      {id = mode == "creative" and "mode_survival" or "mode_creative", label = modeLabel, x = cx - 100, y = 100, w = 200, h = 20},
-      {id = "toggle_more_world_options", label = moreLabel, x = cx - 100, y = 148, w = 200, h = 20}
+      {id = "back_select", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20}
     }
 
     if menuState.moreWorldOptions then
-      buttons[#buttons + 1] = {id = "toggle_generator", label = generatorLabel, x = cx - 100, y = 172, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_structures", label = "Generate Structures: " .. onOff(menuState.generateStructures), x = cx - 155, y = 100, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_generator", label = generatorLabel, x = cx + 5, y = 100, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_cheats", label = "Allow Cheats: " .. onOff(menuState.allowCheats), x = cx - 155, y = 136, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_bonus_chest", label = "Bonus Chest: " .. onOff(menuState.bonusChest), x = cx + 5, y = 136, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "Done", x = cx - 75, y = 172, w = 150, h = 20}
+    else
+      buttons[#buttons + 1] = {id = mode == "creative" and "mode_survival" or "mode_creative", label = modeLabel, x = cx - 100, y = 100, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "More World Options...", x = cx - 100, y = 148, w = 200, h = 20}
     end
 
     return buttons
@@ -77,9 +107,13 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
   elseif screen == "video" then
     local y0 = math.floor(logicalHeight / 6)
     local guiScale = menuState.guiScale == 0 and "Auto" or tostring(menuState.guiScale or "Auto")
+    local renderDistance = math.max(menu.RENDER_DISTANCE_MIN,
+      math.min(menu.RENDER_DISTANCE_MAX, math.floor(tonumber(menuState.renderDistance) or 8)))
     return {
       {id = "toggle_graphics", label = "Graphics: " .. (menuState.graphicsMode or "Fancy"), x = cx - 155, y = y0, w = 150, h = 20},
-      {id = "cycle_render_distance", label = "Render Distance: " .. tostring(menuState.renderDistance or 8), x = cx + 5, y = y0, w = 150, h = 20},
+      {id = "render_distance", kind = "slider", label = "Render Distance: " .. tostring(renderDistance),
+        value = renderDistance, minValue = menu.RENDER_DISTANCE_MIN, maxValue = menu.RENDER_DISTANCE_MAX,
+        x = cx + 5, y = y0, w = 150, h = 20},
       {id = "toggle_smooth_lighting", label = "Smooth Lighting: " .. onOff(menuState.smoothLighting), x = cx - 155, y = y0 + 24, w = 150, h = 20},
       {id = "toggle_vsync", label = "VSync: " .. onOff(menuState.vsync), x = cx + 5, y = y0 + 24, w = 150, h = 20},
       {id = "toggle_anaglyph", label = "3D Anaglyph: " .. onOff(menuState.anaglyph), x = cx - 155, y = y0 + 48, w = 150, h = 20},
@@ -124,8 +158,10 @@ function menu.stateKey(menuState)
   local bindings = menuState.controlBindings or {}
   local stats = menuState.stats or {}
   return table.concat({
-    menuState.worldGameMode or "survival", menuState.worldGeneratorType or "default",
+    menuState.worldGameMode or "survival", menuState.worldGeneratorType or "default", menuState.worldNameText or "",
     menuState.moreWorldOptions and "more" or "simple", menuState.worldSeedText or "",
+    tostring(menuState.generateStructures), tostring(menuState.allowCheats), tostring(menuState.bonusChest),
+    tostring(menuState.worldListVersion or 0), tostring(menuState.selectedWorldIndex or 0), tostring(menuState.worldListPage or 1),
     menuState.menuParentScreen or "none", tostring(menuState.musicVolume), tostring(menuState.soundVolume),
     tostring(menuState.invertMouse), tostring(menuState.sensitivity), tostring(menuState.fovDegrees),
     tostring(menuState.difficulty), tostring(menuState.graphicsMode), tostring(menuState.renderDistance),

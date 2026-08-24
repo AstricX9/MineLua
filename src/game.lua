@@ -4,16 +4,15 @@ local GL = require("gl")
 local atmosphere = require("atmosphere")
 local blocks = require("blocks")
 local camera = require("camera")
-local Celestial = require("celestial")
 local character = require("character")
+local DistantTerrain = require("distant_terrain")
 local DevMenu = require("dev_menu")
+local DroppedItems = require("dropped_items")
 local effects = require("render_effects")
 local graphics = require("graphics_settings")
 local hud = require("hud")
 local Inventory = require("inventory")
 local math3d = require("math3d")
-local Planet = require("planet")
-local planetVisuals = require("planet_visuals")
 local rendering = require("rendering")
 local saves = require("saves")
 local shaderModule = require("shader")
@@ -39,7 +38,9 @@ local GL_ONE_MINUS_SRC_ALPHA = 0x0303
 local GL_TEXTURE_2D = 0x0DE1
 local GL_TEXTURE_MIN_FILTER = 0x2801
 local GL_TEXTURE_MAG_FILTER = 0x2800
+local GL_TEXTURE_MAX_LEVEL = 0x813D
 local GL_NEAREST = 0x2600
+local GL_NEAREST_MIPMAP_LINEAR = 0x2702
 local GL_RGBA = 0x1908
 local GL_UNSIGNED_BYTE = 0x1401
 local GL_ARRAY_BUFFER = 0x8892
@@ -67,12 +68,15 @@ local WINDOW_H = graphics.window.height
 local windowWidth = WINDOW_W
 local windowHeight = WINDOW_H
 local CAMERA_FOV = math.rad(graphics.window.fovDegrees)
--- Set graphics.window.vsync = false (data/settings.json) to uncap the frame rate
+-- Set graphics.window.vsync = false (data/config/settings.json) to uncap the frame rate
 -- and have the debug screen report real frame cost instead of the refresh rate.
 local VSYNC_ENABLED = graphics.window.vsync ~= false
 local CAMERA_NEAR = 0.1
 local CAMERA_FAR = math.max(graphics.world.visualDistance or 4096.0, 4096.0)
 local TERRAIN_MAX_H = graphics.world.terrainMaxHeight
+-- Full voxel meshes stay deliberately local. The menu's Render Distance is
+-- the outer generated/LOD square, not a request for tens of thousands of full
+-- meshes when set to 128.
 local CHUNK_RENDER_RADIUS = graphics.world.chunkRenderRadius
 local SIMPLE_VERTEX_STRIDE_FLOATS = 11
 local TERRAIN_VERTEX_STRIDE_FLOATS = voxel.STRIDE_FLOATS or 14
@@ -85,11 +89,7 @@ local SHADOW_NEAR = graphics.shadows.near
 local SHADOW_FAR = graphics.shadows.far
 local WATER_LEVEL = graphics.water.level
 local WATER_NEAR_TESSELLATION = graphics.water.nearTessellation or 2
-local FAR_WATER_CHUNK_RADIUS = graphics.water.farChunkRadius or 18
-local FAR_WATER_COVERAGE_SUBDIVISIONS = graphics.water.farCoverageSubdivisions or 4
-local FAR_WATER_TILE_SUBDIVISIONS = graphics.water.farTileSubdivisions or 8
-local FAR_WATER_BUILD_BUDGET = graphics.water.farBuildBudget or 8
-local FAR_WATER_FRAME_BUDGET = (graphics.water.farBuildBudgetMs or 2.0) / 1000.0
+local DISTANT_CHUNK_RADIUS = graphics.world.distantChunkRadius or 24
 local CLOUD_CELL_SIZE = 12.0
 local CLOUD_MESH_CELLS = 256
 local CLOUD_BOTTOM = graphics.atmosphere.cloudBottom or 132.0
@@ -100,8 +100,11 @@ local FOG_GRID_HEIGHT = graphics.atmosphere.volumetricGridHeight or 90
 local FOG_GRID_DEPTH = graphics.atmosphere.volumetricGridDepth or 64
 local PERFORMANCE = graphics.performance or {}
 local POST = graphics.post or {}
-local BASE_POST_EXPOSURE = POST.exposure or 1.0
 local SKY = graphics.sky or {}
+local DISTANT_GENERATION_STEPS = PERFORMANCE.distantGenerationSteps or 8
+local DISTANT_BUILD_BUDGET = PERFORMANCE.distantBuildBudget or 2
+local DISTANT_FRAME_BUDGET_MS = PERFORMANCE.distantFrameBudgetMs or 3.0
+local DISTANT_RING_BUDGET = PERFORMANCE.distantQueueRingBudget or 4
 local TERRAIN_WORK_BUDGET = PERFORMANCE.terrainWorkBudget or 10
 -- Step counts are a poor budget: a single step ranges from under 1 ms to about
 -- 20 ms, so a fixed count of them produces wildly uneven frames. The step count
@@ -117,13 +120,18 @@ local LOADING_REQUIRED_RADIUS = PERFORMANCE.loadingRequiredRadius or PERFORMANCE
 local LOADING_HALO_RADIUS = math.max(LOADING_REQUIRED_RADIUS, PERFORMANCE.loadingHaloRadius or 2)
 local DEFAULT_SPAWN_X = 16.5
 local DEFAULT_SPAWN_Z = 16.5
+local PLAYER_AUTOSAVE_INTERVAL = 10.0
 local TWO_PI = math.pi * 2.0
 
--- The sky is no longer a vector swept around by a tuning constant. The planet
--- turns, and the sun direction is read out of that rotation in body
--- coordinates. atmosphere.sunCycleSpeed is left in the settings file for the
--- flat worldgen preview, which has no planet to turn.
-local celestial = Celestial.new(graphics.celestial)
+local function timeOfDayForSimulationTime(time)
+  local phase = (time * SUN_CYCLE_SPEED) % TWO_PI
+  return (phase / TWO_PI * 24.0 + 6.0) % 24.0
+end
+
+local function simulationTimeForTimeOfDay(hour)
+  local phase = ((hour - 6.0) / 24.0) * TWO_PI
+  return phase / SUN_CYCLE_SPEED
+end
 
 local function updateRuntimeAtmosphereSettings(runtime, strength)
   for key, value in pairs(graphics.atmosphere) do
@@ -158,55 +166,16 @@ uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
 uniform float time;
-uniform vec3 viewPos;
-uniform vec3 planetUp;
-uniform vec4 foliageParams; // grass cull start/end, leaf wind distance, strength
-
-float plantHash(vec2 cell) {
-  return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
-}
-
 void main() {
   vec3 localPosition = aPos;
   vec3 worldPosition = vec3(uModel * vec4(localPosition, 1.0));
   if (aInfo.x > 0.5) {
-    bool isGrass = aInfo.x > 1.5;
-    vec3 upAxis=normalize(planetUp);
-    vec3 referenceAxis=abs(upAxis.y)<0.85?vec3(0.0,1.0,0.0):vec3(1.0,0.0,0.0);
-    vec3 tangentX=normalize(cross(referenceAxis,upAxis));
-    vec3 tangentZ=normalize(cross(upAxis,tangentX));
-    vec2 plantCell=floor(vec2(dot(worldPosition,tangentX),dot(worldPosition,tangentZ)))+vec2(0.5);
-    vec2 cameraCell=vec2(dot(viewPos,tangentX),dot(viewPos,tangentZ));
-    float cameraDistance=length(plantCell-cameraCell);
-
-    // Stable per-block thinning avoids a hard circular cutoff and removes the
-    // distant grass triangles before rasterization. Leaves retain silhouettes.
-    if (isGrass) {
-      float visibility = 1.0 - smoothstep(foliageParams.x, foliageParams.y, cameraDistance);
-      if (plantHash(plantCell) > visibility) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
-      }
-    }
-
-    float animationEnd = isGrass ? foliageParams.x : foliageParams.z;
-    float distanceFade = 1.0 - smoothstep(animationEnd * 0.58, animationEnd, cameraDistance);
-    float anchor = pow(clamp(aInfo.y, 0.0, 1.0), 1.35) * distanceFade;
-
-    // Three spatial/temporal scales make coherent gusts carry smaller lateral
-    // turbulence and tip flutter instead of every plant rocking in lockstep.
-    vec2 windDirection = normalize(vec2(0.88, 0.34));
-    vec2 crossWind = vec2(-windDirection.y, windDirection.x);
-    float gust = 0.58 + 0.42 * sin(time * 0.43 + dot(plantCell, vec2(0.018, -0.014)));
-    gust = gust * gust * (3.0 - 2.0 * gust);
-    float mainWave=sin(time*1.35+dot(plantCell,vec2(0.24,0.17)));
-    float turbulence=sin(time*2.65+dot(plantCell,vec2(-0.53,0.71))+mainWave*0.7);
-    float flutter=sin(time*5.2+dot(plantCell,vec2(1.71,-1.27)));
-    float strength = (isGrass ? 0.105 : 0.038) * foliageParams.w;
-    vec2 bend = windDirection * (mainWave * (0.55 + gust * 0.62) + flutter * 0.12)
-      + crossWind * turbulence * 0.22;
-    worldPosition+=(tangentX*bend.x+tangentZ*bend.y)*strength*anchor;
-    worldPosition-=upAxis*abs(mainWave)*strength*anchor*(isGrass?0.10:0.04);
+    float mainWave = sin(dot(worldPosition.xz, vec2(0.8, 0.6)) + time * 1.5);
+    float detailWave = sin(dot(worldPosition.xz, vec2(-0.4, 1.1)) + time * 2.3);
+    float sway = mainWave + detailWave * 0.25;
+    float strength = aInfo.x > 1.5 ? 0.025 : 0.010;
+    vec2 windDirection = normalize(vec2(0.85, 0.35));
+    worldPosition.xz += windDirection * sway * strength * clamp(aInfo.y, 0.0, 1.0);
   }
   vFragPos = worldPosition;
   vNormal = mat3(transpose(inverse(uModel))) * aNormal;
@@ -234,11 +203,8 @@ uniform vec3 lightColor;
 uniform vec3 moonLightColor;
 uniform vec3 lightingParams;
 uniform vec3 faceLight;
-uniform vec3 planetUp;
 uniform float exposure;
 uniform float shadowStrength;
-uniform float useVoxelLight;
-uniform float smoothLighting;
 uniform mat4 lightSpaceMatrix;
 uniform float waterLevel;
 uniform sampler2D waterNormalMap;
@@ -262,10 +228,10 @@ float fixedFaceShade(vec3 normal, float material) {
   if (material > 0.5) {
     return 0.92;
   }
-  float radialFacing=dot(normal,normalize(planetUp));
-  if(radialFacing>0.9)return 1.00;
-  if(radialFacing< -0.9)return 0.50;
-  return 0.72+0.08*abs(normal.x);
+  if (normal.y > 0.9) return 1.00;
+  if (normal.y < -0.9) return 0.50;
+  if (abs(normal.x) > 0.9) return 0.60;
+  return 0.80;
 }
 
 float shadowAt(vec3 normal, vec3 light, float diff) {
@@ -290,51 +256,34 @@ float shadowAt(vec3 normal, vec3 light, float diff) {
   return shadow / 9.0 * smoothstep(0.02, 0.18, diff);
 }
 
-vec4 causticSurface(vec2 surfacePosition) {
-  vec4 wave0 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.x + vec2(0.17, 0.61));
-  vec4 wave1 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.y + vec2(0.73, 0.29));
-  vec4 wave2 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.z + vec2(0.41, 0.83));
-  vec3 waveNormal = normalize(
-    wave0.xyz * waterNormalWeights.x +
-    wave1.xyz * waterNormalWeights.y +
-    wave2.xyz * waterNormalWeights.z
-  );
-  return vec4(waveNormal, min(wave0.a, min(wave1.a, wave2.a)));
-}
-
 float voxelCaustics(vec3 worldPosition, vec3 surfaceNormal, vec3 sunlight) {
   float waterDepth = waterLevel - worldPosition.y;
   if (waterDepth <= 0.02 || sunlight.y <= 0.015) return 0.0;
 
-  // Start with the flat-surface Snell solution, then perform one correction
-  // toward the surface point whose refracted solar ray actually reaches this
-  // voxel. This is a compact backward ray-tracing approximation.
-  const float AIR_TO_WATER = 1.0 / 1.333;
-  vec3 flatRay = refract(-sunlight, vec3(0.0, 1.0, 0.0), AIR_TO_WATER);
-  vec2 surfacePosition = worldPosition.xz - flatRay.xz *
-    (waterDepth / max(-flatRay.y, 0.08));
+  // Trace the sun into water using the physical air/water index ratio, then
+  // evaluate the animated surface above this voxel rather than screen UVs.
+  // This keeps the projection fixed to block faces as the camera moves.
+  vec3 transmitted = refract(-sunlight, vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
+  float verticalTravel = max(-transmitted.y, 0.08);
+  vec2 surfacePosition = worldPosition.xz - transmitted.xz * (waterDepth / verticalTravel);
 
-  vec4 surfaceData = causticSurface(surfacePosition);
-  vec3 transmitted = refract(-sunlight, surfaceData.xyz, AIR_TO_WATER);
-  vec2 landing = surfacePosition + transmitted.xz *
-    (waterDepth / max(-transmitted.y, 0.08));
-  surfacePosition -= (landing - worldPosition.xz) * 0.72;
+  vec4 wave0 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.x + vec2(0.17, 0.61));
+  vec4 wave1 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.y + vec2(0.73, 0.29));
+  vec4 wave2 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.z + vec2(0.41, 0.83));
+  vec2 waveSlope = wave0.xz * waterNormalWeights.x +
+    wave1.xz * waterNormalWeights.y + wave2.xz * waterNormalWeights.z;
 
-  surfaceData = causticSurface(surfacePosition);
-  transmitted = refract(-sunlight, surfaceData.xyz, AIR_TO_WATER);
-  landing = surfacePosition + transmitted.xz *
-    (waterDepth / max(-transmitted.y, 0.08));
-
-  float missDistance = length(landing - worldPosition.xz);
-  float beamRadius = 0.16 + waterDepth * 0.012 + fwidth(missDistance) * 1.5;
-  float beam = exp(-0.5 * (missDistance * missDistance) /
-    max(beamRadius * beamRadius, 1.0e-4));
-
-  // The FFT displacement Jacobian is a cheap flux-density estimate: compressed
-  // surface patches cover less receiver area and therefore become brighter.
-  float jacobian = clamp(surfaceData.a, 0.16, 1.65);
-  float fluxDensity = clamp(0.16 + max(1.0 / jacobian - 1.0, 0.0) * 1.65, 0.0, 2.6);
-  float focusing = beam * fluxDensity;
+  // The FFT stores its horizontal deformation Jacobian in alpha. Compressed
+  // surface patches concentrate refracted light; narrow, domain-warped ridges
+  // fill in the characteristic moving caustic network between fold events.
+  float compression = 1.0 - clamp(min(wave0.a, min(wave1.a, wave2.a)), 0.0, 1.0);
+  vec2 warped = surfacePosition + waveSlope * mix(2.2, 0.45, exp(-waterDepth * 0.05));
+  float ridge0 = pow(1.0 - abs(sin(dot(warped, normalize(vec2(0.82, 0.57))) * 1.72 + time * 1.18)), 12.0);
+  float ridge1 = pow(1.0 - abs(sin(dot(warped, normalize(vec2(-0.31, 0.95))) * 1.31 - time * 0.91)), 12.0);
+  float ridge2 = pow(1.0 - abs(sin(dot(warped, normalize(vec2(0.98, -0.18))) * 2.08 + time * 1.43)), 14.0);
+  float network = clamp((ridge0 + ridge1 + ridge2) * 0.52, 0.0, 1.0);
+  float focusing = max(network * (0.45 + compression * 1.4),
+    smoothstep(0.055, 0.52, compression) * 0.82);
 
   float depthFade = exp(-waterDepth * 0.052);
   float daylight = smoothstep(0.015, 0.22, sunlight.y);
@@ -344,12 +293,7 @@ float voxelCaustics(vec3 worldPosition, vec3 surfaceNormal, vec3 sunlight) {
 
 void main() {
   float material = vInfo.x;
-  bool isLeaf = material > 0.5 && material < 1.5;
-  // Terrain is intentionally rendered without global back-face culling. Flip
-  // normals for a visible reverse face so alpha-cut leaves remain lit like a
-  // thin two-sided surface instead of turning into dark or glowing cardboard.
-  vec3 geometricNormal = gl_FrontFacing ? vNormal : -vNormal;
-  vec3 norm = normalize(geometricNormal);
+  vec3 norm = normalize(vNormal);
   if (material > 1.5) {
     norm = normalize(mix(norm, vec3(0.0, 1.0, 0.0), 0.65));
   } else if (material > 0.5) {
@@ -358,37 +302,16 @@ void main() {
   vec3 light = normalize(-lightDir);
   float diff = max(dot(norm, light), 0.0);
   vec4 texColor = texture(tex0, vTexCoord);
-  vec3 viewDirection = normalize(viewPos - vFragPos);
-  float surfaceAlpha = texColor.a;
-  if (isLeaf) {
-    // Beer-Lambert optical thickness for a thin leaf sheet. The dedicated
-    // foliage pass composites this alpha back-to-front without writing depth.
-    if (texColor.a < 0.5) discard;
-    vec3 sheetNormal = normalize(geometricNormal);
-    float viewCosine = max(abs(dot(sheetNormal, viewDirection)), 0.20);
-    float cameraDistance = length(viewPos - vFragPos);
-    // The texel cutout supplies the visible gaps. Covered texels represent a
-    // cluster of real leaflets, so they should be nearly opaque rather than a
-    // pane of green glass. Retain only a restrained 2-8% transmission, with
-    // grazing and distant foliage becoming denser to preserve silhouettes.
-    float denseAtDistance = smoothstep(18.0, 92.0, cameraDistance);
-    float grazing = 1.0 - viewCosine;
-    float leafCoverage = mix(0.92, 0.985, max(grazing, denseAtDistance));
-    surfaceAlpha *= leafCoverage;
-  } else if (texColor.a < 0.5) {
-    discard;
-  }
+  if(texColor.a < 0.5) discard;
   vec3 albedo = srgbToLinear(texColor.rgb) * srgbToLinear(vColor);
 
-  // Zero is a valid fully-dark terrain light value. Non-terrain meshes do not
-  // carry aInfo, so the draw call explicitly disables voxel lighting for them.
-  float voxelLight = mix(1.0, clamp(vInfo.z, 0.0, 1.0), useVoxelLight * smoothLighting);
+  float voxelLight = vInfo.z > 0.0 ? clamp(vInfo.z, 0.0, 1.0) : 1.0;
   if (material > 0.5) {
     voxelLight = max(voxelLight, 0.34);
   }
 
   float sunDiffuse = material > 1.5 ? mix(0.88, 1.0, diff) : mix(0.68, 1.0, diff);
-  float faceShadeValue = fixedFaceShade(normalize(geometricNormal), material);
+  float faceShadeValue = fixedFaceShade(normalize(vNormal), material);
   float shadowAmount = shadowAt(norm, light, diff) * shadowStrength;
   float shadowVisibility = mix(1.0, 0.45, clamp(shadowAmount, 0.0, 1.0));
   float daylight = lightingParams.x;
@@ -398,29 +321,9 @@ void main() {
   vec3 sunContribution = lightColor * faceShadeValue * sunDiffuse * shadowVisibility * voxelLight;
   vec3 moonContribution = moonLightColor * mix(0.76, 1.0, max(dot(norm, -light), 0.0)) * faceShadeValue * voxelLight;
   vec3 totalLight = skyContribution + sunContribution + moonContribution;
-  if (isLeaf) {
-    // A compact thin-leaf BTDF approximation: light arriving behind the sheet
-    // is forward-scattered toward the viewer and tinted by the leaf albedo.
-    vec3 sheetNormal = normalize(geometricNormal);
-    float backLighting = max(dot(-sheetNormal, light), 0.0);
-    float forwardScatter = pow(max(dot(viewDirection, -light), 0.0), 4.0);
-    float transmission = backLighting * (0.20 + 0.42 * forwardScatter)
-      * mix(0.60, 1.0, shadowVisibility) * daylight;
-    totalLight += lightColor * vec3(0.62, 1.00, 0.42) * transmission * voxelLight;
-  }
-  float solidAO = material < 0.5 ? clamp(vInfo.y, 0.45, 1.0) : 1.0;
-  solidAO = mix(1.0, solidAO, smoothLighting);
-  float shapedAmbientFloor = ambientFloor * mix(0.68, 1.0, solidAO)
-    * mix(0.74, 1.0, faceShadeValue);
-  totalLight = max(totalLight, vec3(shapedAmbientFloor));
+  totalLight = max(totalLight, vec3(ambientFloor));
 
   vec3 litColor = albedo * totalLight * exposure;
-  if (isLeaf) {
-    vec3 halfVector = normalize(light + viewDirection);
-    float leafSpecular = pow(max(dot(norm, halfVector), 0.0), 24.0)
-      * 0.065 * daylight * shadowVisibility;
-    litColor += lightColor * leafSpecular * voxelLight;
-  }
   float caustic = voxelCaustics(vFragPos, norm, light) * daylight * shadowVisibility * voxelLight;
   vec3 causticColor = srgbToLinear(vec3(0.52, 0.90, 1.0));
   litColor += albedo * lightColor * causticColor * caustic * causticStrength;
@@ -428,44 +331,11 @@ void main() {
   float luminance = dot(finalColor, vec3(0.2126, 0.7152, 0.0722));
   float nightSaturation = mix(0.55, 1.0, daylight);
   finalColor = mix(vec3(luminance), finalColor, nightSaturation);
-  FragColor = vec4(finalColor, surfaceAlpha);
+  FragColor = vec4(finalColor, texColor.a);
 }
 ]]
 
   return shaderModule.fromSource(vertSource, fragSource)
-end
-
-local function createPlanetWaterShader()
-  local vertex=[[
-#version 460 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aNormal;
-out vec3 vPosition;
-out vec3 vNormal;
-uniform mat4 uProjection;
-uniform mat4 uView;
-void main(){vPosition=aPos;vNormal=normalize(aNormal);gl_Position=uProjection*uView*vec4(aPos,1.0);}
-]]
-  local fragment=[[
-#version 460 core
-in vec3 vPosition;
-in vec3 vNormal;
-out vec4 FragColor;
-uniform vec3 viewPos;
-uniform vec3 sunDir;
-uniform vec3 waterColor;
-void main(){
-  vec3 V=normalize(viewPos-vPosition);
-  vec3 N=normalize(vNormal);
-  float fresnel=0.03+0.72*pow(1.0-max(dot(N,V),0.0),5.0);
-  float sparkle=pow(max(dot(reflect(-normalize(sunDir),N),V),0.0),96.0);
-  vec3 deep=waterColor*0.48;
-  vec3 sky=vec3(0.36,0.66,0.86);
-  vec3 color=mix(deep,sky,fresnel)+vec3(1.0,0.88,0.62)*sparkle*0.85;
-  FragColor=vec4(color,0.78);
-}
-]]
-  return shaderModule.fromSource(vertex,fragment)
 end
 
 local function createSkyShaderProgram()
@@ -495,12 +365,6 @@ uniform vec3 skyParams;   // scatterStrength, unused, sunIntensity
 uniform vec3 fogColor;
 uniform sampler2D moonTex;
 uniform vec3 sunDisc;
-uniform vec3 planetUp;
-uniform float observerAltitude;
-uniform vec3 cloudParams; // bottom altitude, top altitude, density
-// Spin angle of the planet. The voxel world is the body frame, so the stars
-// have to be counter-rotated by it or they would be nailed to the ground.
-uniform float skyRotation;
 
 const mat3 cloudMatrix = mat3(
    0.0,  1.60,  1.20,
@@ -591,15 +455,6 @@ const float MIE_G = 0.758;
 const int SCATTER_VIEW_SAMPLES = @VIEW_SAMPLES@;
 const int SCATTER_LIGHT_SAMPLES = @LIGHT_SAMPLES@;
 
-vec2 raySphereRoots(vec3 origin, vec3 dir, float radius) {
-  float b = dot(origin, dir);
-  float c = dot(origin, origin) - radius * radius;
-  float d = b * b - c;
-  if (d < 0.0) return vec2(1.0, -1.0);
-  float h = sqrt(d);
-  return vec2(-b - h, -b + h);
-}
-
 // Distance to the far intersection with a sphere centred on the origin.
 float raySphereFar(vec3 origin, vec3 dir, float radius) {
   float b = dot(origin, dir);
@@ -619,17 +474,15 @@ float raySphereNear(vec3 origin, vec3 dir, float radius) {
   return t > 0.0 ? t : -1.0;
 }
 
-vec3 atmosphericScattering(vec3 origin, vec3 rayDir, vec3 sunDirection, float sunIntensity) {
-  vec2 atmosphereHit = raySphereRoots(origin, rayDir, ATMOSPHERE_RADIUS);
-  float rayStart = max(atmosphereHit.x, 0.0);
-  float rayEnd = atmosphereHit.y;
-  if (rayEnd <= rayStart) return vec3(0.0);
+vec3 atmosphericScattering(vec3 rayDir, vec3 sunDirection, float observerAltitude, float sunIntensity) {
+  vec3 origin = vec3(0.0, PLANET_RADIUS + observerAltitude, 0.0);
+
+  float rayLength = raySphereFar(origin, rayDir, ATMOSPHERE_RADIUS);
+  if (rayLength <= 0.0) return vec3(0.0);
 
   // Looking down into the planet: stop at the surface.
   float groundHit = raySphereNear(origin, rayDir, PLANET_RADIUS);
-  if (groundHit > rayStart) rayEnd = min(rayEnd, groundHit);
-  float rayLength = rayEnd - rayStart;
-  if (rayLength <= 0.0) return vec3(0.0);
+  if (groundHit > 0.0) rayLength = min(rayLength, groundHit);
 
   float mu = dot(rayDir, sunDirection);
   float phaseRayleigh = 3.0 / (16.0 * PI_SKY) * (1.0 + mu * mu);
@@ -645,7 +498,7 @@ vec3 atmosphericScattering(vec3 origin, vec3 rayDir, vec3 sunDirection, float su
   vec3 accumM = vec3(0.0);
 
   for (int i = 0; i < SCATTER_VIEW_SAMPLES; i++) {
-    vec3 samplePos = origin + rayDir * (rayStart + travelled + stepSize * 0.5);
+    vec3 samplePos = origin + rayDir * (travelled + stepSize * 0.5);
     float height = length(samplePos) - PLANET_RADIUS;
 
     float densityR = exp(-height / RAYLEIGH_SCALE_H) * stepSize;
@@ -690,14 +543,12 @@ vec3 atmosphericScattering(vec3 origin, vec3 rayDir, vec3 sunDirection, float su
 // dusk dims and reddens the disc itself rather than a tint being authored for
 // it. Returns black once the ray meets the planet, which is what makes the sun
 // set instead of sitting on the horizon.
-vec3 sunTransmittance(vec3 origin, vec3 rayDir) {
-  vec2 atmosphereHit = raySphereRoots(origin, rayDir, ATMOSPHERE_RADIUS);
-  float rayStart = max(atmosphereHit.x, 0.0);
-  float rayEnd = atmosphereHit.y;
-  if (rayEnd <= rayStart) return vec3(0.0);
-  float groundHit = raySphereNear(origin, rayDir, PLANET_RADIUS);
-  if (groundHit > rayStart && groundHit < rayEnd) return vec3(0.0);
-  float rayLength = rayEnd - rayStart;
+vec3 sunTransmittance(vec3 rayDir, float observerAltitude) {
+  vec3 origin = vec3(0.0, PLANET_RADIUS + observerAltitude, 0.0);
+
+  float rayLength = raySphereFar(origin, rayDir, ATMOSPHERE_RADIUS);
+  if (rayLength <= 0.0) return vec3(0.0);
+  if (raySphereNear(origin, rayDir, PLANET_RADIUS) > 0.0) return vec3(0.0);
 
   float stepSize = rayLength / float(SCATTER_LIGHT_SAMPLES);
   float travelled = 0.0;
@@ -705,7 +556,7 @@ vec3 sunTransmittance(vec3 origin, vec3 rayDir) {
   float depthM = 0.0;
 
   for (int i = 0; i < SCATTER_LIGHT_SAMPLES; i++) {
-    vec3 samplePos = origin + rayDir * (rayStart + travelled + stepSize * 0.5);
+    vec3 samplePos = origin + rayDir * (travelled + stepSize * 0.5);
     float height = max(length(samplePos) - PLANET_RADIUS, 0.0);
     depthR += exp(-height / RAYLEIGH_SCALE_H) * stepSize;
     depthM += exp(-height / MIE_SCALE_H) * stepSize;
@@ -713,136 +564,6 @@ vec3 sunTransmittance(vec3 origin, vec3 rayDir) {
   }
 
   return exp(-(RAYLEIGH_BETA * depthR + MIE_BETA * 1.1 * depthM));
-}
-
-// A render-only cloud shell.  It is sampled in true planet-centred 3D space,
-// so it has no flat plane, longitude seam, or polar singularity.  Voxel terrain
-// still owns collision; this layer is free to curve smoothly and the long
-// grazing path naturally thickens toward the horizon.
-//
-// The march is clipped to the shell itself. Spreading ten steps over the whole
-// atmosphere put about six of them inside a 2.4 km layer looking straight up
-// and one or two near the horizon, and with the old extinction constant a
-// vertical column accumulated roughly 0.05 alpha -- which is why the sky came
-// out clean. Every step now lands in the layer, so twenty-four of them resolve
-// individual clouds instead of a wash.
-
-// fbm sums five unnormalised octaves of noise in [0,1], so it clusters near
-// 0.52 with a standard deviation around 0.15 rather than filling its range.
-// Rescaling here is what lets the coverage threshold below mean something.
-//
-// Three octaves rather than five: the cloud march samples this three times a
-// step, twenty-four steps a pixel, at full resolution. Measured at 2560x1369,
-// the layer cost 6.8 ms a frame -- clouds on 83 fps against 180 fps off. The
-// two octaves dropped here sit below a kilometre in a field whose smallest
-// meaningful feature is the wisp term, so they cost frame time without
-// changing what the sky looks like.
-float cloudField(vec3 p) {
-  float f = noise(p) / 2.0;
-  p = cloudMatrix * p * 1.1;
-  f += noise(p) / 4.0;
-  p = cloudMatrix * p * 1.2;
-  f += noise(p) / 6.0;
-  // Same centre and spread as the five-octave form, so the coverage numbers
-  // below did not have to be retuned.
-  return clamp(0.5 + (f - 0.4583) * 1.55, 0.0, 1.0);
-}
-
-vec4 sphericalCloudLayer(vec3 origin, vec3 rayDir, vec3 sunDirection, float seconds) {
-  if (cloudParams.z <= 0.001) return vec4(0.0);
-  float bottomRadius = PLANET_RADIUS + cloudParams.x;
-  float topRadius = PLANET_RADIUS + max(cloudParams.y, cloudParams.x + 1.0);
-  float thickness = topRadius - bottomRadius;
-
-  vec2 outerHit = raySphereRoots(origin, rayDir, topRadius);
-  if (outerHit.y <= 0.0 || outerHit.y <= outerHit.x) return vec4(0.0);
-  float rayStart = max(outerHit.x, 0.0);
-  float rayEnd = outerHit.y;
-
-  // The inner sphere is a hole in the shell. Depending on where the observer
-  // is, it either ends the segment (we are outside it, looking in) or starts it
-  // (we are inside it, looking out).
-  vec2 innerHit = raySphereRoots(origin, rayDir, bottomRadius);
-  if (innerHit.y > innerHit.x) {
-    if (innerHit.x > rayStart) rayEnd = min(rayEnd, innerHit.x);
-    else if (innerHit.y > rayStart) rayStart = max(rayStart, innerHit.y);
-  }
-
-  float groundHit = raySphereNear(origin, rayDir, PLANET_RADIUS);
-  if (groundHit > 0.0) rayEnd = min(rayEnd, groundHit);
-  if (rayEnd <= rayStart) return vec4(0.0);
-
-  const int CLOUD_STEPS = 18;
-  float stepLength = (rayEnd - rayStart) / float(CLOUD_STEPS);
-  vec3 drift = vec3(seconds * 0.0018, seconds * 0.00035, -seconds * 0.0011);
-
-  // Extinction per metre. A 600 m thick column at full density reaches an
-  // optical depth of about 2.4, which reads as solid without the whole sky
-  // going flat white the moment coverage rises.
-  const float EXTINCTION = 0.0060;
-
-  float sunUp = clamp(dot(normalize(origin), sunDirection), -1.0, 1.0);
-  float daylight = smoothstep(-0.18, 0.10, sunUp);
-  float forwardScatter = pow(max(dot(rayDir, sunDirection), 0.0), 14.0);
-
-  vec3 litColor = mix(vec3(0.62, 0.66, 0.78), vec3(1.00, 0.98, 0.94), daylight);
-  vec3 shadeColor = mix(vec3(0.05, 0.07, 0.12), vec3(0.55, 0.60, 0.71), daylight);
-
-  vec3 accumulated = vec3(0.0);
-  float transmittance = 1.0;
-
-  for (int i = 0; i < CLOUD_STEPS; i++) {
-    if (transmittance < 0.015) break;
-    vec3 samplePos = origin + rayDir * (rayStart + (float(i) + 0.5) * stepLength);
-    float radius = length(samplePos);
-    float layer = clamp((radius - bottomRadius) / thickness, 0.0, 1.0);
-
-    vec3 radialNormal = samplePos / radius;
-    // Wavelengths matter more than amplitudes here. The shape field used to run
-    // at about 21 km and the weather field at 700 km, so the entire visible sky
-    // sat inside a fraction of one cell: it was uniformly clouded or uniformly
-    // clear, and from the ground that reads as no clouds at all. A cumulus
-    // field is cells a few kilometres apart, which is the scale below.
-    float weather = cloudField(radialNormal * 120.0 + drift * 0.02); // ~50 km systems
-    float shape = cloudField(samplePos * 0.00026 + drift * 0.8);     // ~3.8 km cells
-    float wisps = cloudField(samplePos * 0.0011 + drift * 2.2);      // ~0.9 km detail
-
-    // Coverage is what the weather pattern asks for; the shape and wisp fields
-    // decide which parts of that pattern actually condense.
-    float coverage = clamp(cloudParams.z * 0.32 + (weather - 0.5) * 0.50, 0.0, 0.85);
-    float field = shape * 0.72 + wisps * 0.28;
-    // A narrow threshold is what gives a cloud an edge. The wide ramp this
-    // replaced spread every cloud across more than a standard deviation of the
-    // field, so the sky came out as haze with no shapes in it.
-    float strength = smoothstep(1.0 - coverage, 1.0 - coverage + 0.10, field);
-    // Flat-bottomed, rounded-topped, and taller where the field is stronger --
-    // cumulus, rather than a slab of fog filling the shell.
-    float topLimit = 0.22 + strength * 0.78;
-    float verticalShape = smoothstep(0.0, 0.10, layer) *
-      (1.0 - smoothstep(topLimit * 0.5, topLimit, layer));
-    float density = strength * verticalShape;
-
-    if (density > 0.001) {
-      // Depth of cloud between this sample and the top of the layer along the
-      // sun ray, without a second march: the slant factor is the only thing a
-      // light march would add that matters at this scale.
-      float slant = max(dot(radialNormal, sunDirection), 0.12);
-      float lightDepth = (1.0 - layer) * thickness / slant;
-      float lightTransmit = exp(-density * lightDepth * EXTINCTION * 0.42);
-      // Powder: light that scattered forward through a thin edge, which is what
-      // makes cloud rims glow instead of turning grey.
-      float powder = 1.0 - exp(-density * 5.0);
-
-      vec3 cloudColor = mix(shadeColor, litColor, lightTransmit * powder);
-      cloudColor += vec3(1.0, 0.90, 0.72) * forwardScatter * lightTransmit * 0.55 * daylight;
-
-      float alpha = 1.0 - exp(-density * stepLength * EXTINCTION);
-      accumulated += transmittance * cloudColor * alpha;
-      transmittance *= 1.0 - alpha;
-    }
-  }
-
-  return vec4(accumulated, 1.0 - transmittance);
 }
 
 void main() {
@@ -854,30 +575,24 @@ void main() {
   );
   vec3 sun = normalize(sunDir);
   vec3 moon = -sun;
-  vec3 radialUp = normalize(planetUp);
-  vec3 observer = radialUp * (PLANET_RADIUS + max(observerAltitude, 0.0));
-  float rayElevation = dot(pos, radialUp);
-  float sunElevation = dot(sun, radialUp);
-  float moonElevation = dot(moon, radialUp);
-  float dayAmount = smoothstep(-0.08, 0.22, sunElevation);
-  float nightAmount = 1.0 - smoothstep(-0.18, 0.08, sunElevation);
-  float spaceAmount = smoothstep(70000.0, 115000.0, observerAltitude);
-  float horizonWarmth = 1.0 - smoothstep(-0.03, 0.34, abs(sunElevation));
-  float skyMask = smoothstep(-0.08, 0.08, rayElevation);
-  vec3 skyPos = normalize(pos + radialUp * max(0.015 - rayElevation, 0.0));
+  float dayAmount = smoothstep(-0.08, 0.22, sun.y);
+  float nightAmount = 1.0 - smoothstep(-0.18, 0.08, sun.y);
+  float horizonWarmth = 1.0 - smoothstep(-0.03, 0.34, abs(sun.y));
+  float skyMask = smoothstep(-0.08, 0.08, pos.y);
+  vec3 skyPos = normalize(vec3(pos.x, max(pos.y, 0.015), pos.z));
 
-  float altitude = smoothstep(0.0, 0.92, dot(skyPos, radialUp));
+  float altitude = smoothstep(0.0, 0.92, skyPos.y);
 
   // The physical model produces daylight only; it correctly falls to black once
   // the sun is below the horizon, so the authored night sky sits underneath it
   // rather than being cross-faded against it.
-  vec3 scattered = atmosphericScattering(observer, pos, sun, skyParams.z);
+  float observerAltitude = max(cameraPosition.y - 62.0, 1.0);
+  vec3 scattered = atmosphericScattering(skyPos, sun, observerAltitude, skyParams.z);
   vec3 nightSky = mix(vec3(0.060, 0.095, 0.150), vec3(0.015, 0.028, 0.080), altitude);
   vec3 color = nightSky * nightAmount + scattered * skyParams.x;
 
-  float moonVisible = smoothstep(-0.06, 0.08, moonElevation) * nightAmount;
-  vec3 fallbackAxis = abs(radialUp.x) < 0.8 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
-  vec3 moonBasisUp = abs(moonElevation) > 0.96 ? normalize(cross(radialUp, fallbackAxis)) : radialUp;
+  float moonVisible = smoothstep(-0.06, 0.08, moon.y) * nightAmount;
+  vec3 moonBasisUp = abs(moon.y) > 0.96 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
   vec3 moonRight = normalize(cross(moonBasisUp, moon));
   vec3 moonUp = normalize(cross(moon, moonRight));
   vec2 moonUv = vec2(dot(skyPos, moonRight), dot(skyPos, moonUp)) / 0.052;
@@ -896,22 +611,36 @@ void main() {
   vec3 sunTint = mix(vec3(1.0, 0.58, 0.28), vec3(1.0, 0.96, 0.82), dayAmount);
   color += sunTint * pow(sunAmount, 420.0) * 0.16 * max(dayAmount, 0.15) * skyTuning.z;
 
-  float starCos = cos(skyRotation);
-  float starSin = sin(skyRotation);
-  vec3 starDir = vec3(pos.x * starCos + pos.z * starSin, pos.y, -pos.x * starSin + pos.z * starCos);
-  color += vec3(0.82, 0.88, 1.0) * stars(starDir) * max(nightAmount, spaceAmount) * mix(smoothstep(0.0, 0.18, rayElevation), 1.0, spaceAmount);
-  color = mix(color, vec3(0.98, 0.38, 0.18), horizonWarmth * smoothstep(0.0, 0.12, dot(skyPos, radialUp)) * 0.15);
+  color += vec3(0.82, 0.88, 1.0) * stars(pos) * nightAmount * smoothstep(0.0, 0.18, pos.y);
+  color = mix(color, vec3(0.98, 0.38, 0.18), horizonWarmth * smoothstep(0.0, 0.12, skyPos.y) * 0.15);
   color += noise(skyPos * 1000.0) * 0.006;
-  vec4 cloud = sphericalCloudLayer(observer, pos, sun, time.x);
-  color = color * (1.0 - cloud.a) + cloud.rgb;
   color = vec3(1.0) - exp(-color * skyTuning.x);
   color = pow(color, vec3(1.08));
 
-  // The sun itself is a real sphere drawn in its own pass, so what is left to
-  // do here is report how much of it survives the cloud deck. That goes into
-  // alpha, and the sun pass multiplies itself by it.
+  // The disc goes in after the sky's own tone map, so it keeps values above 1.0
+  // in the half-float target. Folded in before, it would be rolled off to white
+  // along with the sky and bloom would have nothing to pick up.
+  //
+  // Nothing here is sampled: the edge is the true angular radius, the shading
+  // across it is the linear limb-darkening law, and the colour is whatever the
+  // atmosphere lets through along that ray.
+  float sunAngularRadius = max(sunDisc.x, 0.0002);
+  float sunAngle = acos(clamp(dot(pos, sun), -1.0, 1.0));
+  // fwidth has to be evaluated outside the branch: derivatives are undefined
+  // in non-uniform control flow.
+  float limbWidth = max(fwidth(sunAngle), 1.0e-5);
+  float discMask = 1.0 - smoothstep(sunAngularRadius - limbWidth, sunAngularRadius + limbWidth, sunAngle);
+  if (discMask > 0.0) {
+    float discRadius = clamp(sunAngle / sunAngularRadius, 0.0, 1.0);
+    float mu = sqrt(max(1.0 - discRadius * discRadius, 0.0));
+    // Coefficients near 610/550/470 nm. Red is darkened least, so the rim runs
+    // warm and the centre stays white without a tint being painted on.
+    vec3 limb = vec3(1.0) - vec3(0.397, 0.503, 0.652) * (1.0 - mu);
+    color += limb * sunTransmittance(pos, observerAltitude) * sunDisc.y * discMask;
+  }
+
   color = mix(fogColor, color, skyMask);
-  FragColor = vec4(color, 1.0 - cloud.a);
+  FragColor = vec4(color, 1.0);
 }
 ]]
 
@@ -952,95 +681,6 @@ void main() {
 ]]
 
   return shaderModule.fromSource(vertSource, fragSource)
-end
-
-local function createOrbitalPlanetShader()
-  local vertex = [[
-#version 460 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aNormal;
-layout(location=2) in vec3 aColor;
-out vec3 vNormal;
-out vec3 vColor;
-out vec3 vPosition;
-uniform mat4 uProjection;
-uniform mat4 uView;
-uniform vec3 planetOffset;
-void main(){
-  vPosition=aPos+planetOffset;
-  vNormal=normalize(aNormal);
-  vColor=aColor;
-  gl_Position=uProjection*uView*vec4(vPosition,1.0);
-}
-]]
-  local fragment = [[
-#version 460 core
-in vec3 vNormal;
-in vec3 vColor;
-in vec3 vPosition;
-out vec4 FragColor;
-uniform vec3 sunDir;
-uniform vec3 viewPos;
-// The blue limb is the planet's edge seen from space. From the ground every
-// distant surface is viewed edge-on, so it saturates and turns the landscape
-// teal -- hence the switch. Aerial perspective down here is the atmosphere
-// post pass's job.
-uniform float limbStrength;
-void main(){
-  vec3 N=normalize(vNormal);
-  vec3 V=normalize(viewPos-vPosition);
-  float daylight=max(dot(N,normalize(sunDir)),0.0);
-  float twilight=smoothstep(-0.18,0.08,dot(N,normalize(sunDir)));
-  vec3 surface=vColor*(0.055+daylight*0.95)*mix(vec3(0.28,0.36,0.52),vec3(1.0),twilight);
-  float limb=pow(1.0-max(dot(N,V),0.0),4.0);
-  surface+=vec3(0.10,0.34,0.72)*limb*(0.18+twilight*0.42)*limbStrength;
-  FragColor=vec4(surface,1.0);
-}
-]]
-  return shaderModule.fromSource(vertex,fragment)
-end
-
-local function createOrbitalCloudShader()
-  local vertex = [[
-#version 460 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aNormal;
-out vec3 vDirection;
-out vec3 vPosition;
-uniform mat4 uProjection;
-uniform mat4 uView;
-uniform vec3 planetOffset;
-void main(){
-  vDirection=normalize(aNormal);
-  vPosition=aPos+planetOffset;
-  gl_Position=uProjection*uView*vec4(vPosition,1.0);
-}
-]]
-  local fragment = [[
-#version 460 core
-in vec3 vDirection;
-in vec3 vPosition;
-out vec4 FragColor;
-uniform vec3 sunDir;
-uniform vec3 viewPos;
-uniform float time;
-float hash(vec3 p){p=fract(p*0.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}
-float noise(vec3 p){
-  vec3 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
-  return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),f.x),mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);
-}
-void main(){
-  vec3 drift=vec3(time*0.004,time*0.001,-time*0.002);
-  float n=noise(vDirection*18.0+drift)*0.62+noise(vDirection*43.0-drift*0.7)*0.38;
-  float alpha=smoothstep(0.54,0.72,n)*0.82;
-  if(alpha<0.015) discard;
-  float light=0.30+0.70*max(dot(normalize(vDirection),normalize(sunDir)),0.0);
-  float silver=pow(1.0-max(dot(normalize(vDirection),normalize(viewPos-vPosition)),0.0),3.0);
-  vec3 color=mix(vec3(0.34,0.39,0.48),vec3(0.96,0.98,1.0),light)+vec3(0.20,0.35,0.62)*silver*0.22;
-  FragColor=vec4(color,alpha);
-}
-]]
-  return shaderModule.fromSource(vertex,fragment)
 end
 
 local function createWorldgenPreviewShader()
@@ -1138,6 +778,7 @@ local function worldgenPreviewVertices(centerX, centerZ, extent, resolution)
   local step = extent / resolution
   local originX = math.floor((centerX - extent * 0.5) / step) * step
   local originZ = math.floor((centerZ - extent * 0.5) / step) * step
+  local seaLevel = terrain.SEA_LEVEL
   local heights = {}
   local colors = {}
 
@@ -1147,9 +788,8 @@ local function worldgenPreviewVertices(centerX, centerZ, extent, resolution)
       local worldZ = originZ + z * step
       local rawHeight = terrain.heightAt(worldX, worldZ, TERRAIN_MAX_H)
       local index = z * side + x + 1
-      local localWaterLevel = terrain.waterSurfaceAt(worldX, worldZ)
-      local underwater = localWaterLevel and rawHeight < localWaterLevel
-      heights[index] = underwater and (localWaterLevel - 0.35) or rawHeight
+      local underwater = rawHeight <= seaLevel
+      heights[index] = underwater and (seaLevel - 0.35) or rawHeight
       local sourceBiome = terrain.biomeAt(worldX, worldZ)
       local environment = terrain.environmentAt(worldX, worldZ, rawHeight, sourceBiome)
       if underwater and environment.freezeWater then
@@ -1304,14 +944,13 @@ local function uploadTerrainMesh(vertices)
 end
 
 local function terrainChunkBounds(entry)
-  local origin = entry.renderOrigin or {0,0,0}
   return {
-    minX = entry.offsetX - origin[1],
-    minY = entry.offsetY - origin[2],
-    minZ = entry.offsetZ - origin[3],
-    maxX = entry.offsetX - origin[1] + 16,
-    maxY = entry.offsetY - origin[2] + 16,
-    maxZ = entry.offsetZ - origin[3] + 16
+    minX = entry.offsetX,
+    minY = 0,
+    minZ = entry.offsetZ,
+    maxX = entry.offsetX + 16,
+    maxY = TERRAIN_MAX_H + 1,
+    maxZ = entry.offsetZ + 16
   }
 end
 
@@ -1336,6 +975,7 @@ end
 local function createWaterWaveSampler(world)
   local samples = {}
   local depthSamples = {}
+  local surfaceY = math.floor(WATER_LEVEL)
 
   local function isWater(id)
     return id == blocks.water or (blocks.water_still and id == blocks.water_still)
@@ -1347,12 +987,6 @@ local function createWaterWaveSampler(world)
     if cached ~= nil then return cached end
 
     local depth = 4
-    local surfaceY = terrain.waterSurfaceAt(cellX, cellZ)
-    if not surfaceY then
-      depthSamples[key] = 0.0
-      return 0.0
-    end
-    surfaceY = math.floor(surfaceY)
     if world then
       local surfaceBlock = world:blockAt(cellX, surfaceY, cellZ)
       if surfaceBlock == nil then
@@ -1390,11 +1024,6 @@ local function createWaterWaveSampler(world)
     ) * 0.25
   end
 
-  local function smoothBand(edge0, edge1, value)
-    local t = saturate((value - edge0) / math.max(edge1 - edge0, 0.0001))
-    return t * t * (3.0 - 2.0 * t)
-  end
-
   local function sample(x, z)
     local key = x .. "," .. z
     local value = samples[key]
@@ -1404,30 +1033,10 @@ local function createWaterWaveSampler(world)
       -- Macro shoreline classification controls the character of the water;
       -- actual bathymetry adds a stricter geometric safety limit up close.
       shore = math.min(shore, 0.025 + depthFactor * 0.975)
-
-      local shoreX, shoreZ, breaker = 0.0, 0.0, 0.0
-      if world then
-        -- The bathymetry gradient is the coastline-domain direction: depth
-        -- increases offshore, so its negative points in the travel direction
-        -- of a breaking wave. Sampling symmetrically makes this continuous at
-        -- chunk boundaries and avoids any camera-dependent shoreline lookup.
-        local gradientX = vertexDepthFactor(x + 1, z) - vertexDepthFactor(x - 1, z)
-        local gradientZ = vertexDepthFactor(x, z + 1) - vertexDepthFactor(x, z - 1)
-        local gradientLength = math.sqrt(gradientX * gradientX + gradientZ * gradientZ)
-        if gradientLength > 0.012 then
-          shoreX = -gradientX / gradientLength
-          shoreZ = -gradientZ / gradientLength
-          local entersBreakZone = smoothBand(0.10, 0.38, depthFactor)
-          local leavesBreakZone = smoothBand(0.68, 0.98, depthFactor)
-          local oceanEnergy = smoothBand(0.56, 0.90, exposure)
-          breaker = entersBreakZone * (1.0 - leavesBreakZone) * oceanEnergy
-        end
-      end
-
-      value = {exposure, shore, shoreX, shoreZ, breaker}
+      value = {exposure, shore}
       samples[key] = value
     end
-    return value[1], value[2], value[3], value[4], value[5]
+    return value[1], value[2]
   end
 
   -- Classification is evaluated only on the integer grid (mostly already in
@@ -1439,88 +1048,33 @@ local function createWaterWaveSampler(world)
     local z0 = math.floor(z)
     local tx = x - x0
     local tz = z - z0
-    local e00, s00, x00, d00, b00 = sample(x0, z0)
-    local e10, s10, x10, d10, b10 = sample(x0 + 1, z0)
-    local e01, s01, x01, d01, b01 = sample(x0, z0 + 1)
-    local e11, s11, x11, d11, b11 = sample(x0 + 1, z0 + 1)
-    local function bilerp(v00, v10, v01, v11)
-      local a = v00 + (v10 - v00) * tx
-      local b = v01 + (v11 - v01) * tx
-      return a + (b - a) * tz
-    end
-    return bilerp(e00, e10, e01, e11), bilerp(s00, s10, s01, s11),
-      bilerp(x00, x10, x01, x11), bilerp(d00, d10, d01, d11),
-      bilerp(b00, b10, b01, b11)
+    local e00, s00 = sample(x0, z0)
+    local e10, s10 = sample(x0 + 1, z0)
+    local e01, s01 = sample(x0, z0 + 1)
+    local e11, s11 = sample(x0 + 1, z0 + 1)
+    local e0 = e00 + (e10 - e00) * tx
+    local e1 = e01 + (e11 - e01) * tx
+    local s0 = s00 + (s10 - s00) * tx
+    local s1 = s01 + (s11 - s01) * tx
+    return e0 + (e1 - e0) * tz, s0 + (s1 - s0) * tz
   end
 end
-
-local PLANET_WATER_FACE_CORNERS={
-  {{1,0,1},{1,0,0},{1,1,0},{1,1,1}},{{0,0,0},{0,0,1},{0,1,1},{0,1,0}},
-  {{0,1,1},{1,1,1},{1,1,0},{0,1,0}},{{0,0,0},{1,0,0},{1,0,1},{0,0,1}},
-  {{0,0,1},{1,0,1},{1,1,1},{0,1,1}},{{1,0,0},{0,0,0},{0,1,0},{1,1,0}}
-}
-local PLANET_WATER_ORDER={1,2,3,3,4,1}
-
-local function planetWaterChunkVertices(entry,world)
-  local vertices={} local planet=world.planet local origin=world.renderOrigin
-  local waterId,stillId=blocks.water,blocks.water_still
-  if not waterId and not stillId then return vertices end
-  local directions={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}}
-  local function isWater(id) return id==waterId or (stillId and id==stillId) end
-  local function appendVertex(gx,gy,gz,targetRadius)
-    local rx,ry,rz=gx-planet.center[1],gy-planet.center[2],gz-planet.center[3]
-    local length=math.sqrt(rx*rx+ry*ry+rz*rz)
-    local nx,ny,nz=rx/length,ry/length,rz/length
-    targetRadius=targetRadius or planet.seaLevelRadiusVoxels
-    gx=planet.center[1]+nx*targetRadius-origin[1]
-    gy=planet.center[2]+ny*targetRadius-origin[2]
-    gz=planet.center[3]+nz*targetRadius-origin[3]
-    local n=#vertices
-    vertices[n+1]=gx vertices[n+2]=gy vertices[n+3]=gz
-    vertices[n+4]=nx vertices[n+5]=ny vertices[n+6]=nz
-    vertices[n+7]=1 vertices[n+8]=1 vertices[n+9]=1
-    vertices[n+10]=0 vertices[n+11]=0
-  end
-  for x=0,15 do for y=0,15 do for z=0,15 do
-    if isWater(entry.chunk:getBlock(x,y,z)) then
-      local wx,wy,wz=entry.offsetX+x,entry.offsetY+y,entry.offsetZ+z
-      local ux,uy,uz=planet:dominantUpStep({wx+0.5,wy+0.5,wz+0.5})
-      if not isWater(world:blockAt(wx+ux,wy+uy,wz+uz)) then
-        local waterSample=terrain.surfaceAtPosition(wx+0.5,wy+0.5,wz+0.5,planet)
-        local targetRadius=waterSample.waterSurfaceRadiusVoxels or planet.seaLevelRadiusVoxels
-        local dir=ux==1 and 1 or (ux==-1 and 2 or (uy==1 and 3 or (uy==-1 and 4 or (uz==1 and 5 or 6))))
-        local corners=PLANET_WATER_FACE_CORNERS[dir]
-        for i=1,6 do local c=corners[PLANET_WATER_ORDER[i]] appendVertex(wx+c[1],wy+c[2],wz+c[3],targetRadius) end
-      end
-    end
-  end end end
-  return vertices
-end
-
 
 local function uploadTerrainChunkMesh(entry, vertices, options)
   options = options or {}
-  entry.renderOrigin = options.world and options.world.renderOrigin or entry.renderOrigin or {0,0,0}
-  local renderCenter={entry.offsetX-entry.renderOrigin[1]+8,entry.offsetY-entry.renderOrigin[2]+8,entry.offsetZ-entry.renderOrigin[3]+8}
   local mesh = uploadTerrainMesh(vertices)
-  if options.iceVertices and #options.iceVertices > 0 then
-    mesh.iceMesh = uploadTerrainMesh(options.iceVertices)
+  if options.dielectricVertices and #options.dielectricVertices > 0 then
+    mesh.dielectricMesh = uploadTerrainMesh(options.dielectricVertices)
   end
-  if options.leafVertices and #options.leafVertices > 0 then
-    mesh.leafMesh = uploadTerrainMesh(options.leafVertices)
-    mesh.leafMesh.chunkX = entry.chunkX
-    mesh.leafMesh.chunkY = entry.chunkY
-    mesh.leafMesh.chunkZ = entry.chunkZ
-    mesh.leafMesh.renderCenter=renderCenter
-  end
-  if options.world then
-    local waterVertices=planetWaterChunkVertices(entry,options.world)
-    if #waterVertices>0 then mesh.waterMesh=uploadMesh(waterVertices) end
+  local waterVertices = effects.waterChunkVertices(
+    entry.chunk, entry.offsetX, entry.offsetZ, WATER_LEVEL, blocks.water, blocks.water_still,
+    WATER_NEAR_TESSELLATION, createWaterWaveSampler(options.world)
+  )
+  if #waterVertices > 0 then
+    mesh.waterMesh = uploadMesh(waterVertices)
   end
   mesh.chunkX = entry.chunkX
-  mesh.chunkY = entry.chunkY
   mesh.chunkZ = entry.chunkZ
-  mesh.renderCenter=renderCenter
   mesh.bounds = terrainChunkBounds(entry)
   mesh.provisionalLight = options.provisionalLight or false
   mesh.lightRevision = options.lightRevision
@@ -1534,8 +1088,7 @@ end
 
 local function releaseTerrainMesh(mesh)
   if not mesh then return end
-  rendering.release(mesh.iceMesh)
-  rendering.release(mesh.leafMesh)
+  rendering.release(mesh.dielectricMesh)
   rendering.release(mesh.waterMesh)
   rendering.release(mesh)
 end
@@ -1552,129 +1105,31 @@ local function releaseTerrainMeshes(terrainMeshes)
   end
 end
 
--- Starts the spherical voxel world: a GridWorld the physics collides against
--- and a GridRuntime that keeps it generated and meshed around the player.
---
--- Hangs off the module table because this file is at Lua's 200-local ceiling.
-function game.startGridWorld(world, playerCamera, terrainMeshes, radius)
-  local GridWorld = require("grid_world")
-  local GridRuntime = require("grid_runtime")
-  local planet = world.planet
-  local gridWorld = GridWorld.new(planet, world.seed)
-
-  local runtime = GridRuntime.new(gridWorld, {
-    radius = radius or 5,
-    -- glfwGetTime, not os.clock: the latter ticks about every 15 ms on
-    -- Windows, three times the budget it is meant to enforce.
-    clock = glfw.glfwGetTime,
-    budgetSeconds = (graphics.world.gridFrameBudgetMs or 4.0) / 1000.0,
-    renderOrigin = world.renderOrigin,
-    upload = function(key, vertices, leaves)
-      releaseTerrainMesh(terrainMeshes[key])
-      local mesh = #vertices > 0 and uploadTerrainMesh(vertices) or nil
-      if leaves and #leaves > 0 then
-        -- The leaf pass reads this off the terrain mesh, so an all-leaf chunk
-        -- still needs a carrier even when it has no opaque geometry of its own.
-        mesh = mesh or {count = 0, vao = nil}
-        mesh.leafMesh = uploadTerrainMesh(leaves)
-      end
-      terrainMeshes[key] = mesh
+local function createDistantTerrain()
+  return DistantTerrain.new({
+    radius = DISTANT_CHUNK_RADIUS,
+    generationSteps = DISTANT_GENERATION_STEPS,
+    buildBudget = DISTANT_BUILD_BUDGET,
+    frameBudgetMs = DISTANT_FRAME_BUDGET_MS,
+    ringBudget = DISTANT_RING_BUDGET,
+    maxHeight = TERRAIN_MAX_H,
+    waterId = blocks.water,
+    stillWaterId = blocks.water_still,
+    now = glfw.glfwGetTime,
+    waveDataAt = createWaterWaveSampler(),
+    upload = function(record, vertices, waterVertices, bounds, step)
+      local mesh = uploadTerrainMesh(vertices)
+      if #waterVertices > 0 then mesh.waterMesh = uploadMesh(waterVertices) end
+      mesh.chunkX = record.chunkX
+      mesh.chunkZ = record.chunkZ
+      mesh.bounds = bounds
+      mesh.distantLod = true
+      mesh.lodStep = step
+      return mesh
     end,
-    release = function(key)
-      releaseTerrainMesh(terrainMeshes[key])
-      terrainMeshes[key] = nil
-    end
+    release = releaseTerrainMesh
   })
-
-  -- Stand the player on the grid terrain before anything else: the Cartesian
-  -- surface under them can sit a metre away from it, which would drop them
-  -- into the ground or leave them hanging.
-  local up = planet:localUp(playerCamera.position)
-  local surfaceRadius = gridWorld:surfaceRadius(up[1], up[2], up[3])
-  local standRadius = surfaceRadius + playerCamera.eyeHeight + 1.0
-  playerCamera.position = {
-    planet.center[1] + up[1] * standRadius,
-    planet.center[2] + up[2] * standRadius,
-    planet.center[3] + up[3] * standRadius
-  }
-  playerCamera.velocity = {0, 0, 0}
-  playerCamera.radialVelocity, playerCamera.velocityY = 0, 0
-  playerCamera.grounded = false
-
-  -- Load the ground under their feet synchronously, so they do not spawn into
-  -- an unloaded hole and fall.
-  runtime:refocus(playerCamera.position)
-  for _ = 1, 9 do
-    if runtime:ready() then break end
-    runtime:update(playerCamera.position)
-  end
-
-  return gridWorld, runtime
 end
-
--- Rebuilds the distant terrain shell if the player has moved far enough from
--- where it was last built. Kept on displayState because this file is at Lua's
--- 200-local ceiling.
-function game.updateHorizon(state, world, playerCamera)
-  local GridHorizon = require("grid_horizon")
-  local outer = graphics.world.horizonDistance or 3000.0
-  if outer <= 0.0 then return end
-  local position = playerCamera.position
-  local previous = state.horizonBuiltAt
-  local originMoved = state.horizonOrigin ~= world.renderOriginRevision
-  if previous and not originMoved then
-    local dx = position[1] - previous[1]
-    local dy = position[2] - previous[2]
-    local dz = position[3] - previous[3]
-    if dx * dx + dy * dy + dz * dz < 64.0 * 64.0 then return end
-  end
-
-  local vertices = GridHorizon.build(world.planet, position, {
-    inner = (graphics.world.gridLoadRadius or 6) * 16.0 * 0.85,
-    outer = outer,
-    segments = graphics.world.horizonSegments or 96,
-    renderOrigin = world.renderOrigin
-  })
-  if state.horizonMesh then rendering.release(state.horizonMesh) end
-  state.horizonMesh = uploadMesh(vertices)
-  state.horizonBuiltAt = {position[1], position[2], position[3]}
-  state.horizonOrigin = world.renderOriginRevision
-end
-
--- Break or place a block on the spherical grid.
-function game.updateGridEditInput(window, state, runtime, playerCamera, dt)
-  state.gridEdit = state.gridEdit or {attack = false, use = false, cooldown = 0.0}
-  local edit = state.gridEdit
-  edit.cooldown = math.max(0.0, edit.cooldown - dt)
-
-  local attack = playerCamera:controlDown(window, "attack", "MOUSE1")
-  local use = playerCamera:controlDown(window, "use", "MOUSE2")
-  local wantsBreak = attack and (not edit.attack or edit.cooldown <= 0.0)
-  local wantsPlace = use and not edit.use
-  edit.attack, edit.use = attack, use
-  if not (wantsBreak or wantsPlace) then return end
-
-  local origin = playerCamera.position
-  local hit = runtime.world:raycast(origin, playerCamera:getFront(), playerCamera.reach or 6.0)
-  if not hit then return end
-
-  if wantsBreak then
-    if runtime:setBlock(hit.face, hit.column, hit.row, hit.layer, blocks.air or 0) then
-      edit.cooldown = 0.22
-      state.stats.blocksMined = (state.stats.blocksMined or 0) + 1
-    end
-  elseif wantsPlace and hit.previous then
-    local slot = state.inventory and state.inventory:selectedItem()
-    local id = slot and slot.id
-    if id and id ~= 0 then
-      local previous = hit.previous
-      if runtime:setBlock(previous.face, previous.column, previous.row, previous.layer, id) then
-        state.stats.blocksPlaced = (state.stats.blocksPlaced or 0) + 1
-      end
-    end
-  end
-end
-
 
 local function uploadSkyMesh()
   local vertices = {
@@ -1684,121 +1139,6 @@ local function uploadSkyMesh()
   }
 
   return uploadMesh(vertices)
-end
-
--- A real spherical sun, not a screen-space disc.
---
--- The geometry is a unit sphere; the draw call scales it to the angular radius
--- the real sun subtends from one astronomical unit (0.00465 rad, about half a
--- degree across) at whatever distance keeps it inside the current frustum.
--- Because the pass runs with depth testing off, that distance is free to be
--- chosen for numerical comfort rather than realism -- a sphere at 1.5e11 m has
--- no representable position in a float vertex buffer.
-local sunPass = {}
-
-function sunPass.uploadMesh(segments, rings)
-  segments, rings = segments or 32, rings or 16
-  local vertices = {}
-
-  local function push(latitude, longitude)
-    local c = math.cos(latitude)
-    local x, y, z = c * math.cos(longitude), math.sin(latitude), c * math.sin(longitude)
-    local n = #vertices
-    vertices[n + 1], vertices[n + 2], vertices[n + 3] = x, y, z
-    vertices[n + 4], vertices[n + 5], vertices[n + 6] = x, y, z
-    vertices[n + 7], vertices[n + 8], vertices[n + 9] = 1.0, 1.0, 1.0
-    vertices[n + 10] = longitude / (math.pi * 2.0)
-    vertices[n + 11] = latitude / math.pi + 0.5
-  end
-
-  for ring = 0, rings - 1 do
-    local lat0 = -math.pi * 0.5 + math.pi * (ring / rings)
-    local lat1 = -math.pi * 0.5 + math.pi * ((ring + 1) / rings)
-    for segment = 0, segments - 1 do
-      local lon0 = math.pi * 2.0 * (segment / segments)
-      local lon1 = math.pi * 2.0 * ((segment + 1) / segments)
-      push(lat0, lon0) push(lat1, lon0) push(lat1, lon1)
-      push(lat1, lon1) push(lat0, lon1) push(lat0, lon0)
-    end
-  end
-
-  return uploadMesh(vertices)
-end
-
-function sunPass.createShader()
-  local vertSource = [[
-#version 460 core
-layout (location = 0) in vec3 aPos;
-out vec3 vNormal;
-out vec3 vWorldPos;
-uniform mat4 uProjection;
-uniform mat4 uView;
-uniform vec3 sunCenter;
-uniform float sunRadius;
-void main() {
-  vNormal = normalize(aPos);
-  vWorldPos = sunCenter + vNormal * sunRadius;
-  gl_Position = uProjection * uView * vec4(vWorldPos, 1.0);
-}
-]]
-
-  local fragSource = [[
-#version 460 core
-in vec3 vNormal;
-in vec3 vWorldPos;
-out vec4 FragColor;
-uniform vec3 viewPos;
-uniform vec3 sunRadiance;   // brightness already multiplied by atmospheric transmittance
-void main() {
-  // Linear limb darkening. mu is the cosine of the angle between the surface
-  // normal and the line of sight, so it runs from 1 at the centre of the disc
-  // to 0 at the limb. The coefficients are the solar values near 610, 550 and
-  // 470 nm: red is darkened least, which is why the rim runs warm without a
-  // tint being painted on.
-  vec3 toViewer = normalize(viewPos - vWorldPos);
-  float mu = clamp(dot(normalize(vNormal), toViewer), 0.0, 1.0);
-  vec3 limb = vec3(1.0) - vec3(0.397, 0.503, 0.652) * (1.0 - mu);
-  // Soften the very edge so a coarse sphere does not show its silhouette
-  // polygons at this size.
-  float edge = smoothstep(0.0, 0.06, mu);
-  FragColor = vec4(sunRadiance * limb * edge, 1.0);
-}
-]]
-
-  return shaderModule.fromSource(vertSource, fragSource)
-end
-
--- Draws the sun into the scene target. The pass is additive, so the sky it sits
--- on shows through the limb, and it is modulated by the destination alpha,
--- which the sky shader filled with how much of it survives the cloud deck.
-function sunPass.draw(sunShader, sunMesh, locations, view, projection, viewPosition,
-    sunDir, distance, radius, radiance)
-  if radiance[1] + radiance[2] + radiance[3] <= 0.0005 then return end
-  local GL_ZERO, GL_ONE, GL_DST_ALPHA = 0x0000, 0x0001, 0x0304
-  gl.glUseProgram(sunShader)
-  gl.glUniformMatrix4fv(locations.projection, 1, 0, ffi.new("float[16]", projection))
-  gl.glUniformMatrix4fv(locations.view, 1, 0, ffi.new("float[16]", view))
-  gl.glUniform3f(locations.center,
-    viewPosition[1] + sunDir[1] * distance,
-    viewPosition[2] + sunDir[2] * distance,
-    viewPosition[3] + sunDir[3] * distance)
-  gl.glUniform1f(locations.radius, radius)
-  gl.glUniform3f(locations.viewPos, viewPosition[1], viewPosition[2], viewPosition[3])
-  gl.glUniform3f(locations.radiance, radiance[1], radiance[2], radiance[3])
-
-  gl.glDisable(GL_DEPTH_TEST)
-  gl.glDepthMask(0)
-  gl.glEnable(GL_BLEND)
-  -- Colour is added on top of the sky and scaled by the cloud transmittance the
-  -- sky left in alpha; alpha itself is passed through untouched. Where the
-  -- target has no alpha this degrades to a plain additive blend, which is the
-  -- sun simply never being hidden rather than anything breaking.
-  gl.glBlendFuncSeparate(GL_DST_ALPHA, GL_ONE, GL_ZERO, GL_ONE)
-  rendering.draw(sunMesh)
-  gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-  gl.glDisable(GL_BLEND)
-  gl.glDepthMask(1)
-  gl.glEnable(GL_DEPTH_TEST)
 end
 
 local function appendCloudFace(vertices, x0, y0, z0, x1, y1, z1, nx, ny, nz, color)
@@ -1937,13 +1277,22 @@ end
 local function createTextureAtlas()
   local atlas = texture.createAtlas()
   blocks.initTextures(atlas)
+  require("items").initTextures(atlas)
 
   local atlasTex = ffi.new("GLuint[1]")
   gl.glGenTextures(1, atlasTex)
   gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
-  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+  local maxMipLevel = atlas:getMaxMipLevel()
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+    maxMipLevel > 0 and GL_NEAREST_MIPMAP_LINEAR or GL_NEAREST)
   gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, maxMipLevel)
   gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlas.w, atlas.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.pixels)
+  if maxMipLevel > 0 then
+    gl.glGenerateMipmap(GL_TEXTURE_2D)
+  end
 
   return atlasTex
 end
@@ -1973,7 +1322,7 @@ end
 -- corners correctly. Provisional light is only used before the world has
 -- finished lighting; it forces dark cells bright so a chunk can be shown early.
 local function meshOptions(world, entry, provisionalLight, yieldStep)
-  local light = world:skyLightSampler(entry.chunkX, entry.chunkY, entry.chunkZ)
+  local light = world:skyLightSampler(entry.chunkX, entry.chunkZ)
 
   if provisionalLight then
     local base = light
@@ -1988,20 +1337,19 @@ local function meshOptions(world, entry, provisionalLight, yieldStep)
 
   return {
     skyLightAt = light,
-    blockAt = world:blockSampler(entry.chunkX, entry.chunkY, entry.chunkZ),
-    renderOrigin = world.renderOrigin,
-    planet = world.planet,
+    blockAt = world:blockSampler(entry.chunkX, entry.chunkZ),
     yieldStep = yieldStep
   }
 end
 
 local function createTerrainMesh(entry, world)
   local provisionalLight = not world:lightingReady()
-  local vertices, iceVertices, leafVertices = voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetY, entry.offsetZ,
-    meshOptions(world, entry, provisionalLight))
+  local vertices, dielectricVertices = voxel.meshChunk(
+    entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ,
+    meshOptions(world, entry, provisionalLight)
+  )
   return uploadTerrainChunkMesh(entry, vertices, {
-    iceVertices = iceVertices,
-    leafVertices = leafVertices,
+    dielectricVertices = dielectricVertices,
     provisionalLight = provisionalLight,
     lightRevision = world.lightRevision,
     world = world
@@ -2012,7 +1360,7 @@ local function createTerrainMeshes(world)
   local meshes = {}
 
   world:eachChunk(function(chunk, entry)
-    replaceTerrainMesh(meshes, World.chunkKey(entry.chunkX, entry.chunkY, entry.chunkZ), createTerrainMesh(entry, world))
+    replaceTerrainMesh(meshes, World.chunkKey(entry.chunkX, entry.chunkZ), createTerrainMesh(entry, world))
   end)
 
   return meshes
@@ -2028,13 +1376,12 @@ local function ensureTerrainMeshThread(world, item)
   end
 
   local entry = meshEntryForItem(item)
-  item.meshRevision = entry.meshRevision or 0
   if item.provisionalLight == nil then
     item.provisionalLight = not world:lightingReady()
   end
   local provisionalLight = item.provisionalLight
   item.meshThread = coroutine.create(function()
-    item.vertices, item.iceVertices, item.leafVertices = voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetY, entry.offsetZ,
+    item.vertices, item.dielectricVertices = voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ,
       meshOptions(world, entry, provisionalLight, function()
         coroutine.yield(false)
       end))
@@ -2050,21 +1397,7 @@ local function stepTerrainMeshItem(world, item)
     error(err)
   end
 
-  if coroutine.status(item.meshThread) == "dead" and item.vertices ~= nil then
-    local entry = meshEntryForItem(item)
-    if item.meshRevision ~= (entry.meshRevision or 0) then
-      item.vertices = nil
-      item.iceVertices = nil
-      item.leafVertices = nil
-      item.meshThread = nil
-      item.provisionalLight = nil
-      item.meshRevision = nil
-      return false
-    end
-    return true
-  end
-
-  return false
+  return coroutine.status(item.meshThread) == "dead" and item.vertices ~= nil
 end
 
 local function randomWorldSeed()
@@ -2074,120 +1407,67 @@ local function randomWorldSeed()
   return seed ~= 0 and seed or 1
 end
 
--- Somewhere worth waking up: temperate, comfortably inland, comfortably above
--- the sea, and not up a mountain.
---
--- The previous rule asked only for land above sea level, which let spawn land
--- in open desert, on a one-block shoal, or on a beach with the tide at the
--- door. This scores candidates instead, and checks the surroundings so the
--- spot is part of a landmass rather than a speck in the ocean.
-local spawnPicker = {}
-spawnPicker.biomeScore = {
-  plains = 100, forest = 95, savanna = 70, shrubland = 65, taiga = 55,
-  rainforest = 40, tundra = 15, beach = -40, desert = -60,
-  mountains = -70, rockyShore = -80, frozenShore = -90, ocean = -1000
-}
-
-function spawnPicker.score(planet, direction)
-  local sample = terrain.surfaceAtDirection(direction, planet)
-  if sample.land <= 0.62 then return nil end
-  if sample.elevationMeters < planet.seaLevelOffsetMeters + 4.0 then return nil end
-  if sample.elevationMeters > 140.0 then return nil end
-
-  -- Is this actually part of a landmass? Four probes a few hundred metres out.
-  local east, _, north = planet:tangentFrame(
-    {direction[1] * planet.radiusVoxels, direction[2] * planet.radiusVoxels,
-     direction[3] * planet.radiusVoxels})
-  local dryNeighbours = 0
-  local spread = 400.0 / planet.radiusMeters
-  for _, offset in ipairs({{spread, 0}, {-spread, 0}, {0, spread}, {0, -spread}}) do
-    local probe = math3d.normalize({
-      direction[1] + east[1] * offset[1] + north[1] * offset[2],
-      direction[2] + east[2] * offset[1] + north[2] * offset[2],
-      direction[3] + east[3] * offset[1] + north[3] * offset[2]})
-    local near = terrain.surfaceAtDirection(probe, planet)
-    if near.elevationMeters > planet.seaLevelOffsetMeters + 1.0 then
-      dryNeighbours = dryNeighbours + 1
-    end
-  end
-  if dryNeighbours < 3 then return nil end
-
-  return (spawnPicker.biomeScore[sample.biome] or 0)
-    + dryNeighbours * 12.0
-    - math.abs(sample.elevationMeters - 40.0) * 0.15
-    - sample.mountain * 60.0, sample
-end
-
-function spawnPicker.find(planet, preferred)
-  preferred = math3d.normalize(preferred or {0.0, 0.0, 1.0})
-  local best, bestScore, bestSample
-
-  -- Deterministic Fibonacci coverage: no longitude seam, and no assumption
-  -- that +Z happens to be a continent for this seed.
-  local golden = math.pi * (3.0 - math.sqrt(5.0))
-  for i = 0, 511 do
-    local y = 1.0 - (i + 0.5) * (2.0 / 512.0)
-    local radius = math.sqrt(math.max(0.0, 1.0 - y * y))
-    local angle = i * golden
-    local direction = {math.cos(angle) * radius, y, math.sin(angle) * radius}
-    local score, sample = spawnPicker.score(planet, direction)
-    if score then
-      -- Nearness to the preferred direction is a tiebreak, not the deciding
-      -- term: a good site far away beats a desert underfoot.
-      score = score + math3d.dot(direction, preferred) * 25.0
-      if not bestScore or score > bestScore then
-        best, bestScore, bestSample = direction, score, sample
-      end
-    end
-  end
-
-  if best then
-    print(string.format("Spawn: %s, %.0f m above sea level", bestSample.biome, bestSample.elevationMeters))
-    return best
-  end
-  return preferred
-end
-
 local function createWorldLoadingJob(config)
   local seed = tonumber(config.seed) or randomWorldSeed()
-  local world = World.new({
-    chunkRadius = graphics.world.chunkLoadRadius,
-    chunkRadiusVertical = graphics.world.chunkLoadRadiusVertical,
-    maxHeight = TERRAIN_MAX_H,
-    generatorType = config.generatorType,
-    seed = seed,
-    planet = graphics.planet,
-    deferInitialChunks = true
-  })
-  local spawnDirection = spawnPicker.find(world.planet, config.spawnDirection or {0.0, 0.0, 1.0})
-  world.spawnDirection = spawnDirection
-  world.spawnAltitudeMeters = math.max(0.0, tonumber(config.spawnAltitudeMeters) or 0.0)
-  local spawnOffsetVoxels = (graphics.player.eyeHeight or 1.62) + 1.0 + world.spawnAltitudeMeters / world.planet.voxelSizeMeters
-  local spawnPosition = world:surfacePosition(spawnDirection, spawnOffsetVoxels)
-  world.renderOrigin=world.planet:snappedRenderOrigin(spawnPosition)
-  local plan = spawnLoading.createPlan({
-    centerChunkX = World.chunkCoord(spawnPosition[1]),
-    centerChunkY = World.chunkCoord(spawnPosition[2]),
-    centerChunkZ = World.chunkCoord(spawnPosition[3]),
-    requiredRadius = math.min(CHUNK_RENDER_RADIUS, LOADING_REQUIRED_RADIUS),
-    haloRadius = math.min(CHUNK_RENDER_RADIUS, LOADING_HALO_RADIUS)
-  })
-  local save = saves.createWorld({
+  local selectedRenderRadius = math.max(4, math.min(128,
+    math.floor(tonumber(config.renderDistance) or DISTANT_CHUNK_RADIUS)))
+  local chunkRenderRadius = math.min(CHUNK_RENDER_RADIUS, selectedRenderRadius)
+  local save = config.existingWorld or saves.createWorld({
     worldName = config.worldName,
     gameMode = config.gameMode,
     generatorType = config.generatorType,
-    seed = seed
+    seed = seed,
+    generateStructures = config.generateStructures,
+    allowCheats = config.allowCheats,
+    bonusChest = config.bonusChest
+  })
+  local savedPlayer = config.existingWorld and saves.loadPlayer(save) or nil
+  terrain.setSeed(seed)
+  local preferredX = config.spawnX or DEFAULT_SPAWN_X
+  local preferredZ = config.spawnZ or DEFAULT_SPAWN_Z
+  local savedPosition = savedPlayer and savedPlayer.camera and savedPlayer.camera.position
+  local hasSavedPosition = type(savedPosition) == "table" and
+    tonumber(savedPosition[1]) ~= nil and tonumber(savedPosition[3]) ~= nil
+  if hasSavedPosition then
+    preferredX = tonumber(savedPosition[1])
+    preferredZ = tonumber(savedPosition[3])
+  end
+  local spawnX, spawnZ, spawnColumn
+  if hasSavedPosition then
+    spawnX, spawnZ = preferredX, preferredZ
+  elseif config.generatorType == "superflat" then
+    spawnX, spawnZ = preferredX, preferredZ
+  else
+    spawnX, spawnZ, spawnColumn = terrain.findSafeSpawn(preferredX, preferredZ, TERRAIN_MAX_H)
+  end
+  if spawnColumn then
+    print(string.format("Spawn: %s at %.1f, %.1f (ground %d)",
+      tostring(spawnColumn.biome), spawnX, spawnZ, spawnColumn.height))
+  end
+  local plan = spawnLoading.createPlan({
+    centerChunkX = World.chunkCoord(spawnX),
+    centerChunkZ = World.chunkCoord(spawnZ),
+    requiredRadius = math.min(chunkRenderRadius, LOADING_REQUIRED_RADIUS),
+    haloRadius = math.min(chunkRenderRadius, LOADING_HALO_RADIUS)
+  })
+  local world = World.new({
+    chunkRadius = chunkRenderRadius,
+    maxHeight = TERRAIN_MAX_H,
+    generatorType = config.generatorType,
+    seed = seed,
+    deferInitialChunks = true
   })
 
   return {
     config = config,
     save = save,
+    savedPlayer = savedPlayer,
     world = world,
     terrainMeshes = {},
     plan = plan,
     coords = plan.coords,
-    spawnPosition = spawnPosition,
-    spawnDirection = spawnDirection,
+    spawnX = spawnX,
+    spawnZ = spawnZ,
     chunkIndex = 1,
     chunkJob = nil,
     centerEntry = nil,
@@ -2210,7 +1490,7 @@ local function stepWorldLoadingJob(job)
   while chunkBudget > 0 and job.chunkIndex <= #job.coords do
     if not job.chunkJob then
       local coord = job.coords[job.chunkIndex]
-      job.chunkJob = job.world:createChunkJob(coord.chunkX, coord.chunkY, coord.chunkZ)
+      job.chunkJob = job.world:createChunkJob(coord.chunkX, coord.chunkZ)
     end
 
     local ok, err = coroutine.resume(job.chunkJob.thread)
@@ -2222,7 +1502,7 @@ local function stepWorldLoadingJob(job)
       local entry = job.chunkJob.entry
       if entry then
         job.generatedChunks = job.generatedChunks + 1
-        if spawnLoading.isCenterChunk(job.plan, entry.chunkX, entry.chunkY, entry.chunkZ) then
+        if spawnLoading.isCenterChunk(job.plan, entry.chunkX, entry.chunkZ) then
           job.centerEntry = entry
         end
       end
@@ -2243,7 +1523,6 @@ local function stepWorldLoadingJob(job)
     if job.centerEntry and not job.spawnMeshItem then
       job.spawnMeshItem = {
         chunkX = job.centerEntry.chunkX,
-        chunkY = job.centerEntry.chunkY,
         chunkZ = job.centerEntry.chunkZ,
         entry = job.centerEntry
       }
@@ -2253,16 +1532,12 @@ local function stepWorldLoadingJob(job)
       local item = job.spawnMeshItem
       if stepTerrainMeshItem(job.world, item) then
         local entry = item.entry
-        replaceTerrainMesh(job.terrainMeshes, World.chunkKey(entry.chunkX, entry.chunkY, entry.chunkZ), uploadTerrainChunkMesh(entry, item.vertices, {
-          iceVertices = item.iceVertices,
-          leafVertices = item.leafVertices,
+        replaceTerrainMesh(job.terrainMeshes, World.chunkKey(entry.chunkX, entry.chunkZ), uploadTerrainChunkMesh(entry, item.vertices, {
           provisionalLight = item.provisionalLight,
           lightRevision = job.world.lightRevision,
           world = job.world
         }))
         item.vertices = nil
-        item.iceVertices = nil
-        item.leafVertices = nil
         item.meshThread = nil
         item.provisionalLight = nil
         job.spawnMeshComplete = true
@@ -2285,9 +1560,9 @@ end
 
 local function pendingChunkCoords(item)
   if item.entry then
-    return item.entry.chunkX, item.entry.chunkY, item.entry.chunkZ
+    return item.entry.chunkX, item.entry.chunkZ
   end
-  return item.chunkX, item.chunkY, item.chunkZ
+  return item.chunkX, item.chunkZ
 end
 
 -- `urgent` marks work the player is waiting to see. The queue is processed from
@@ -2299,24 +1574,13 @@ local function queueChunkRemesh(pendingEntries, entry, urgent)
     return
   end
 
-  local key = World.chunkKey(entry.chunkX, entry.chunkY, entry.chunkZ)
+  local key = World.chunkKey(entry.chunkX, entry.chunkZ)
   for i = 1, #pendingEntries do
-    local chunkX, chunkY, chunkZ = pendingChunkCoords(pendingEntries[i])
-    if chunkX and chunkY and chunkZ and World.chunkKey(chunkX, chunkY, chunkZ) == key then
+    local chunkX, chunkZ = pendingChunkCoords(pendingEntries[i])
+    if chunkX and chunkZ and World.chunkKey(chunkX, chunkZ) == key then
       local item = pendingEntries[i]
       item.entry = item.entry or entry
       item.rebuild = true
-      -- A meshing coroutine reads the live chunk over several frames. Once an
-      -- edit arrives, continuing it would mix pre/post-edit slices and its
-      -- eventual upload would consume this rebuild request. Restart cleanly.
-      if item.meshThread then
-        item.vertices = nil
-        item.iceVertices = nil
-        item.leafVertices = nil
-        item.meshThread = nil
-        item.provisionalLight = nil
-        item.meshRevision = nil
-      end
       if urgent and i > 1 then
         table.remove(pendingEntries, i)
         table.insert(pendingEntries, 1, item)
@@ -2327,7 +1591,6 @@ local function queueChunkRemesh(pendingEntries, entry, urgent)
 
   local item = {
     chunkX = entry.chunkX,
-    chunkY = entry.chunkY,
     chunkZ = entry.chunkZ,
     entry = entry,
     rebuild = true
@@ -2367,39 +1630,59 @@ local function queueLightTouchedRemeshes(world, pendingEntries, urgent)
   return queued
 end
 
-local function queueTerrainMeshes(world, pendingEntries, x, y, z, budget, priority)
+local function queueTerrainMeshes(world, pendingEntries, x, z, budget, priority, externallyPending)
   budget = budget or CHUNK_QUEUE_BUDGET
   priority = priority or {}
-  local centerChunkX,centerChunkY,centerChunkZ=World.chunkCoord(x),World.chunkCoord(y),World.chunkCoord(z)
-  local predictedChunkX=World.chunkCoord(priority.predictedX or x)
-  local predictedChunkY=World.chunkCoord(priority.predictedY or y)
-  local predictedChunkZ=World.chunkCoord(priority.predictedZ or z)
-  local forwardX,forwardY,forwardZ=priority.forwardX or 0,priority.forwardY or 0,priority.forwardZ or 0
-  local coords=world:chunkCoordsAroundBlock(x,y,z,world.chunkRadius)
+  local centerChunkX = World.chunkCoord(x)
+  local centerChunkZ = World.chunkCoord(z)
+  local predictedChunkX = World.chunkCoord(priority.predictedX or x)
+  local predictedChunkZ = World.chunkCoord(priority.predictedZ or z)
+  local forwardX = priority.forwardX or 0.0
+  local forwardZ = priority.forwardZ or 0.0
+  local coords = {}
   local queued = {}
 
   for i = 1, #pendingEntries do
-    local chunkX,chunkY,chunkZ=pendingChunkCoords(pendingEntries[i])
-    if chunkX and chunkY and chunkZ then
-      queued[World.chunkKey(chunkX,chunkY,chunkZ)] = true
+    local chunkX, chunkZ = pendingChunkCoords(pendingEntries[i])
+    if chunkX and chunkZ then
+      queued[World.chunkKey(chunkX, chunkZ)] = true
+    end
+  end
+
+  for chunkX = centerChunkX - world.chunkRadius, centerChunkX + world.chunkRadius do
+    for chunkZ = centerChunkZ - world.chunkRadius, centerChunkZ + world.chunkRadius do
+      local key = World.chunkKey(chunkX, chunkZ)
+      if not world.chunks[key] and not queued[key] and
+          not (externallyPending and externallyPending(chunkX, chunkZ)) then
+        coords[#coords + 1] = {chunkX = chunkX, chunkZ = chunkZ}
+      end
     end
   end
 
   table.sort(coords, function(a, b)
-    local adx,ady,adz=a.chunkX-centerChunkX,a.chunkY-centerChunkY,a.chunkZ-centerChunkZ
-    local bdx,bdy,bdz=b.chunkX-centerChunkX,b.chunkY-centerChunkY,b.chunkZ-centerChunkZ
-    local apx,apy,apz=a.chunkX-predictedChunkX,a.chunkY-predictedChunkY,a.chunkZ-predictedChunkZ
-    local bpx,bpy,bpz=b.chunkX-predictedChunkX,b.chunkY-predictedChunkY,b.chunkZ-predictedChunkZ
-    local ad=adx*adx+ady*ady+adz*adz+(apx*apx+apy*apy+apz*apz)*0.65
-    local bd=bdx*bdx+bdy*bdy+bdz*bdz+(bpx*bpx+bpy*bpy+bpz*bpz)*0.65
-    local al,bl=math.sqrt(adx*adx+ady*ady+adz*adz),math.sqrt(bdx*bdx+bdy*bdy+bdz*bdz)
+    local adx = a.chunkX - centerChunkX
+    local adz = a.chunkZ - centerChunkZ
+    local bdx = b.chunkX - centerChunkX
+    local bdz = b.chunkZ - centerChunkZ
+    local apx = a.chunkX - predictedChunkX
+    local apz = a.chunkZ - predictedChunkZ
+    local bpx = b.chunkX - predictedChunkX
+    local bpz = b.chunkZ - predictedChunkZ
+    local ad = adx * adx + adz * adz + (apx * apx + apz * apz) * 0.65
+    local bd = bdx * bdx + bdz * bdz + (bpx * bpx + bpz * bpz) * 0.65
+
+    local al = math.sqrt(adx * adx + adz * adz)
+    local bl = math.sqrt(bdx * bdx + bdz * bdz)
     if al > 0.0 then
-      ad=ad-((adx/al)*forwardX+(ady/al)*forwardY+(adz/al)*forwardZ)*3
+      ad = ad - ((adx / al) * forwardX + (adz / al) * forwardZ) * 3.0
     end
     if bl > 0.0 then
-      bd=bd-((bdx/bl)*forwardX+(bdy/bl)*forwardY+(bdz/bl)*forwardZ)*3
+      bd = bd - ((bdx / bl) * forwardX + (bdz / bl) * forwardZ) * 3.0
     end
-    if ad==bd then return a.chunkX==b.chunkX and (a.chunkY==b.chunkY and a.chunkZ<b.chunkZ or a.chunkY<b.chunkY) or a.chunkX<b.chunkX end
+
+    if ad == bd then
+      return a.chunkX == b.chunkX and a.chunkZ < b.chunkZ or a.chunkX < b.chunkX
+    end
     return ad < bd
   end)
 
@@ -2409,11 +1692,8 @@ local function queueTerrainMeshes(world, pendingEntries, x, y, z, budget, priori
       break
     end
     local coord = coords[i]
-    local key=World.chunkKey(coord.chunkX,coord.chunkY,coord.chunkZ)
-    if not world.chunks[key] and not queued[key] then
-      pendingEntries[#pendingEntries + 1] = world:createChunkJob(coord.chunkX,coord.chunkY,coord.chunkZ)
-      created=created+1
-    end
+    pendingEntries[#pendingEntries + 1] = world:createChunkJob(coord.chunkX, coord.chunkZ)
+    created = created + 1
   end
 end
 
@@ -2459,17 +1739,15 @@ local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, bud
       stats.meshSteps = stats.meshSteps + 1
 
       if completed then
-        replaceTerrainMesh(terrainMeshes, World.chunkKey(item.entry.chunkX, item.entry.chunkY, item.entry.chunkZ), uploadTerrainChunkMesh(item.entry, item.vertices, {
-          iceVertices = item.iceVertices,
-          leafVertices = item.leafVertices,
+        replaceTerrainMesh(terrainMeshes, World.chunkKey(item.entry.chunkX, item.entry.chunkZ), uploadTerrainChunkMesh(item.entry, item.vertices, {
+          dielectricVertices = item.dielectricVertices,
           provisionalLight = item.provisionalLight,
           lightRevision = world.lightRevision,
           world = world
         }))
         stats.meshUploads = stats.meshUploads + 1
         item.vertices = nil
-        item.iceVertices = nil
-        item.leafVertices = nil
+        item.dielectricVertices = nil
         item.meshThread = nil
         item.provisionalLight = nil
         table.remove(pendingEntries, 1)
@@ -2477,7 +1755,7 @@ local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, bud
       end
     else
       local entry = table.remove(pendingEntries, 1)
-      replaceTerrainMesh(terrainMeshes, World.chunkKey(entry.chunkX, entry.chunkY, entry.chunkZ), createTerrainMesh(entry, world))
+      replaceTerrainMesh(terrainMeshes, World.chunkKey(entry.chunkX, entry.chunkZ), createTerrainMesh(entry, world))
       processed = processed + 1
       stats.syncUploads = stats.syncUploads + 1
       break
@@ -2510,20 +1788,15 @@ local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, bud
   return stats
 end
 
-local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, y, z)
-  local centerChunkX,centerChunkY,centerChunkZ=World.chunkCoord(x),World.chunkCoord(y),World.chunkCoord(z)
-  -- Eviction has to use the same ellipsoid the streamer fills, with one chunk
-  -- of hysteresis. A sphere here would either throw away chunks that were just
-  -- generated or hold on to a shell of them that can never be seen.
-  local up = world.planet:localUp({x, y, z})
+local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, z)
+  local centerChunkX = World.chunkCoord(x)
+  local centerChunkZ = World.chunkCoord(z)
   local keepRadius = world.chunkRadius + 1
-  local keepVertical = (world.chunkRadiusVertical or world.chunkRadius) + 1
 
-  if (graphics.world.sphericalVoxels ~= false) then return end
   for key, entry in pairs(world.chunks) do
-    local dx,dy,dz=entry.chunkX-centerChunkX,entry.chunkY-centerChunkY,entry.chunkZ-centerChunkZ
-    if world:chunkRegionScore(dx,dy,dz,up,keepRadius,keepVertical)>1.0 then
+    if math.abs(entry.chunkX - centerChunkX) > keepRadius or math.abs(entry.chunkZ - centerChunkZ) > keepRadius then
       world.chunks[key] = nil
+      if world.lightTouched then world.lightTouched[key] = nil end
       releaseTerrainMesh(terrainMeshes[key])
       terrainMeshes[key] = nil
     end
@@ -2532,10 +1805,8 @@ local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, y, z)
   local i = 1
   while i <= #pendingEntries do
     local entry = pendingEntries[i]
-    local chunkX,chunkY,chunkZ=pendingChunkCoords(entry)
-    local dx,dy,dz=(chunkX or centerChunkX)-centerChunkX,(chunkY or centerChunkY)-centerChunkY,(chunkZ or centerChunkZ)-centerChunkZ
-    if chunkX and chunkY and chunkZ and
-        world:chunkRegionScore(dx,dy,dz,up,keepRadius,keepVertical)>1.0 then
+    local chunkX, chunkZ = pendingChunkCoords(entry)
+    if chunkX and chunkZ and (math.abs(chunkX - centerChunkX) > keepRadius or math.abs(chunkZ - centerChunkZ) > keepRadius) then
       table.remove(pendingEntries, i)
     else
       i = i + 1
@@ -2543,8 +1814,8 @@ local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, y, z)
   end
 end
 
-local function rebuildChunkMesh(world, pendingEntries, chunkX, chunkY, chunkZ, urgent)
-  local key = World.chunkKey(chunkX, chunkY, chunkZ)
+local function rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ, urgent)
+  local key = World.chunkKey(chunkX, chunkZ)
   local entry = world.chunks[key]
   if entry then
     queueChunkRemesh(pendingEntries, entry, urgent)
@@ -2554,39 +1825,84 @@ end
 -- Called when the player places or breaks a block, so everything here is urgent:
 -- the block data (and its collision) has already changed and the mesh is the
 -- only thing left before the edit becomes visible.
-local function rebuildBlockChunkMeshes(world, pendingEntries, x, y, z)
-  local localX,localY,localZ,chunkX,chunkY,chunkZ=world:localBlockCoord(x,y,z)
-  local minDX = localX == 0 and -1 or 0
-  local maxDX = localX == 15 and 1 or 0
-  local minDY = localY == 0 and -1 or 0
-  local maxDY = localY == 15 and 1 or 0
-  local minDZ = localZ == 0 and -1 or 0
-  local maxDZ = localZ == 15 and 1 or 0
+local function rebuildBlockChunkMeshes(world, pendingEntries, x, z)
+  local _, _, chunkX, chunkZ = world:localBlockCoord(x, z)
+  rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ, true)
 
-  -- Boundary faces, their corner AO, and smooth vertex lighting sample the
-  -- neighbouring chunk. Include diagonal neighbours for corner edits.
-  for dz = minDZ, maxDZ do
-    for dy = minDY, maxDY do
-      for dx = minDX, maxDX do
-        rebuildChunkMesh(world,pendingEntries,chunkX+dx,chunkY+dy,chunkZ+dz,true)
-      end
-    end
-  end
-
+  -- Neighbour geometry never depends on this chunk (voxel.lua treats anything
+  -- outside 0..15 as air), so the only reason to touch a neighbour is light,
+  -- and the update tells us exactly which ones changed.
   queueLightTouchedRemeshes(world, pendingEntries, true)
 end
 
+local function rebuildChangedBlockMeshes(world,pendingEntries,changed)
+  local chunks={}
+  for _,p in ipairs(changed or {}) do
+    local _,_,cx,cz=world:localBlockCoord(p.x,p.z)
+    chunks[cx..":"..cz]={x=cx,z=cz}
+  end
+  for _,chunk in pairs(chunks) do rebuildChunkMesh(world,pendingEntries,chunk.x,chunk.z,true) end
+  queueLightTouchedRemeshes(world,pendingEntries,true)
+end
+
 local function createCharacterMesh()
-  local player = character.createPlayer({8, 6, 8}, {skinPath=graphics.player.skinPath,model=graphics.player.skinModel})
+  local player = character.createPlayer({8, 6, 8})
   return uploadMesh(player:createMesh())
 end
 
-local function drawSky(skyShader, skyMesh, locations, moonTexture, playerCamera, sunDir, sky, time, cloudsEnabled, skyRotation)
+local function releaseDroppedItemMeshes(meshes)
+  for item, mesh in pairs(meshes) do
+    if mesh then rendering.release(mesh) end
+    meshes[item] = nil
+  end
+end
+
+local function drawDroppedItems(manager, meshes, modelLocation, identityModel)
+  for _, entity in ipairs(manager.items) do
+    local mesh = meshes[entity.item]
+    if mesh == nil then
+      local vertices = DroppedItems.meshVertices(entity.item)
+      mesh = #vertices > 0 and uploadTerrainMesh(vertices) or false
+      meshes[entity.item] = mesh
+    end
+    if mesh then
+      local rotation = entity.rotation or {0.0, 0.0, 0.0}
+      local sx, cx = math.sin(rotation[1]), math.cos(rotation[1])
+      local sy, cy = math.sin(rotation[2]), math.cos(rotation[2])
+      local sz, cz = math.sin(rotation[3]), math.cos(rotation[3])
+      local transform = {
+        cz*cy, sz*cy, -sy, 0,
+        cz*sy*sx-sz*cx, sz*sy*sx+cz*cx, cy*sx, 0,
+        cz*sy*cx+sz*sx, sz*sy*cx-cz*sx, cy*cx, 0,
+        entity.position[1], entity.position[2], entity.position[3], 1
+      }
+      gl.glUniformMatrix4fv(modelLocation, 1, 0, ffi.new("float[16]", transform))
+      rendering.draw(mesh)
+    end
+  end
+  gl.glUniformMatrix4fv(modelLocation, 1, 0, ffi.new("float[16]", identityModel))
+end
+
+
+local function releaseFallingTreeMeshes(meshes)
+  for id,mesh in pairs(meshes) do if mesh then rendering.release(mesh) end meshes[id]=nil end
+end
+
+local function drawFallingTrees(manager,meshes,modelLocation,identityModel)
+  for _,tree in ipairs(manager.trees) do
+    local mesh=meshes[tree.id]
+    if mesh==nil then mesh=#tree.vertices>0 and uploadTerrainMesh(tree.vertices) or false meshes[tree.id]=mesh end
+    if mesh then
+      gl.glUniformMatrix4fv(modelLocation,1,0,ffi.new("float[16]",manager:model(tree)))
+      rendering.draw(mesh)
+    end
+  end
+  gl.glUniformMatrix4fv(modelLocation,1,0,ffi.new("float[16]",identityModel))
+end
+
+local function drawSky(skyShader, skyMesh, locations, moonTexture, playerCamera, sunDir, sky, time)
   local forward = playerCamera:getFront()
-  local worldUp = playerCamera.getLocalUp and playerCamera:getLocalUp() or {0.0, 1.0, 0.0}
-  local absolutePosition = playerCamera.absolutePosition or playerCamera.position
-  local observerAltitude = math.max(absolutePosition[2] - 62.0, 1.0)
-  if playerCamera.planet then observerAltitude = math.max(playerCamera.planet:altitudeMeters(absolutePosition), 0.0) end
+  local worldUp = {0.0, 1.0, 0.0}
   local right = math3d.normalize(math3d.cross(forward, worldUp))
   local up = math3d.normalize(math3d.cross(right, forward))
 
@@ -2603,10 +1919,6 @@ local function drawSky(skyShader, skyMesh, locations, moonTexture, playerCamera,
   gl.glUniform3f(locations.skyParams, SKY.scatterStrength or 1.0, 0.0, SKY.sunIntensity or 22.0)
   gl.glUniform3f(locations.sunDisc, SKY.sunAngularRadius or 0.012, SKY.sunDiscBrightness or 9.0, 0.0)
   gl.glUniform3f(locations.fogColor, sky.fogColor[1], sky.fogColor[2], sky.fogColor[3])
-  gl.glUniform3f(locations.planetUp, worldUp[1], worldUp[2], worldUp[3])
-  gl.glUniform1f(locations.observerAltitude, observerAltitude)
-  gl.glUniform1f(locations.skyRotation, skyRotation or 0.0)
-  gl.glUniform3f(locations.cloudParams, CLOUD_BOTTOM, CLOUD_TOP, cloudsEnabled == false and 0.0 or (graphics.atmosphere.cloudDensity or 1.0))
   gl.glActiveTexture(GL_TEXTURE2)
   gl.glBindTexture(GL_TEXTURE_2D, moonTexture[0])
   rendering.draw(skyMesh)
@@ -2645,48 +1957,37 @@ local function drawClouds(cloudShader, cloudMesh, locations, playerCamera, view,
   gl.glDisable(GL_CULL_FACE)
 end
 
-local function visibleTerrainMeshes(terrainMeshes, frustum)
+local function visibleTerrainMeshes(terrainMeshes, frustum, centerChunkX, centerChunkZ, radius)
   local visible = {}
   for _, mesh in pairs(terrainMeshes) do
-    if mesh and (not mesh.bounds or math3d.aabbInFrustum(frustum, mesh.bounds)) then
-      visible[#visible + 1] = mesh
+    if mesh then
+      local inRadius = not centerChunkX or
+        math.max(math.abs(mesh.chunkX - centerChunkX), math.abs(mesh.chunkZ - centerChunkZ)) <= radius
+      if inRadius and (not mesh.bounds or math3d.aabbInFrustum(frustum, mesh.bounds)) then
+        visible[#visible + 1] = mesh
+      end
     end
   end
   return visible
 end
 
-local function visibleIceMeshes(visibleTerrain)
+local function appendMeshes(target, source)
+  for i = 1, #source do target[#target + 1] = source[i] end
+  return target
+end
+
+local function visibleDielectricMeshes(visibleTerrain)
   local visible = {}
   for i = 1, #visibleTerrain do
-    local iceMesh = visibleTerrain[i].iceMesh
-    if iceMesh and iceMesh.count > 0 then
-      visible[#visible + 1] = iceMesh
+    local dielectricMesh = visibleTerrain[i].dielectricMesh
+    if dielectricMesh and dielectricMesh.count > 0 then
+      visible[#visible + 1] = dielectricMesh
     end
   end
   return visible
 end
 
-local function visibleLeafMeshes(visibleTerrain, cameraPosition)
-  local visible = {}
-  for i = 1, #visibleTerrain do
-    local leafMesh = visibleTerrain[i].leafMesh
-    if leafMesh and leafMesh.count > 0 then
-      visible[#visible + 1] = leafMesh
-    end
-  end
-  -- Standard alpha compositing needs far surfaces first. Chunk sorting is
-  -- coarse, but leaf blocks within a chunk use the same material and dense
-  -- crowns hide the small residual ordering error.
-  table.sort(visible, function(a, b)
-    local ac=a.renderCenter or {0,0,0} local bc=b.renderCenter or {0,0,0}
-    local ax,ay,az=ac[1]-cameraPosition[1],ac[2]-cameraPosition[2],ac[3]-cameraPosition[3]
-    local bx,by,bz=bc[1]-cameraPosition[1],bc[2]-cameraPosition[2],bc[3]-cameraPosition[3]
-    return ax*ax+ay*ay+az*az > bx*bx+by*by+bz*bz
-  end)
-  return visible
-end
-
-local function visibleWaterMeshes(visibleTerrain, farWaterMeshes, terrainMeshes, frustum)
+local function visibleWaterMeshes(visibleTerrain)
   local visible = {}
   for i = 1, #visibleTerrain do
     local waterMesh = visibleTerrain[i].waterMesh
@@ -2694,117 +1995,7 @@ local function visibleWaterMeshes(visibleTerrain, farWaterMeshes, terrainMeshes,
       visible[#visible + 1] = waterMesh
     end
   end
-  for key, waterMesh in pairs(farWaterMeshes or {}) do
-    if waterMesh and not terrainMeshes[key] and
-        (not waterMesh.bounds or math3d.aabbInFrustum(frustum, waterMesh.bounds)) then
-      visible[#visible + 1] = waterMesh
-    end
-  end
   return visible
-end
-
-local function releaseFarWaterMeshes(farWaterMeshes, state)
-  for key, mesh in pairs(farWaterMeshes) do
-    if mesh then rendering.release(mesh) end
-    farWaterMeshes[key] = nil
-  end
-  state.centerChunkX = nil
-  state.centerChunkZ = nil
-  state.queue = {}
-  state.queueIndex = 1
-end
-
-local function refreshFarWaterQueue(farWaterMeshes, state, terrainMeshes, centerChunkX, centerChunkZ, innerRadius)
-  local keepRadius = FAR_WATER_CHUNK_RADIUS + 2
-  for key, mesh in pairs(farWaterMeshes) do
-    local chunkX, chunkZ
-    if mesh then
-      chunkX, chunkZ = mesh.chunkX, mesh.chunkZ
-    else
-      chunkX, chunkZ = key:match("^(-?%d+),(-?%d+)$")
-      chunkX, chunkZ = tonumber(chunkX), tonumber(chunkZ)
-    end
-    if not chunkX or math.abs(chunkX - centerChunkX) > keepRadius or
-        math.abs(chunkZ - centerChunkZ) > keepRadius then
-      if mesh then rendering.release(mesh) end
-      farWaterMeshes[key] = nil
-    end
-  end
-
-  local queue = {}
-  for dz = -FAR_WATER_CHUNK_RADIUS, FAR_WATER_CHUNK_RADIUS do
-    for dx = -FAR_WATER_CHUNK_RADIUS, FAR_WATER_CHUNK_RADIUS do
-      local distance = math.max(math.abs(dx), math.abs(dz))
-      if distance > innerRadius then
-        local chunkX = centerChunkX + dx
-        local chunkZ = centerChunkZ + dz
-        local key = World.chunkKey(chunkX, chunkZ)
-        if farWaterMeshes[key] == nil and not terrainMeshes[key] then
-          queue[#queue + 1] = {
-            chunkX = chunkX,
-            chunkZ = chunkZ,
-            distanceSquared = dx * dx + dz * dz
-          }
-        end
-      end
-    end
-  end
-  table.sort(queue, function(a, b) return a.distanceSquared < b.distanceSquared end)
-  state.queue = queue
-  state.queueIndex = 1
-  state.centerChunkX = centerChunkX
-  state.centerChunkZ = centerChunkZ
-end
-
-local function updateFarWaterMeshes(farWaterMeshes, state, terrainMeshes, world, x, z)
-  local centerChunkX = World.chunkCoord(x)
-  local centerChunkZ = World.chunkCoord(z)
-  if centerChunkX ~= state.centerChunkX or centerChunkZ ~= state.centerChunkZ then
-    refreshFarWaterQueue(
-      farWaterMeshes, state, terrainMeshes, centerChunkX, centerChunkZ, world.chunkRadius
-    )
-  end
-
-  local built = 0
-  local deadline = glfw.glfwGetTime() + FAR_WATER_FRAME_BUDGET
-  while built < FAR_WATER_BUILD_BUDGET and state.queueIndex <= #state.queue and
-      (built == 0 or glfw.glfwGetTime() < deadline) do
-    local coord = state.queue[state.queueIndex]
-    state.queueIndex = state.queueIndex + 1
-    local key = World.chunkKey(coord.chunkX, coord.chunkZ)
-    if farWaterMeshes[key] == nil and not terrainMeshes[key] then
-      local offsetX = coord.chunkX * 16
-      local offsetZ = coord.chunkZ * 16
-      local vertices = effects.waterTileVertices(
-        offsetX, offsetZ, 16.0, FAR_WATER_COVERAGE_SUBDIVISIONS,
-        function(sampleX, sampleZ)
-          if terrain.biomeAt(sampleX, sampleZ) ~= "ocean" then return false end
-          return terrain.heightAt(sampleX, sampleZ, TERRAIN_MAX_H, true) < WATER_LEVEL
-        end,
-        FAR_WATER_TILE_SUBDIVISIONS,
-        createWaterWaveSampler(),
-        WATER_LEVEL
-      )
-      if #vertices > 0 then
-        local mesh = uploadMesh(vertices)
-        mesh.chunkX = coord.chunkX
-        mesh.chunkZ = coord.chunkZ
-        mesh.bounds = {
-          minX = offsetX,
-          minY = WATER_LEVEL - 5.0,
-          minZ = offsetZ,
-          maxX = offsetX + 16.0,
-          maxY = WATER_LEVEL + 5.0,
-          maxZ = offsetZ + 16.0
-        }
-        farWaterMeshes[key] = mesh
-      else
-        -- false is a cached dry/non-ocean tile; nil means it has not been built.
-        farWaterMeshes[key] = false
-      end
-      built = built + 1
-    end
-  end
 end
 
 local function formatNumber(value, decimals)
@@ -2903,8 +2094,6 @@ local function collectMeshStats(terrainMeshes, visibleMeshes)
     if mesh then
       stats.uploaded = stats.uploaded + 1
       stats.totalVertices = stats.totalVertices + (mesh.count or 0)
-        + (mesh.leafMesh and mesh.leafMesh.count or 0)
-        + (mesh.iceMesh and mesh.iceMesh.count or 0)
       if mesh.provisionalLight then
         stats.provisional = stats.provisional + 1
       end
@@ -2912,10 +2101,7 @@ local function collectMeshStats(terrainMeshes, visibleMeshes)
   end
 
   for i = 1, #visibleMeshes do
-    local mesh=visibleMeshes[i]
-    stats.visibleVertices = stats.visibleVertices + (mesh.count or 0)
-      + (mesh.leafMesh and mesh.leafMesh.count or 0)
-      + (mesh.iceMesh and mesh.iceMesh.count or 0)
+    stats.visibleVertices = stats.visibleVertices + (visibleMeshes[i].count or 0)
   end
 
   stats.bytes = stats.totalVertices * TERRAIN_VERTEX_STRIDE_FLOATS * 4
@@ -2935,24 +2121,22 @@ local function updateDebugFrameStats(state, dt)
   end
 end
 
-local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntries, playerCamera, state, currentTime, queueStats, sky, sunDir, gridWorld)
+local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntries, playerCamera, state, currentTime, queueStats, sky, sunDir)
   queueStats = queueStats or {}
   sky = sky or {}
   sunDir = sunDir or {0.0, 1.0, 0.0}
   local pos = playerCamera.position
-  local localUp=world.planet:localUp(pos)
-  local localDown={-localUp[1],-localUp[2],-localUp[3]}
-  local eyeHeight=playerCamera.eyeHeight or 1.62
-  local feet={pos[1]-localUp[1]*eyeHeight,pos[2]-localUp[2]*eyeHeight,pos[3]-localUp[3]*eyeHeight}
-  local blockX,blockY,blockZ=math.floor(feet[1]),math.floor(feet[2]),math.floor(feet[3])
-  local eyeBlockX,eyeBlockY,eyeBlockZ=math.floor(pos[1]),math.floor(pos[2]),math.floor(pos[3])
+  local feetY = pos[2] - (playerCamera.eyeHeight or 1.62)
+  local blockX = math.floor(pos[1])
+  local blockY = math.floor(feetY)
+  local blockZ = math.floor(pos[3])
+  local eyeBlockY = math.floor(pos[2])
   local chunkX = World.chunkCoord(blockX)
-  local chunkY = World.chunkCoord(blockY)
   local chunkZ = World.chunkCoord(blockZ)
   local localX = blockX - chunkX * 16
-  local localY = blockY - chunkY * 16
   local localZ = blockZ - chunkZ * 16
-  local biomeName=terrain.biomeAtPosition(feet[1],feet[2],feet[3],world.planet)
+  local biomeName = terrain.biomeAt(blockX, blockZ)
+  local generation = terrain.debugFieldsAt(blockX, blockZ, TERRAIN_MAX_H)
   local target = world:raycast(pos, playerCamera:getFront(), playerCamera.reach or 6.0)
   local targetLine = "Looking at: none"
   if target then
@@ -2967,11 +2151,8 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
 
   local chunkStats = collectChunkStats(world, pendingEntries)
   local meshStats = collectMeshStats(terrainMeshes, visibleMeshes)
-  local ux,uy,uz=world.planet:dominantUpStep(feet)
-  local standingOn=world:blockAt(blockX-ux,blockY-uy,blockZ-uz)
-  local insideBlock=world:blockAt(eyeBlockX,eyeBlockY,eyeBlockZ)
-  local playerRadius=world.planet:distanceVoxels(pos)*world.planet.voxelSizeMeters
-  local altitude=world.planet:altitudeMeters(pos)
+  local standingOn = world:blockAt(blockX, blockY - 1, blockZ)
+  local insideBlock = world:blockAt(blockX, eyeBlockY, blockZ)
   local speed = math.sqrt(
     (playerCamera.velocity[1] or 0.0) * (playerCamera.velocity[1] or 0.0) +
     (playerCamera.velocity[2] or 0.0) * (playerCamera.velocity[2] or 0.0) +
@@ -2995,6 +2176,15 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     queueStats.budget or TERRAIN_WORK_BUDGET,
     (queueStats.meshUploads or 0) + (queueStats.syncUploads or 0)
   )
+  local distant = queueStats.distant or {}
+  local distantLine = string.format(
+    "Distant LOD: square %d, ring %d/%d, %d queued, %d builds",
+    distant.radius or state.renderDistance or 0,
+    distant.scheduledThrough or 0,
+    distant.radius or state.renderDistance or 0,
+    distant.queued or 0,
+    distant.built or 0
+  )
 
   local leftLines = {
     string.format("MineLua 1.0.0 (%s)", runtime),
@@ -3002,24 +2192,14 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     string.format("C: %d/%d chunks, V: %d verts", meshStats.visible, meshStats.uploaded, math.floor(meshStats.visibleVertices + 0.5)),
     queueLine,
     frameWorkLine,
-    string.format("XYZ: %s / %s / %s",formatNumber(feet[1],3),formatNumber(feet[2],3),formatNumber(feet[3],3)),
+    distantLine,
+    string.format("XYZ: %s / %s / %s", formatNumber(pos[1], 3), formatNumber(feetY, 3), formatNumber(pos[3], 3)),
     string.format("Eye: %s / %s / %s", formatNumber(pos[1], 3), formatNumber(pos[2], 3), formatNumber(pos[3], 3)),
     string.format("Block: %d %d %d", blockX, blockY, blockZ),
-    string.format("Chunk: %d %d %d in %d %d %d",chunkX,chunkY,chunkZ,localX,localY,localZ),
-    -- Which voxel topology is actually underfoot. Without this the two are
-    -- indistinguishable in game, and the only clue is a line printed to the
-    -- console at load.
-    gridWorld
-      and string.format("Voxels: spherical grid, %d chunks loaded", gridWorld:chunkCount())
-      or "Voxels: Cartesian lattice",
-    string.format("Planet radius: %.0f m",world.planet.radiusMeters),
-    string.format("Player radius: %.3f m",playerRadius),
-    string.format("Radial altitude: %.3f m",altitude),
-    string.format("Local up: %.4f / %.4f / %.4f",localUp[1],localUp[2],localUp[3]),
-    string.format("Gravity: %.4f / %.4f / %.4f",localDown[1]*world.planet.gravityAcceleration,localDown[2]*world.planet.gravityAcceleration,localDown[3]*world.planet.gravityAcceleration),
+    string.format("Chunk: %d %d in %d %d %d", chunkX, chunkZ, localX, math.floor(feetY) % 16, localZ),
     string.format("Facing: %s (yaw %s / pitch %s)", cameraFacingName(playerCamera.yaw), formatNumber(playerCamera.yaw, 1), formatNumber(playerCamera.pitch, 1)),
     string.format("Biome: minecraft:%s", tostring(biomeName or "unknown")),
-    string.format("Light: sky %d, daylight %s, moon %s",world:skyLightAt(eyeBlockX,eyeBlockY,eyeBlockZ),formatNumber(sky.daylight or 0,2),formatNumber(sky.moonAmount or 0,2)),
+    string.format("Light: sky %d, daylight %s, moon %s", world:skyLightAt(blockX, eyeBlockY, blockZ), formatNumber(sky.daylight or 0.0, 2), formatNumber(sky.moonAmount or 0.0, 2)),
     string.format("Standing on: %s", blockDebugName(standingOn)),
     string.format("Inside: %s", blockDebugName(insideBlock)),
     targetLine
@@ -3029,10 +2209,12 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     string.format("Display: %dx%d", windowWidth, windowHeight),
     string.format("Mem: %s", formatNumber(memMb, 1) .. " MB"),
     string.format("World seed: %s", tostring(world.seed or "?")),
-    string.format("Sea radius: %.0f m",world.planet.seaLevelRadiusVoxels*world.planet.voxelSizeMeters),
-    string.format("Voxel size: %.3f m",world.planet.voxelSizeMeters),
-    string.format("Render origin: %.0f / %.0f / %.0f",world.renderOrigin[1],world.renderOrigin[2],world.renderOrigin[3]),
     string.format("Generator: %s", tostring(world.generatorType or "default")),
+    string.format("Landform: %s / geology: %s", tostring(generation.landform), tostring(generation.geology)),
+    string.format("Climate: T %s, M %s, rain %s", formatNumber(generation.temperature, 2), formatNumber(generation.moisture, 2), formatNumber(generation.rainfall, 2)),
+    string.format("World fields: continent %s, mountain %s", formatNumber(generation.continentalness, 2), formatNumber(generation.mountainPotential, 2)),
+    string.format("Erosion %s, drainage %s, river %s", formatNumber(generation.erosion, 2), formatNumber(generation.drainage, 2), formatNumber(generation.riverNetwork, 2)),
+    string.format("Hydrology: %s / coast: %s", tostring(generation.waterKind or "dry"), tostring(generation.coastType or "inland")),
     string.format("Server chunks: %d loaded / %d ready / %d collision", chunkStats.loaded, chunkStats.serverReady, chunkStats.collision),
     string.format("Lighting: %d lit / dirty %s / job %s / rev %d", chunkStats.light, tostring(world.lightDirty == true), tostring(world.lightingJob ~= nil), world.lightRevision or 0),
     string.format("Render chunks: %d mesh / %d gpu / %d ready", chunkStats.mesh, chunkStats.gpu, chunkStats.renderReady),
@@ -3041,8 +2223,7 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     string.format("Budget: terrain %d, queue %d, backlog %d", TERRAIN_WORK_BUDGET, CHUNK_QUEUE_BUDGET, CHUNK_QUEUE_BACKLOG),
     string.format("Spawn load: %dx%d required, %dx%d halo", LOADING_REQUIRED_RADIUS * 2 + 1, LOADING_REQUIRED_RADIUS * 2 + 1, LOADING_HALO_RADIUS * 2 + 1, LOADING_HALO_RADIUS * 2 + 1),
     string.format("Lighting budget: stream %d, load %d", LIGHTING_STEP_BUDGET, LOADING_LIGHTING_STEP_BUDGET),
-    string.format("Render radius: %d chunks, far %.0f", CHUNK_RENDER_RADIUS, CAMERA_FAR),
-    string.format("Planet visual LOD: %s",world.visualLod:levelForPosition(pos)),
+    string.format("Render radius: %d full / %d square range, far %.0f", world.chunkRadius, state.renderDistance, CAMERA_FAR),
     string.format("Velocity: %s / %s / %s", formatNumber(playerCamera.velocity[1] or 0.0, 2), formatNumber(playerCamera.velocity[2] or 0.0, 2), formatNumber(playerCamera.velocity[3] or 0.0, 2)),
     string.format("Speed: %s m/s", formatNumber(speed, 2)),
     string.format("Mode: %s, flying %s, grounded %s", tostring(state.worldGameMode or "?"), tostring(playerCamera.flying == true), tostring(playerCamera.grounded == true)),
@@ -3092,9 +2273,13 @@ local function createDisplayState()
     f4WasDown = false,
     escapeWasDown = false,
     breakWasDown = false,
+    breakTarget = nil,
+    breakProgress = 0.0,
+    handSwing = 0.0,
     placeWasDown = false,
-    pickWasDown = false,
+    dropWasDown = false,
     menuClickWasDown = false,
+    activeMenuSlider = nil,
     debugScreen = false,
     devMenuOpen = false,
     debugInfo = nil,
@@ -3105,63 +2290,50 @@ local function createDisplayState()
     debugFrameMs = 0.0,
     debugLastFrameMs = 0.0,
     lastQueueStats = nil,
-    screen = game.autoStartWorld and "loading" or "main",
+    screen = "main",
     cursorMode = nil,
     menuMouseX = -1,
     menuMouseY = -1,
     worldGameMode = "survival",
     worldGeneratorType = "default",
+    worldNameText = "New World",
+    worldNamePristine = true,
+    worldSeedText = "",
+    generateStructures = true,
+    allowCheats = false,
+    bonusChest = false,
+    renderDistance = math.max(4, math.min(128, math.floor(tonumber(DISTANT_CHUNK_RADIUS) or 24))),
+    savedWorlds = {},
+    selectedWorldIndex = nil,
+    pendingDeleteWorld = nil,
+    deleteWorldRequested = nil,
+    worldListPage = 1,
+    worldListVersion = 0,
+    createTextKeyWasDown = {},
     hasWorld = false,
     menuParentScreen = nil,
-    musicVolume = 100,
-    soundVolume = 100,
-    invertMouse = false,
-    sensitivity = 100,
-    fovDegrees = graphics.window.fovDegrees or 70,
-    difficulty = "Normal",
-    graphicsMode = "Fancy",
-    renderDistance = CHUNK_RENDER_RADIUS,
-    smoothLighting = true,
-    vsync = VSYNC_ENABLED,
-    anaglyph = false,
-    viewBobbing = true,
-    guiScale = 0,
-    brightness = 100,
-    clouds = true,
-    bloom = POST.bloom ~= false,
-    particles = "All",
-    controlBindings = {
-      attack = "MOUSE1", use = "MOUSE2", pick = "MOUSE3",
-      forward = "W", back = "S", left = "A", right = "D",
-      jump = "SPACE", sneak = "CTRL", inventory = "E", drop = "Q"
-    },
-    stats = {blocksMined = 0, blocksPlaced = 0, distance = 0.0, playTime = 0.0},
-    seedKeyWasDown = {},
     currentWorldSave = nil,
-    -- game.autoStartWorld skips the menus and drops straight into a generated
-    -- world. Nothing but a headless smoke run should set it: it exists so a
-    -- 30 second launch exercises world generation, meshing, the sky and the
-    -- sun pass instead of stopping at the title screen.
-    pendingNewWorldConfig = game.autoStartWorld and {
-      gameMode = "creative",
-      generatorType = "default",
-      seed = tonumber(game.autoStartWorld) or 1,
-      worldName = "Smoke Test",
-      spawnAltitudeMeters = 0.0
-    } or nil,
+    pendingNewWorldConfig = nil,
     loadingJob = nil,
     pendingTerrainEntries = {},
     selectedSlot = 1,
     inventory = Inventory.new("survival"),
     inventoryVersion = 1,
+    inventoryWasDown = false,
+    inventoryClickWasDown = false,
     creativeTab = "building",
-    health = 20,
-    hunger = 20,
-    saturation = 5,
-    exhaustion = 0,
-    armor = 0,
-    handSwing = 0,
-    tutorialTime = 0,
+    creativeFiltered = Inventory.catalog(),
+    hotbarBlocks = {
+      blocks.grass,
+      blocks.dirt,
+      blocks.stone,
+      blocks.sand,
+      blocks.ice,
+      blocks.glass,
+      blocks.oak_planks,
+      blocks.oak_log,
+      blocks.oak_leaves
+    },
     windowX = 100,
     windowY = 100,
     windowW = WINDOW_W,
@@ -3169,7 +2341,7 @@ local function createDisplayState()
   }
 end
 
-local function playerOptionsForGameMode(gameMode, state)
+local function playerOptionsForGameMode(gameMode)
   local options = {}
   for key, value in pairs(graphics.player) do
     options[key] = value
@@ -3184,34 +2356,40 @@ local function playerOptionsForGameMode(gameMode, state)
     options.allowFlight = false
   end
 
-  if state then
-    options.mouseSensitivity = (graphics.player.mouseSensitivity or 0.085) * (state.sensitivity or 100) / 100
-    options.invertMouse = state.invertMouse == true
-    options.controlBindings = state.controlBindings
-  end
-
   return options
 end
 
+local function playerSnapshot(state, playerCamera)
+  return {
+    camera = playerCamera:saveState(),
+    inventory = state.inventory:saveState()
+  }
+end
 
--- Frame capture for the headless smoke run. A rendering change cannot honestly
--- be called an improvement without looking at it, and the game window is not
--- reachable from a script, so the back buffer is written out as a binary PPM
--- just before it would be swapped. PPM because it needs no encoder: a nine
--- byte header and rows of RGB.
-function game.captureFrame(path, width, height)
-  local pixels = ffi.new("unsigned char[?]", width * height * 3)
-  gl.glPixelStorei(0x0D05, 1) -- GL_PACK_ALIGNMENT
-  gl.glReadPixels(0, 0, width, height, 0x1907, 0x1401, pixels) -- GL_RGB, GL_UNSIGNED_BYTE
-  local file = io.open(path, "wb")
-  if not file then return false end
-  file:write(string.format("P6\n%d %d\n255\n", width, height))
-  -- OpenGL hands back the bottom row first; PPM wants the top row first.
-  local stride = width * 3
-  for row = height - 1, 0, -1 do
-    file:write(ffi.string(pixels + row * stride, stride))
+local function saveCurrentPlayer(state, playerCamera)
+  if not state or not playerCamera or not state.inventory or
+      not state.currentWorldSave or not state.currentWorldSave.path then
+    return false
   end
-  file:close()
+
+  local ok, err = pcall(saves.savePlayer, state.currentWorldSave, playerSnapshot(state, playerCamera))
+  if not ok then
+    io.stderr:write("Unable to save player data: " .. tostring(err) .. "\n")
+  end
+  return ok
+end
+
+local function restorePlayer(state, playerCamera, savedPlayer)
+  if type(savedPlayer) ~= "table" then return false end
+
+  if type(savedPlayer.camera) == "table" then
+    playerCamera:restoreState(savedPlayer.camera)
+  end
+  if type(savedPlayer.inventory) == "table" then
+    state.inventory:restoreState(savedPlayer.inventory)
+  end
+
+  state.selectedSlot = state.inventory:normalizeSelected()
   return true
 end
 
@@ -3259,31 +2437,12 @@ local function setFullscreen(window, state, enabled, locP)
   updateViewportAndProjection(locP)
 end
 
-local function applyMenuRuntimeState(window, state, playerCamera, world)
-  CAMERA_FOV = math.rad(state.fovDegrees or graphics.window.fovDegrees or 70)
-  CHUNK_RENDER_RADIUS = state.renderDistance or graphics.world.chunkRenderRadius or 8
-  VSYNC_ENABLED = state.vsync ~= false
-  glfw.glfwSwapInterval(VSYNC_ENABLED and 1 or 0)
-  hud.setGuiScale(state.guiScale)
-  POST.exposure = BASE_POST_EXPOSURE * (state.brightness or 100) / 100
-  POST.anaglyph = state.anaglyph == true
-
-  if world then
-    world.chunkRadius = graphics.world.chunkLoadRadius
-    world.chunkRadiusVertical = graphics.world.chunkLoadRadiusVertical
-  end
-  if playerCamera then
-    playerCamera.mouseSensitivity = (graphics.player.mouseSensitivity or 0.085) * (state.sensitivity or 100) / 100
-    playerCamera.invertMouse = state.invertMouse == true
-    playerCamera.controlBindings = state.controlBindings or playerCamera.controlBindings
-  end
-end
-
-local function handleUiCommand(window, command, playerCamera, state, world, locP)
+local function handleUiCommand(window, command, playerCamera, state)
   if command == "quit_game" then
     glfw.glfwSetWindowShouldClose(window, 1)
-  elseif command == "toggle_fullscreen" then
-    setFullscreen(window, state, not state.fullscreen, locP)
+  elseif command == "quit_to_title" then
+    saveCurrentPlayer(state, playerCamera)
+    state.currentWorldSave = nil
   elseif command == "started_world" or command == "resume" then
     if playerCamera then
       playerCamera.firstMouse = true
@@ -3291,34 +2450,90 @@ local function handleUiCommand(window, command, playerCamera, state, world, locP
   end
 end
 
-local function updateSeedTextInput(window, state)
-  if state.screen ~= "create_world" or not state.moreWorldOptions then
-    state.seedKeyWasDown = {}
+local function updateWorldCreationTextInput(window, state)
+  if state.screen ~= "create_world" then
+    state.createTextKeyWasDown = {}
     return
   end
 
-  local previous = state.seedKeyWasDown or {}
+  local previous = state.createTextKeyWasDown or {}
   local current = {}
-  local text = state.worldSeedText or ""
-  for digit = 0, 9 do
-    local key = 48 + digit
+  local editingSeed = state.moreWorldOptions == true
+  local text = editingSeed and (state.worldSeedText or "") or (state.worldNameText or "New World")
+  local limit = editingSeed and 19 or 32
+
+  local function appendKey(key, character)
     local down = glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
     current[key] = down
-    if down and not previous[key] and #text < 19 then
-      text = text .. tostring(digit)
+    if down and not previous[key] and #text < limit then
+      if not editingSeed and state.worldNamePristine then
+        text = ""
+        state.worldNamePristine = false
+      end
+      text = text .. character
     end
   end
 
-  local minusDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_MINUS) == glfw.GLFW_PRESS
-  current.minus = minusDown
-  if minusDown and not previous.minus and text == "" then text = "-" end
+  if editingSeed then
+    for digit = 0, 9 do appendKey(48 + digit, tostring(digit)) end
+    local minusDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_MINUS) == glfw.GLFW_PRESS
+    current.minus = minusDown
+    if minusDown and not previous.minus and text == "" then text = "-" end
+  else
+    local shift = glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_SHIFT) == glfw.GLFW_PRESS or
+      glfw.glfwGetKey(window, 344) == glfw.GLFW_PRESS
+    for code = 65, 90 do appendKey(code, string.char(shift and code or (code + 32))) end
+    for digit = 0, 9 do appendKey(48 + digit, tostring(digit)) end
+    appendKey(glfw.GLFW_KEY_SPACE, " ")
+    appendKey(glfw.GLFW_KEY_MINUS, shift and "_" or "-")
+  end
 
   local backspaceDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_BACKSPACE) == glfw.GLFW_PRESS
   current.backspace = backspaceDown
-  if backspaceDown and not previous.backspace then text = text:sub(1, -2) end
+  if backspaceDown and not previous.backspace then
+    if not editingSeed and state.worldNamePristine then
+      text = ""
+      state.worldNamePristine = false
+    else
+      text = text:sub(1, -2)
+    end
+  end
 
-  state.worldSeedText = text
-  state.seedKeyWasDown = current
+  if editingSeed then state.worldSeedText = text else state.worldNameText = text end
+  state.createTextKeyWasDown = current
+end
+
+function game.refreshSavedWorldList(state)
+  local selected = state.savedWorlds and state.savedWorlds[state.selectedWorldIndex or 0]
+  local selectedPath = selected and selected.path
+  state.savedWorlds = saves.listWorlds()
+  state.selectedWorldIndex = #state.savedWorlds > 0 and 1 or nil
+  if selectedPath then
+    for index, entry in ipairs(state.savedWorlds) do
+      if entry.path == selectedPath then state.selectedWorldIndex = index break end
+    end
+  end
+  state.worldListPage = 1
+  state.worldListVersion = (state.worldListVersion or 0) + 1
+  state.refreshWorldListRequested = false
+end
+
+local function closeInventory(state, playerCamera)
+  if state.inventory.cursor then
+    if state.screen ~= "creative_inventory" then
+      state.inventory:add(state.inventory.cursor.item, state.inventory.cursor.count)
+    end
+    state.inventory.cursor = nil
+  end
+  state.inventory:returnCraftingItems()
+  state.inventory:setCraftingGridSize(2)
+  state.inventoryLeftDrag = nil
+  state.inventoryRightDragSeen = nil
+  state.inventoryClickWasDown = false
+  state.inventoryRightWasDown = false
+  state.screen = nil
+  state.inventoryVersion = (state.inventoryVersion or 0) + 1
+  if playerCamera then playerCamera.firstMouse = true end
 end
 
 local function updateFullscreenInput(window, state, locP, playerCamera, devMenu)
@@ -3337,11 +2552,10 @@ local function updateFullscreenInput(window, state, locP, playerCamera, devMenu)
     if playerCamera then playerCamera.firstMouse = true end
   elseif escapeDown and not state.escapeWasDown then
     local wasScreen = state.screen
-    uiFlow.back(state)
-    if (wasScreen=="inventory" or wasScreen=="creative_inventory") and not state.screen and state.inventory.cursor then
-      state.inventory:add(state.inventory.cursor.item,state.inventory.cursor.count)
-      state.inventory.cursor=nil
-      state.inventoryVersion=state.inventoryVersion+1
+    if wasScreen == "inventory" or wasScreen == "creative_inventory" or wasScreen == "crafting_table" then
+      closeInventory(state, playerCamera)
+    else
+      uiFlow.back(state)
     end
     if wasScreen and not state.screen and playerCamera then
       playerCamera.firstMouse = true
@@ -3373,123 +2587,120 @@ end
 
 local function refreshCreativeFilter(state)
   local query = (state.inventory.search or ""):lower()
-  local tab = state.creativeTab or "building"
   local filtered = {}
   for _, item in ipairs(Inventory.catalog()) do
     local definition = blocks.mapping[item]
-    local label = ((definition and definition.name) or item):lower()
-    local properties = definition and definition.properties or {}
-    local categoryMatch = false
-    if tab == "search" then
-      categoryMatch = true
-    elseif tab == "nature" then
-      categoryMatch = properties.leaves or properties.cutout or item == "grass" or item == "dirt" or
-        item == "sand" or item == "red_sand" or item == "clay" or item == "snow" or
-        item == "ice" or item == "packed_ice"
-    elseif tab == "materials" then
-      categoryMatch = item:find("_ore",1,true) ~= nil or item:find("_log",1,true) ~= nil or
-        item == "clay" or item == "gravel" or item == "sand"
-    elseif tab == "redstone" then
-      categoryMatch = item:find("redstone",1,true) ~= nil or item == "crafting_table"
-    else
-      categoryMatch = properties.solid and not properties.leaves and not properties.cutout
-    end
-    local searchMatch = tab ~= "search" or query == "" or item:find(query, 1, true) or label:find(query, 1, true)
-    if categoryMatch and searchMatch then
+    local label = definition and definition.name and definition.name:lower() or item
+    if query == "" or item:find(query, 1, true) or label:find(query, 1, true) then
       filtered[#filtered + 1] = item
     end
   end
   state.creativeFiltered = filtered
 end
 
-local function closeInventory(state, playerCamera)
-  if state.inventory.cursor then
-    -- Creative catalog stacks are virtual. Closing the menu discards the
-    -- cursor copy instead of duplicating it into the survival inventory.
-    if state.screen ~= "creative_inventory" then
-      state.inventory:add(state.inventory.cursor.item, state.inventory.cursor.count)
-    end
-    state.inventory.cursor = nil
-  end
-  state.screen = nil
-  state.inventoryVersion = state.inventoryVersion + 1
-  if playerCamera then playerCamera.firstMouse = true end
-end
-
 local function updateInventoryInput(window, state, playerCamera)
   if not state.hasWorld or state.devMenuOpen then return end
-  local inventoryDown = playerCamera:controlDown(window, "inventory", "E")
+
+  local inventoryDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_E) == glfw.GLFW_PRESS
   if inventoryDown and not state.inventoryWasDown then
-    if state.screen == "inventory" or state.screen == "creative_inventory" then
+    if state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" then
       closeInventory(state, playerCamera)
     elseif not state.screen then
+      state.inventory:setCraftingGridSize(2)
       state.screen = state.worldGameMode == "creative" and "creative_inventory" or "inventory"
       refreshCreativeFilter(state)
     end
   end
   state.inventoryWasDown = inventoryDown
 
-  if state.screen ~= "inventory" and state.screen ~= "creative_inventory" then return end
-  local xpos,ypos=ffi.new("double[1]"),ffi.new("double[1]")
-  local clientWidth,clientHeight=ffi.new("int[1]"),ffi.new("int[1]")
-  glfw.glfwGetCursorPos(window,xpos,ypos)
-  glfw.glfwGetWindowSize(window,clientWidth,clientHeight)
-  state.menuMouseX=tonumber(xpos[0])*windowWidth/math.max(1,tonumber(clientWidth[0]))
-  state.menuMouseY=tonumber(ypos[0])*windowHeight/math.max(1,tonumber(clientHeight[0]))
-
-  if state.screen == "creative_inventory" and state.creativeTab == "search" then
-    state.inventoryTextWasDown = state.inventoryTextWasDown or {}
-    local current = {}
-    for code=65,90 do
-      local down=glfw.glfwGetKey(window,code)==glfw.GLFW_PRESS
-      current[code]=down
-      if down and not state.inventoryTextWasDown[code] and #(state.inventory.search or "")<24 then
-        state.inventory.search=(state.inventory.search or "")..string.char(code+32)
-        refreshCreativeFilter(state)
-      end
-    end
-    local back=glfw.glfwGetKey(window,glfw.GLFW_KEY_BACKSPACE)==glfw.GLFW_PRESS
-    current.back=back
-    if back and not state.inventoryTextWasDown.back then
-      state.inventory.search=(state.inventory.search or ""):sub(1,-2)
-      refreshCreativeFilter(state)
-    end
-    state.inventoryTextWasDown=current
+  if state.screen ~= "inventory" and state.screen ~= "creative_inventory" and state.screen ~= "crafting_table" then
+    return
   end
 
-  local click=glfw.glfwGetMouseButton(window,glfw.GLFW_MOUSE_BUTTON_LEFT)==glfw.GLFW_PRESS
-  if click and not state.inventoryClickWasDown then
-    local target=hud.inventorySlotAt(state.screen,windowWidth,windowHeight,state.menuMouseX,state.menuMouseY,state)
-    if target then
-      if target.kind=="slot" then state.inventory:swapOrMerge(target.index)
-      elseif target.kind=="craft" then state.inventory:swapCraft(target.index)
-      elseif target.kind=="result" then state.inventory:takeCraftResult()
-      elseif target.kind=="creative_tab" then
-        state.creativeTab=target.tab
-        refreshCreativeFilter(state)
-      elseif target.kind=="creative" and target.item then
-        -- Match the native creative workflow: selecting a catalog entry picks
-        -- up a full stack, which can then be placed into any hotbar slot.
-        state.inventory.cursor={item=target.item,count=64}
+  local xpos, ypos = ffi.new("double[1]"), ffi.new("double[1]")
+  local clientWidth, clientHeight = ffi.new("int[1]"), ffi.new("int[1]")
+  glfw.glfwGetCursorPos(window, xpos, ypos)
+  glfw.glfwGetWindowSize(window, clientWidth, clientHeight)
+  state.menuMouseX = tonumber(xpos[0]) * windowWidth / math.max(1, tonumber(clientWidth[0]))
+  state.menuMouseY = tonumber(ypos[0]) * windowHeight / math.max(1, tonumber(clientHeight[0]))
+
+  local target = hud.inventorySlotAt(
+    state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state
+  )
+  local leftDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+  local rightDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_RIGHT) == glfw.GLFW_PRESS
+  local shiftDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_SHIFT) == glfw.GLFW_PRESS or
+    glfw.glfwGetKey(window, 344) == glfw.GLFW_PRESS
+
+  if leftDown then
+    if not state.inventoryClickWasDown then
+      if target and target.kind == "craft" and state.inventory.cursor and not shiftDown then
+        state.inventoryLeftDrag = {indices = {target.index}, seen = {[target.index] = true}}
+      elseif target then
+        if target.kind == "slot" then
+          state.inventory:swapOrMerge(target.index)
+        elseif target.kind == "craft" then
+          state.inventory:swapCraft(target.index)
+        elseif target.kind == "result" then
+          if shiftDown then state.inventory:craftAll() else state.inventory:takeCraftResult() end
+        elseif target.kind == "creative_tab" then
+          state.creativeTab = target.tab
+          refreshCreativeFilter(state)
+        elseif target.kind == "creative" and target.item then
+          state.inventory.cursor = {item = target.item, count = 64}
+        end
+        state.inventoryVersion = state.inventoryVersion + 1
       end
-      state.inventoryVersion=state.inventoryVersion+1
+    elseif state.inventoryLeftDrag and target and target.kind == "craft" and not state.inventoryLeftDrag.seen[target.index] then
+      state.inventoryLeftDrag.seen[target.index] = true
+      state.inventoryLeftDrag.indices[#state.inventoryLeftDrag.indices + 1] = target.index
     end
+  elseif state.inventoryLeftDrag then
+    local indices = state.inventoryLeftDrag.indices
+    if #indices > 1 then
+      state.inventory:distributeCraft(indices)
+    else
+      state.inventory:swapCraft(indices[1])
+    end
+    state.inventoryLeftDrag = nil
+    state.inventoryVersion = state.inventoryVersion + 1
   end
-  state.inventoryClickWasDown=click
+  state.inventoryClickWasDown = leftDown
+
+  if rightDown and not leftDown then
+    if not state.inventoryRightWasDown or not state.inventoryRightDragSeen then
+      state.inventoryRightDragSeen = {}
+    end
+    if target and target.kind == "craft" and state.inventory.cursor and
+        not state.inventoryRightDragSeen[target.index] then
+      state.inventoryRightDragSeen[target.index] = true
+      if state.inventory:placeCraftOne(target.index) then
+        state.inventoryVersion = state.inventoryVersion + 1
+      end
+    end
+  else
+    state.inventoryRightDragSeen = nil
+  end
+  state.inventoryRightWasDown = rightDown
 end
 
-local function updateMenuInput(window, state, playerCamera, world, locP)
+local function updateMenuInput(window, state, playerCamera)
   if state.devMenuOpen then
     state.menuClickWasDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+    state.activeMenuSlider = nil
     return
   end
   if not state.screen then
     state.menuClickWasDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+    state.activeMenuSlider = nil
     return
   end
-  if state.screen == "inventory" or state.screen == "creative_inventory" then return end
+  if state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" then
+    return
+  end
 
-  updateSeedTextInput(window, state)
+  if state.refreshWorldListRequested then game.refreshSavedWorldList(state) end
+  updateWorldCreationTextInput(window, state)
 
   local xpos = ffi.new("double[1]")
   local ypos = ffi.new("double[1]")
@@ -3501,20 +2712,43 @@ local function updateMenuInput(window, state, playerCamera, world, locP)
   state.menuMouseY = tonumber(ypos[0]) * windowHeight / math.max(1, tonumber(clientHeight[0]))
 
   local clickDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
-  if clickDown and not state.menuClickWasDown then
-    local action = hud.menuButtonAt(state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
-    local command = uiFlow.applyAction(state, action)
-    applyMenuRuntimeState(window, state, playerCamera, world)
-    handleUiCommand(window, command, playerCamera, state, world, locP)
+  if clickDown then
+    local slider, value = hud.menuSliderValueAt(
+      state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY,
+      state, state.activeMenuSlider
+    )
+    if slider then
+      state.activeMenuSlider = slider
+      uiFlow.applySlider(state, slider, value)
+    elseif not state.menuClickWasDown then
+      local action = hud.menuButtonAt(state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
+      local command = uiFlow.applyAction(state, action)
+      if state.deleteWorldRequested then
+        local worldToDelete = state.deleteWorldRequested
+        state.deleteWorldRequested = nil
+        local deleted, deleteError = saves.deleteWorld(worldToDelete)
+        if deleted then
+          state.statusMessage = "Deleted " .. tostring(worldToDelete.worldName or worldToDelete.folderName)
+        else
+          state.statusMessage = "Could not delete world: " .. tostring(deleteError or "unknown error")
+        end
+        state.refreshWorldListRequested = true
+      end
+      if state.refreshWorldListRequested then game.refreshSavedWorldList(state) end
+      handleUiCommand(window, command, playerCamera, state)
+    end
+  else
+    state.activeMenuSlider = nil
   end
 
   state.menuClickWasDown = clickDown
 end
 
-local function updateBlockEditInput(window, state, world, pendingEntries, playerCamera, dt)
-  local breakDown = playerCamera:controlDown(window, "attack", "MOUSE1")
-  local placeDown = playerCamera:controlDown(window, "use", "MOUSE2")
-  local pickDown = playerCamera:controlDown(window, "pick", "MOUSE3")
+local function updateBlockEditInput(window, state, world, pendingEntries, playerCamera, droppedItems, fallingTrees, dt)
+  local Mining=require("mining")
+  local FallingTrees=require("falling_trees")
+  local breakDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+  local placeDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_RIGHT) == glfw.GLFW_PRESS
 
   local slotKeys = {
     glfw.GLFW_KEY_1,
@@ -3538,100 +2772,74 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
   if breakDown then
     local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
     if hit then
-      local hitDefinition = blocks.list[hit.id]
-      local key=hit.x..","..hit.y..","..hit.z
-      if state.breakTarget~=key then state.breakTarget=key state.breakProgress=0 end
-      local name=hitDefinition and hitDefinition.key or ""
-      local breakTime=0.35
-      if name:find("stone") or name:find("ore") or name=="cobblestone" then breakTime=0.95
-      elseif name:find("log") or name:find("planks") or name=="crafting_table" then breakTime=0.58
-      elseif name:find("leaves") or name:find("grass") then breakTime=0.16 end
-      state.breakProgress=(state.breakProgress or 0)+(dt or 0)
-      local ready=state.worldGameMode=="creative" and not state.breakWasDown or state.breakProgress>=breakTime
-      if ready then
-        local changed = worldInteraction.breakBlock(world, hit.x, hit.y, hit.z)
-        rebuildBlockChunkMeshes(world,pendingEntries,hit.x,hit.y,hit.z)
-        if #changed > 0 then
-          state.stats.blocksMined = state.stats.blocksMined + 1
-          if state.worldGameMode ~= "creative" and hitDefinition and hitDefinition.key then
-            local properties = hitDefinition.properties or {}
-            state.inventory:add(properties.drop or hitDefinition.key, 1)
-            state.inventoryVersion = state.inventoryVersion + 1
-          end
-        end
-        state.breakProgress,state.breakTarget=0,nil
+      local definition = blocks.list[hit.id]
+      local targetKey=hit.x..":"..hit.y..":"..hit.z
+      if state.breakTarget~=targetKey then
+        state.breakTarget=targetKey
+        state.breakProgress=0
       end
-      if state.handSwing==0 then state.handSwing=0.01 end
+      local held=state.inventory.slots[state.selectedSlot]
+      local duration=Mining.breakDuration(definition,held and held.item,state.worldGameMode)
+      state.breakProgress=state.breakProgress+math.max(0,dt or 0)
+      state.handSwing=duration>0 and math.min(1,state.breakProgress/duration) or 1
+      if state.breakProgress>=duration and (state.worldGameMode~="creative" or not state.breakWasDown) then
+        local tree,changed
+        local canHarvest=state.worldGameMode=="creative" or Mining.canHarvest(definition,held and held.item)
+        if FallingTrees.isLog(definition) and canHarvest then tree,changed=fallingTrees:start(world,hit.x,hit.y,hit.z,playerCamera:getFront()) end
+        if not tree then changed=worldInteraction.breakBlock(world, hit.x, hit.y, hit.z) end
+        rebuildChangedBlockMeshes(world,pendingEntries,changed)
+        if #changed > 0 and not tree and state.worldGameMode ~= "creative" and definition and Mining.canHarvest(definition,held and held.item) then
+          local properties = definition.properties or {}
+          droppedItems:spawn(properties.drop or definition.key, 1,
+            {hit.x + 0.5, hit.y + 0.55, hit.z + 0.5},
+            {(math.random() - 0.5) * 1.4, 2.2, (math.random() - 0.5) * 1.4}, 0.35)
+        end
+        state.breakTarget=nil
+        state.breakProgress=0
+        state.handSwing=0
+      end
+    else
+      state.breakTarget=nil state.breakProgress=0 state.handSwing=0
     end
   else
-    state.breakProgress,state.breakTarget=0,nil
+    state.breakTarget=nil state.breakProgress=0 state.handSwing=0
   end
 
   if placeDown and not state.placeWasDown then
     local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
-    local stack = state.inventory.slots[state.selectedSlot]
-    local blockId = state.inventory:blockIdFor(stack)
-    local target = worldInteraction.placeFromHit(world, hit, blockId)
-    if target then
-      rebuildBlockChunkMeshes(world,pendingEntries,target.x,target.y,target.z)
-      state.stats.blocksPlaced = state.stats.blocksPlaced + 1
-      state.inventory:consumeSelected(1)
+    if hit and hit.id == blocks.crafting_table then
+      state.inventory:setCraftingGridSize(3)
+      state.screen = "crafting_table"
       state.inventoryVersion = state.inventoryVersion + 1
-      state.handSwing = 0.01
+    else
+      local stack = state.inventory.slots[state.selectedSlot]
+      local blockId = state.inventory:blockIdFor(stack)
+      local target = worldInteraction.placeFromHit(world, hit, blockId)
+      if target then
+        rebuildBlockChunkMeshes(world, pendingEntries, target.x, target.z)
+        state.inventory:consumeSelected(1)
+        state.inventoryVersion = state.inventoryVersion + 1
+      end
     end
   end
 
-  if pickDown and not state.pickWasDown then
-    local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
-    if hit then
-      local definition = blocks.list[hit.id]
-      local found = definition and state.inventory:pickBlock(definition.key)
-      if found and found <= 9 then state.selectedSlot = found end
+  local dropDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_Q) == glfw.GLFW_PRESS
+  if dropDown and not state.dropWasDown and state.worldGameMode ~= "creative" then
+    local removed = state.inventory:removeAt(state.selectedSlot, 1)
+    if removed then
+      local front = playerCamera:getFront()
+      droppedItems:spawn(removed.item, removed.count, {
+        playerCamera.position[1] + front[1] * 0.8,
+        playerCamera.position[2] - 0.25,
+        playerCamera.position[3] + front[3] * 0.8
+      }, {front[1] * 4.0, front[2] * 4.0 + 2.0, front[3] * 4.0}, 1.0)
       state.inventoryVersion = state.inventoryVersion + 1
-    end
-  end
-
-  local dropDown = playerCamera:controlDown(window, "drop", "Q")
-  if dropDown and not state.dropWasDown then
-    if state.inventory:removeAt(state.selectedSlot, 1) then
-      state.inventoryVersion = state.inventoryVersion + 1
-      state.handSwing = 0.01
     end
   end
 
   state.breakWasDown = breakDown
   state.placeWasDown = placeDown
-  state.pickWasDown = pickDown
   state.dropWasDown = dropDown
-end
-
-local function updateSurvival(state, playerCamera, world, dt, travelled, landedVelocity)
-  if state.worldGameMode == "creative" then
-    state.health, state.hunger = 20, 20
-    return
-  end
-  state.exhaustion = (state.exhaustion or 0) + (travelled or 0) * 0.12
-  while state.exhaustion >= 4 do
-    state.exhaustion = state.exhaustion - 4
-    if state.saturation > 0 then state.saturation = math.max(0,state.saturation-1)
-    else state.hunger = math.max(0,state.hunger-1) end
-  end
-  if landedVelocity and landedVelocity < -11 then
-    state.health = math.max(0,state.health-math.max(1,math.floor((-landedVelocity-10)*0.8)))
-  end
-  state.survivalTimer = (state.survivalTimer or 0) + dt
-  if state.hunger >= 18 and state.health < 20 and state.survivalTimer >= 4 then
-    state.health = math.min(20,state.health+1) state.exhaustion=state.exhaustion+1 state.survivalTimer=0
-  elseif state.hunger <= 0 and state.survivalTimer >= 4 and state.difficulty ~= "Peaceful" then
-    state.health = math.max(0,state.health-1) state.survivalTimer=0
-  elseif state.difficulty == "Peaceful" then
-    state.hunger=20
-    if state.survivalTimer>=1 and state.health<20 then state.health=math.min(20,state.health+1) state.survivalTimer=0 end
-  end
-  if state.health <= 0 then
-    playerCamera:placeAtSpawn(world,playerCamera.position[1],playerCamera.position[3])
-    state.health,state.hunger,state.saturation,state.exhaustion=20,20,5,0
-  end
 end
 
 local function initWindow()
@@ -3678,28 +2886,22 @@ function game.run()
     local moonTexture = createImageTexture("assets/textures/environment/moon_phases.png", true)
     local underwaterOverlayTexture = createImageTexture("assets/textures/blocks/water_overlay.png", false, true)
     local world = World.new({
-      chunkRadius = graphics.world.chunkLoadRadius,
-      chunkRadiusVertical = graphics.world.chunkLoadRadiusVertical,
+      chunkRadius = CHUNK_RENDER_RADIUS,
       maxHeight = TERRAIN_MAX_H,
       generatorType = "default",
       seed = graphics.terrainGeneration.seed or 1,
-      planet = graphics.planet,
       deferInitialChunks = true
     })
     local terrainMeshes = {}
-    local farWaterMeshes = {}
-    local farWaterState = {queue = {}, queueIndex = 1}
-    local currentWaterLevel = nil
+    local droppedItems = DroppedItems.new()
+    local droppedItemMeshes = {}
+    local fallingTrees = require("falling_trees").new()
+    local fallingTreeMeshes = {}
+    local distantTerrain = createDistantTerrain()
+    local currentWaterLevel = WATER_LEVEL
     local characterMesh = graphics.player.showDebugBody and createCharacterMesh() or nil
-    local characterSkinTexture = characterMesh and createImageTexture(graphics.player.skinPath or character.DEFAULT_SKIN, true) or nil
     local skyMesh = uploadSkyMesh()
-    local sunMesh = sunPass.uploadMesh()
-    local smokeFrames, smokeElapsed, smokeTotal = 0, 0.0, 0.0
-    local gridWorld, gridRuntime = nil, nil
-    if game.openDevMenu then devMenu:openNavigation() end
     local cloudMesh = createCloudMesh("assets/textures/environment/clouds.png")
-    local orbitalPlanetMesh = nil
-    local orbitalCloudMesh = nil
     local shadowMap = effects.createShadowMap(SHADOW_MAP_SIZE)
     local sceneTarget = effects.createSceneTarget(windowWidth, windowHeight)
     local waterBackgroundTarget = effects.createSceneTarget(windowWidth, windowHeight)
@@ -3708,18 +2910,14 @@ function game.run()
 
     local shader = createShaderProgram()
     local shadowShader = effects.createShadowShader()
-    local iceShader = effects.createIceShader()
     local skyShader = createSkyShaderProgram()
-    local sunShader = sunPass.createShader()
     local cloudShader = createCloudShaderProgram()
-    local orbitalPlanetShader = createOrbitalPlanetShader()
-    local orbitalCloudShader = createOrbitalCloudShader()
+    local dielectricShader = effects.createDielectricShader()
     local waterShader = effects.createWaterShader()
-    local planetWaterShader=createPlanetWaterShader()
     local atmospherePostShader = effects.createAtmospherePostShader()
     local volumetricFogShaders = effects.createVolumetricFogShaders(FOG_GRID_WIDTH, FOG_GRID_HEIGHT, FOG_GRID_DEPTH)
     local worldgenPreviewShader = createWorldgenPreviewShader()
-    local hudOverlay = hud.create(graphics.player.skinPath)
+    local hudOverlay = hud.create()
     gl.glUseProgram(shader)
 
     local locP = gl.glGetUniformLocation(shader, "uProjection")
@@ -3729,8 +2927,6 @@ function game.run()
     local locViewPos = gl.glGetUniformLocation(shader, "viewPos")
     local locTex = gl.glGetUniformLocation(shader, "tex0")
     local locTime = gl.glGetUniformLocation(shader, "time")
-    local locFoliageParams = gl.glGetUniformLocation(shader, "foliageParams")
-    local locPlanetUp=gl.glGetUniformLocation(shader,"planetUp")
 
     local locShadowMap = gl.glGetUniformLocation(shader, "shadowMap")
     local locAmbientColor = gl.glGetUniformLocation(shader, "ambientColor")
@@ -3740,8 +2936,6 @@ function game.run()
     local locFaceLight = gl.glGetUniformLocation(shader, "faceLight")
     local locExposure = gl.glGetUniformLocation(shader, "exposure")
     local locShadowStrength = gl.glGetUniformLocation(shader, "shadowStrength")
-    local locUseVoxelLight = gl.glGetUniformLocation(shader, "useVoxelLight")
-    local locSmoothLighting = gl.glGetUniformLocation(shader, "smoothLighting")
     local locLightSpaceMatrix = gl.glGetUniformLocation(shader, "lightSpaceMatrix")
     local locTerrainWaterLevel = gl.glGetUniformLocation(shader, "waterLevel")
     local locTerrainWaterNormalMap = gl.glGetUniformLocation(shader, "waterNormalMap")
@@ -3751,27 +2945,7 @@ function game.run()
     local shadowLocations = {
       model = gl.glGetUniformLocation(shadowShader, "uModel"),
       lightSpaceMatrix = gl.glGetUniformLocation(shadowShader, "lightSpaceMatrix"),
-      tex0 = gl.glGetUniformLocation(shadowShader, "tex0"),
-      viewPos = gl.glGetUniformLocation(shadowShader, "viewPos"),
-      time = gl.glGetUniformLocation(shadowShader, "time"),
-      foliageParams = gl.glGetUniformLocation(shadowShader, "foliageParams")
-    }
-    local iceLocations = {
-      projection = gl.glGetUniformLocation(iceShader, "uProjection"),
-      view = gl.glGetUniformLocation(iceShader, "uView"),
-      model = gl.glGetUniformLocation(iceShader, "uModel"),
-      viewPos = gl.glGetUniformLocation(iceShader, "viewPos"),
-      sunDir = gl.glGetUniformLocation(iceShader, "sunDir"),
-      fogColor = gl.glGetUniformLocation(iceShader, "fogColor"),
-      skyZenithColor = gl.glGetUniformLocation(iceShader, "skyZenithColor"),
-      lightColor = gl.glGetUniformLocation(iceShader, "lightColor"),
-      viewportSize = gl.glGetUniformLocation(iceShader, "viewportSize"),
-      clipPlanes = gl.glGetUniformLocation(iceShader, "clipPlanes"),
-      absorption = gl.glGetUniformLocation(iceShader, "absorption"),
-      iceParams = gl.glGetUniformLocation(iceShader, "iceParams"),
-      tex0 = gl.glGetUniformLocation(iceShader, "tex0"),
-      sceneColor = gl.glGetUniformLocation(iceShader, "sceneColor"),
-      sceneDepth = gl.glGetUniformLocation(iceShader, "sceneDepth")
+      tex0 = gl.glGetUniformLocation(shadowShader, "tex0")
     }
     local skyLocations = {
       sunDir = gl.glGetUniformLocation(skyShader, "sunDir"),
@@ -3785,19 +2959,7 @@ function game.run()
       skyParams = gl.glGetUniformLocation(skyShader, "skyParams"),
       fogColor = gl.glGetUniformLocation(skyShader, "fogColor"),
       moonTex = gl.glGetUniformLocation(skyShader, "moonTex"),
-      sunDisc = gl.glGetUniformLocation(skyShader, "sunDisc"),
-      planetUp = gl.glGetUniformLocation(skyShader, "planetUp"),
-      observerAltitude = gl.glGetUniformLocation(skyShader, "observerAltitude"),
-      cloudParams = gl.glGetUniformLocation(skyShader, "cloudParams"),
-      skyRotation = gl.glGetUniformLocation(skyShader, "skyRotation")
-    }
-    local sunLocations = {
-      projection = gl.glGetUniformLocation(sunShader, "uProjection"),
-      view = gl.glGetUniformLocation(sunShader, "uView"),
-      center = gl.glGetUniformLocation(sunShader, "sunCenter"),
-      radius = gl.glGetUniformLocation(sunShader, "sunRadius"),
-      viewPos = gl.glGetUniformLocation(sunShader, "viewPos"),
-      radiance = gl.glGetUniformLocation(sunShader, "sunRadiance")
+      sunDisc = gl.glGetUniformLocation(skyShader, "sunDisc")
     }
     local cloudLocations = {
       projection = gl.glGetUniformLocation(cloudShader, "uProjection"),
@@ -3806,21 +2968,24 @@ function game.run()
       alpha = gl.glGetUniformLocation(cloudShader, "cloudAlpha"),
       tint = gl.glGetUniformLocation(cloudShader, "cloudTint")
     }
-    local orbitalPlanetLocations = {
-      projection = gl.glGetUniformLocation(orbitalPlanetShader, "uProjection"),
-      view = gl.glGetUniformLocation(orbitalPlanetShader, "uView"),
-      offset = gl.glGetUniformLocation(orbitalPlanetShader, "planetOffset"),
-      sunDir = gl.glGetUniformLocation(orbitalPlanetShader, "sunDir"),
-      viewPos = gl.glGetUniformLocation(orbitalPlanetShader, "viewPos"),
-      limbStrength = gl.glGetUniformLocation(orbitalPlanetShader, "limbStrength")
-    }
-    local orbitalCloudLocations = {
-      projection = gl.glGetUniformLocation(orbitalCloudShader, "uProjection"),
-      view = gl.glGetUniformLocation(orbitalCloudShader, "uView"),
-      offset = gl.glGetUniformLocation(orbitalCloudShader, "planetOffset"),
-      sunDir = gl.glGetUniformLocation(orbitalCloudShader, "sunDir"),
-      viewPos = gl.glGetUniformLocation(orbitalCloudShader, "viewPos"),
-      time = gl.glGetUniformLocation(orbitalCloudShader, "time")
+    local dielectricLocations = {
+      projection = gl.glGetUniformLocation(dielectricShader, "uProjection"),
+      view = gl.glGetUniformLocation(dielectricShader, "uView"),
+      model = gl.glGetUniformLocation(dielectricShader, "uModel"),
+      viewPos = gl.glGetUniformLocation(dielectricShader, "viewPos"),
+      sunDir = gl.glGetUniformLocation(dielectricShader, "sunDir"),
+      fogColor = gl.glGetUniformLocation(dielectricShader, "fogColor"),
+      skyZenithColor = gl.glGetUniformLocation(dielectricShader, "skyZenithColor"),
+      lightColor = gl.glGetUniformLocation(dielectricShader, "lightColor"),
+      viewportSize = gl.glGetUniformLocation(dielectricShader, "viewportSize"),
+      clipPlanes = gl.glGetUniformLocation(dielectricShader, "clipPlanes"),
+      iceOptics = gl.glGetUniformLocation(dielectricShader, "iceOptics"),
+      glassOptics = gl.glGetUniformLocation(dielectricShader, "glassOptics"),
+      iceAbsorption = gl.glGetUniformLocation(dielectricShader, "iceAbsorption"),
+      glassAbsorption = gl.glGetUniformLocation(dielectricShader, "glassAbsorption"),
+      tex0 = gl.glGetUniformLocation(dielectricShader, "tex0"),
+      sceneColor = gl.glGetUniformLocation(dielectricShader, "sceneColor"),
+      sceneDepth = gl.glGetUniformLocation(dielectricShader, "sceneDepth")
     }
     local worldgenPreviewLocations = {
       projection = gl.glGetUniformLocation(worldgenPreviewShader, "uProjection"),
@@ -3840,12 +3005,10 @@ function game.run()
       displacementWeights = gl.glGetUniformLocation(waterShader, "displacementWeights"),
       normalWeights = gl.glGetUniformLocation(waterShader, "normalWeights"),
       openWaterWaveBoost = gl.glGetUniformLocation(waterShader, "openWaterWaveBoost"),
-      breakerParams = gl.glGetUniformLocation(waterShader, "breakerParams"),
       viewportSize = gl.glGetUniformLocation(waterShader, "viewportSize"),
       clipPlanes = gl.glGetUniformLocation(waterShader, "clipPlanes"),
       time = gl.glGetUniformLocation(waterShader, "time"),
       refractionStrength = gl.glGetUniformLocation(waterShader, "refractionStrength"),
-      snellParams = gl.glGetUniformLocation(waterShader, "snellParams"),
       absorption = gl.glGetUniformLocation(waterShader, "absorption"),
       displacementMap0 = gl.glGetUniformLocation(waterShader, "displacementMap0"),
       displacementMap1 = gl.glGetUniformLocation(waterShader, "displacementMap1"),
@@ -3855,13 +3018,6 @@ function game.run()
       normalMap2 = gl.glGetUniformLocation(waterShader, "normalMap2"),
       sceneColor = gl.glGetUniformLocation(waterShader, "sceneColor"),
       sceneDepth = gl.glGetUniformLocation(waterShader, "sceneDepth")
-    }
-    local planetWaterLocations={
-      projection=gl.glGetUniformLocation(planetWaterShader,"uProjection"),
-      view=gl.glGetUniformLocation(planetWaterShader,"uView"),
-      viewPos=gl.glGetUniformLocation(planetWaterShader,"viewPos"),
-      sunDir=gl.glGetUniformLocation(planetWaterShader,"sunDir"),
-      waterColor=gl.glGetUniformLocation(planetWaterShader,"waterColor")
     }
     local atmospherePostLocations = {
       sceneColor = gl.glGetUniformLocation(atmospherePostShader, "sceneColor"),
@@ -3879,8 +3035,7 @@ function game.run()
       time = gl.glGetUniformLocation(atmospherePostShader, "time"),
       bloomTexture = gl.glGetUniformLocation(atmospherePostShader, "bloomTexture"),
       gradeParams = gl.glGetUniformLocation(atmospherePostShader, "gradeParams"),
-      tonemapParams = gl.glGetUniformLocation(atmospherePostShader, "tonemapParams"),
-      anaglyphAmount = gl.glGetUniformLocation(atmospherePostShader, "anaglyphAmount")
+      tonemapParams = gl.glGetUniformLocation(atmospherePostShader, "tonemapParams")
     }
 
     local bloomShaders = {
@@ -3913,8 +3068,7 @@ function game.run()
     gl.glUniform3f(locFaceLight, graphics.terrain.topLight, graphics.terrain.sideLight, graphics.terrain.bottomLight)
     gl.glUniform1f(locExposure, graphics.terrain.exposure)
 
-    local displayState = createDisplayState()
-    local playerCamera = camera.new(playerOptionsForGameMode("survival", displayState))
+    local playerCamera = camera.new(playerOptionsForGameMode("survival"))
     playerCamera:placeAtSpawn(world, playerCamera.position[1], playerCamera.position[3])
     local worldgenPreviewCamera = camera.new({position = {0.0, 900.0, 0.0}, yaw = 45.0, pitch = -54.0})
     local worldgenPreviewState = {
@@ -3924,8 +3078,9 @@ function game.run()
       distance = 980.0
     }
     local worldgenPreviewMesh = nil
-    applyMenuRuntimeState(window, displayState, playerCamera, world)
+    local displayState = createDisplayState()
     local lastTime = glfw.glfwGetTime()
+    local lastPlayerSaveTime = lastTime
 
     while glfw.glfwWindowShouldClose(window) == 0 do
       local currentTime = glfw.glfwGetTime()
@@ -3952,10 +3107,7 @@ function game.run()
         devMenu:commitGenerationChanges(graphics.terrainGeneration)
         terrain.refreshGenerationSettings()
         releaseTerrainMeshes(terrainMeshes)
-        releaseFarWaterMeshes(farWaterMeshes, farWaterState)
-        rendering.release(orbitalPlanetMesh)
-        rendering.release(orbitalCloudMesh)
-        orbitalPlanetMesh, orbitalCloudMesh = nil, nil
+        distantTerrain:clear()
         terrainMeshes = {}
         displayState.pendingTerrainEntries = {}
         world.seed = graphics.terrainGeneration.seed
@@ -3967,7 +3119,9 @@ function game.run()
       end
       refreshDrawableSize(window, displayState)
       updateInventoryInput(window, displayState, playerCamera)
-      updateMenuInput(window, displayState, playerCamera, world, locP)
+      updateMenuInput(window, displayState, playerCamera)
+      distantTerrain:setRadius(displayState.renderDistance)
+      world.chunkRadius = math.min(CHUNK_RENDER_RADIUS, displayState.renderDistance)
       local renderedLoadingFrame = false
       if displayState.pendingNewWorldConfig then
         local config = displayState.pendingNewWorldConfig
@@ -3979,25 +3133,19 @@ function game.run()
         local done = stepWorldLoadingJob(job)
         if done then
           releaseTerrainMeshes(terrainMeshes)
-          releaseFarWaterMeshes(farWaterMeshes, farWaterState)
-          rendering.release(orbitalPlanetMesh)
-          rendering.release(orbitalCloudMesh)
-          orbitalPlanetMesh, orbitalCloudMesh = nil, nil
+          distantTerrain:clear()
           world = job.world
           terrainMeshes = job.terrainMeshes
           displayState.currentWorldSave = job.save
-          currentWaterLevel = nil
-          playerCamera = camera.new(playerOptionsForGameMode(job.config.gameMode, displayState))
-          playerCamera:placeAtSpawn(world, job.spawnDirection)
-          playerCamera.firstMouse = true
-          displayState.selectedSlot = 1
+          currentWaterLevel = job.config.generatorType == "superflat" and nil or WATER_LEVEL
+          playerCamera = camera.new(playerOptionsForGameMode(job.config.gameMode))
+          playerCamera:placeAtSpawn(world, job.spawnX, job.spawnZ)
           displayState.worldGameMode = job.config.gameMode
           displayState.inventory = Inventory.new(job.config.gameMode)
-          displayState.inventory.selected = 1
+          displayState.selectedSlot = 1
+          restorePlayer(displayState, playerCamera, job.savedPlayer)
           displayState.inventoryVersion = displayState.inventoryVersion + 1
-          displayState.health, displayState.hunger, displayState.saturation = 20, 20, 5
-          displayState.exhaustion, displayState.handSwing = 0, 0
-          displayState.tutorialTime = 0
+          playerCamera.firstMouse = true
           refreshCreativeFilter(displayState)
           displayState.worldGeneratorType = job.config.generatorType
           devMenu:setGenerationSeed(job.seed)
@@ -4007,29 +3155,10 @@ function game.run()
           displayState.screen = nil
           displayState.loadingJob = nil
           displayState.pendingTerrainEntries = job.streamingEntries or {}
-          if game.startTeleport then
-            playerCamera:teleportTo(world, game.startTeleport[1], game.startTeleport[2], game.startTeleport[3])
-            playerCamera.allowFlight, playerCamera.flying = true, true
-            world:updateRenderOrigin(playerCamera.position)
-          end
-          if (graphics.world.sphericalVoxels ~= false) then
-            local started = glfw.glfwGetTime()
-            releaseTerrainMeshes(terrainMeshes)
-            terrainMeshes = {}
-            gridWorld, gridRuntime = game.startGridWorld(
-              world, playerCamera, terrainMeshes, graphics.world.gridLoadRadius)
-            print(string.format("Spherical voxel world: %d chunks around spawn in %.2f s",
-              gridWorld:chunkCount(), glfw.glfwGetTime() - started))
-          end
-          if game.autoStartWorld then
-            local latitude, longitude, altitude = playerCamera:geodeticPosition()
-            local sample = terrain.surfaceAtPosition(
-              playerCamera.position[1], playerCamera.position[2], playerCamera.position[3], world.planet)
-            print(string.format(
-              "World ready: seed %s, %.4f lat, %.4f lon, %.1f m, %s, ground %.1f m, solar time %.2f h",
-              tostring(job.seed), latitude, longitude, altitude, sample.biome,
-              sample.elevationMeters, celestial:timeOfDayHours(playerCamera.position, world.planet.center)))
-          end
+          droppedItems:clear()
+          fallingTrees:clear()
+          releaseFallingTreeMeshes(fallingTreeMeshes)
+          lastPlayerSaveTime = currentTime
         else
           syncCursorMode(window, displayState, playerCamera)
           gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
@@ -4066,62 +3195,52 @@ function game.run()
           dropped = 0,
           lightingBudget = 0
         }
+        local distantStats = nil
         if not previewMode then
-          if world:updateRenderOrigin(playerCamera.position) then
-            if gridRuntime then
-              -- The grid runtime owns these meshes. Wiping the table here would
-              -- also rebind it, and the runtime's upload closure still holds
-              -- the old one -- so every later mesh would land in an orphaned
-              -- table and never be drawn again. Let the runtime rebuild in
-              -- place instead, all at once so nothing shows at a stale origin.
-              gridRuntime:setRenderOrigin(world.renderOrigin)
-              gridRuntime:rebuildDirty()
-            else
-              releaseTerrainMeshes(terrainMeshes)
-              terrainMeshes={}
-              displayState.pendingTerrainEntries={}
-              world:eachChunk(function(_,entry) entry.hasMesh=false entry.hasGPUBuffer=false entry.isUploaded=false entry.renderReady=false end)
-            end
+          if displayState.hasWorld then
+            distantStats = distantTerrain:update(
+              world, terrainMeshes, displayState.pendingTerrainEntries,
+              playerCamera.position[1], playerCamera.position[3]
+            )
+            queueStats.distant = distantStats
           end
-          if gridRuntime then
-            gridRuntime:update(playerCamera.position)
-            game.updateHorizon(displayState, world, playerCamera)
-          end
-          local streamVoxelWorld=world.visualLod:levelForPosition(playerCamera.position)=="voxel"
-            and not devMenu:freezesStreaming() and not gridRuntime
-          if streamVoxelWorld then
-            pruneTerrainMeshes(world,terrainMeshes,displayState.pendingTerrainEntries,playerCamera.position[1],playerCamera.position[2],playerCamera.position[3])
-            if #displayState.pendingTerrainEntries < CHUNK_QUEUE_BACKLOG then
+          pruneTerrainMeshes(world, terrainMeshes, displayState.pendingTerrainEntries, playerCamera.position[1], playerCamera.position[3])
+          if #displayState.pendingTerrainEntries < CHUNK_QUEUE_BACKLOG then
             local streamForward = playerCamera:getHorizontalFront()
             queueTerrainMeshes(
               world,
               displayState.pendingTerrainEntries,
               playerCamera.position[1],
-              playerCamera.position[2],
               playerCamera.position[3],
               math.min(CHUNK_QUEUE_BUDGET, CHUNK_QUEUE_BACKLOG - #displayState.pendingTerrainEntries),
               {
                 predictedX = playerCamera.position[1] + (playerCamera.velocity and playerCamera.velocity[1] or 0.0) * 1.5,
-                predictedY = playerCamera.position[2] + (playerCamera.velocity and playerCamera.velocity[2] or 0.0) * 1.5,
                 predictedZ = playerCamera.position[3] + (playerCamera.velocity and playerCamera.velocity[3] or 0.0) * 1.5,
                 forwardX = streamForward[1],
-                forwardY = streamForward[2],
                 forwardZ = streamForward[3]
-              }
+              },
+              function(chunkX, chunkZ) return distantTerrain:isPending(chunkX, chunkZ) end
             )
-            end
-            if #displayState.pendingTerrainEntries > 0 or world.lightDirty or world.lightingJob then
-              queueStats = processTerrainMeshQueue(world, terrainMeshes, displayState.pendingTerrainEntries, TERRAIN_WORK_BUDGET)
-            end
           end
-          if displayState.hasWorld and currentWaterLevel then
-            updateFarWaterMeshes(
-              farWaterMeshes, farWaterState, terrainMeshes, world,
-              playerCamera.position[1], playerCamera.position[3]
-            )
+          if #displayState.pendingTerrainEntries > 0 or world.lightDirty or world.lightingJob then
+            queueStats = processTerrainMeshQueue(world, terrainMeshes, displayState.pendingTerrainEntries, TERRAIN_WORK_BUDGET)
+            queueStats.distant = distantStats
           end
         end
         displayState.lastQueueStats = queueStats
+        if displayState.hasWorld and not previewMode then
+          local pickedUp = droppedItems:update(dt, world, playerCamera.position, displayState.inventory)
+          if pickedUp > 0 then
+            displayState.inventoryVersion = displayState.inventoryVersion + 1
+          end
+          for _,tree in ipairs(fallingTrees:update(dt)) do
+            local mesh=fallingTreeMeshes[tree.id]
+            if mesh then rendering.release(mesh) fallingTreeMeshes[tree.id]=nil end
+            if displayState.worldGameMode~="creative" then
+              droppedItems:spawn(tree.drop,tree.logCount,{tree.pivot[1]+tree.direction[1]*2,tree.pivot[2]+.3,tree.pivot[3]+tree.direction[3]*2},{0,2,0},.35)
+            end
+          end
+        end
         if previewMode then
           updateWorldgenPreviewCamera(worldgenPreviewState, worldgenPreviewCamera, window, dt, not devMenu:wantsMouse())
           local meshCenterX = worldgenPreviewState.meshCenterX or worldgenPreviewState.centerX
@@ -4139,162 +3258,39 @@ function game.run()
             worldgenPreviewState.meshCenterZ = worldgenPreviewState.centerZ
           end
         elseif not displayState.screen and not displayState.devMenuOpen then
-          local previousX = playerCamera.position[1]
-          local previousY = playerCamera.position[2]
-          local previousZ = playerCamera.position[3]
-          local wasGrounded = playerCamera.grounded
-          local fallingVelocity = playerCamera.velocityY or 0
-          playerCamera:update(dt, window, gridWorld or world)
-          if gridRuntime then
-            game.updateGridEditInput(window, displayState, gridRuntime, playerCamera, dt)
-          else
-            updateBlockEditInput(window, displayState, world, displayState.pendingTerrainEntries, playerCamera, dt)
-          end
-          local dx = playerCamera.position[1] - previousX
-          local dy = playerCamera.position[2] - previousY
-          local dz = playerCamera.position[3] - previousZ
-          displayState.stats.distance = displayState.stats.distance + math.sqrt(dx * dx + dy * dy + dz * dz)
-          displayState.stats.playTime = displayState.stats.playTime + dt
-          displayState.tutorialTime = (displayState.tutorialTime or 0) + dt
-          local travelled=math.sqrt(dx*dx+dy*dy+dz*dz)
-          updateSurvival(displayState,playerCamera,world,dt,travelled,(not wasGrounded and playerCamera.grounded) and fallingVelocity or nil)
+          playerCamera:update(dt, window, world)
+          updateBlockEditInput(window, displayState, world, displayState.pendingTerrainEntries, playerCamera, droppedItems, fallingTrees, dt)
         end
-        if displayState.handSwing and displayState.handSwing > 0 then
-          displayState.handSwing = displayState.handSwing + dt * 3.8
-          if displayState.handSwing >= 1 then displayState.handSwing = 0 end
+        if displayState.hasWorld and currentTime - lastPlayerSaveTime >= PLAYER_AUTOSAVE_INTERVAL then
+          saveCurrentPlayer(displayState, playerCamera)
+          lastPlayerSaveTime = currentTime
         end
-        -- Developer navigation. Walking a planet at 5 m/s inside a loaded ball
-        -- roughly 100 m across is not exploration, so the dev menu owns a fast
-        -- no-clip flight, a coordinate jump, and a switch that stops chunk
-        -- streaming while you cross the map.
-        if not previewMode then
-          local wantsFlight = devMenu:flyEnabled()
-          if wantsFlight and not playerCamera.flying then
-            playerCamera.allowFlight = true
-            playerCamera.flying = true
-            playerCamera.radialVelocity, playerCamera.velocityY = 0.0, 0.0
-            playerCamera.grounded = false
-          elseif not wantsFlight and playerCamera.devFlightActive then
-            playerCamera.flying = false
-          end
-          playerCamera.devFlightActive = wantsFlight
-          playerCamera.noclip = wantsFlight
-          playerCamera.flySpeedMultiplier = devMenu:flySpeedMultiplier()
-
-          devMenu:setCurrentLocation(playerCamera:geodeticPosition())
-          devMenu:consumeCaptureRequest()
-          local latitude, longitude, altitude = devMenu:consumeTeleportRequest()
-          if latitude then
-            playerCamera:teleportTo(world, latitude, longitude, altitude)
-            -- Everything cached is relative to the old render origin, and the
-            -- jump is far larger than the origin grid, so drop it all rather
-            -- than let stale meshes float around the new position.
-            releaseTerrainMeshes(terrainMeshes)
-            terrainMeshes = {}
-            displayState.pendingTerrainEntries = {}
-            world:updateRenderOrigin(playerCamera.position)
-            world:eachChunk(function(_, entry)
-              entry.hasMesh = false entry.hasGPUBuffer = false
-              entry.isUploaded = false entry.renderReady = false
-            end)
-          end
-        end
-
-        -- Solar time is read at the player, so the dev menu asking for noon puts
-        -- the sun over their head rather than over a fixed prime meridian.
-        celestial:setTimeScale(devMenu:timeScale())
-        celestial:advance(dt)
-        local solarObserver = playerCamera.position
-        local planetCentre = world.planet and world.planet.center or nil
-        celestial:clearTimeOverride()
-        devMenu:setNaturalTimeOfDay(celestial:timeOfDayHours(solarObserver, planetCentre))
+        devMenu:setNaturalTimeOfDay(timeOfDayForSimulationTime(currentTime))
+        local atmosphereTime = currentTime
         if devMenu:usesTimeOverride() then
-          celestial:overrideTimeOfDay(devMenu:timeOfDay(), solarObserver, planetCentre)
-        elseif game.forceTimeOfDay then
-          celestial:overrideTimeOfDay(game.forceTimeOfDay, solarObserver, planetCentre)
+          atmosphereTime = simulationTimeForTimeOfDay(devMenu:timeOfDay())
         end
         updateRuntimeAtmosphereSettings(runtimeAtmosphereSettings, devMenu:fogStrength())
 
-        local sunDir = celestial:sunDirection()
-        local skyRotation = celestial:rotationAngle()
-        -- Smoke-run camera aiming, so a capture can look at the sky and the sun
-        -- rather than wherever spawn happened to face.
-        -- Smoke-run autopilot: walks tangentially at a fixed speed. Needed to
-        -- reproduce anything that only happens once the player has travelled,
-        -- which includes every render-origin change.
-        if game.autoWalk and not previewMode then
-          local up = playerCamera:getLocalUp()
-          local forward = playerCamera:getHorizontalFront()
-          local advance = game.autoWalk * dt
-          local moved = {
-            playerCamera.position[1] + forward[1] * advance,
-            playerCamera.position[2] + forward[2] * advance,
-            playerCamera.position[3] + forward[3] * advance
-          }
-          playerCamera.position = moved
-          playerCamera.velocity = {forward[1] * game.autoWalk, forward[2] * game.autoWalk, forward[3] * game.autoWalk}
-        end
-
-        if game.lookAt == "sun" and not previewMode then
-          local up = playerCamera:getLocalUp()
-          local elevation = math.max(-1.0, math.min(1.0,
-            sunDir[1]*up[1] + sunDir[2]*up[2] + sunDir[3]*up[3]))
-          local tx = sunDir[1] - up[1]*elevation
-          local ty = sunDir[2] - up[2]*elevation
-          local tz = sunDir[3] - up[3]*elevation
-          -- At the zenith the sun has no horizontal bearing at all, and
-          -- normalising the zero vector would put a NaN through the view
-          -- matrix. Keep the heading and just look up.
-          if tx*tx + ty*ty + tz*tz > 1e-8 then
-            playerCamera.heading = math3d.normalize({tx, ty, tz})
-          end
-          playerCamera.pitch = math.deg(math.asin(elevation)) * 0.6
-        end
-        local sky = atmosphere.forSun(sunDir, FOG_START, FOG_END,
-          previewMode and {0.0, 1.0, 0.0} or playerCamera:getLocalUp())
+        local sunDir = math3d.normalize(atmosphere.sunDirection(atmosphereTime, SUN_CYCLE_SPEED))
+        local sky = atmosphere.forSun(sunDir, FOG_START, FOG_END)
         local activeCamera = previewMode and worldgenPreviewCamera or playerCamera
-        local radialAltitude = previewMode and 0.0 or world.planet:altitudeMeters(activeCamera.position)
-        local frameNear, frameFar = CAMERA_NEAR, CAMERA_FAR
-        if not previewMode and radialAltitude > 1000.0 then
-          frameNear = math.max(1.0, math.min(1000.0, radialAltitude * 0.0005))
-          frameFar = math.max(CAMERA_FAR, world.planet.diameterVoxels + radialAltitude / world.planet.voxelSizeMeters + 200000.0)
-          if not orbitalPlanetMesh then
-            terrain.setSeed(world.seed)
-            orbitalPlanetMesh = uploadMesh(planetVisuals.buildSurfaceVertices(world, 128, 64))
-            local cloudAltitude = ((CLOUD_BOTTOM + CLOUD_TOP) * 0.5)
-            orbitalCloudMesh = uploadMesh(planetVisuals.buildShellVertices(world.planet, cloudAltitude, 128, 64))
-          end
-        end
-        local projection = math3d.perspective(CAMERA_FOV, windowWidth / windowHeight, frameNear, frameFar)
-        local viewPosition = previewMode and activeCamera.position or world:toRenderPosition(activeCamera.position)
-        local activeFront=activeCamera:getFront()
-        local viewCenter = previewMode and activeCamera:getCenter() or {viewPosition[1]+activeFront[1],viewPosition[2]+activeFront[2],viewPosition[3]+activeFront[3]}
-        if not previewMode and displayState.viewBobbing ~= false and playerCamera.grounded then
-          local horizontalSpeed = math.sqrt(
-            playerCamera.velocity[1] * playerCamera.velocity[1] +
-            playerCamera.velocity[3] * playerCamera.velocity[3]
-          )
-          local bobAmount = math.min(horizontalSpeed / math.max(playerCamera.walkSpeed, 0.1), 1.5)
-          local bob = math.sin(currentTime * 11.0) * 0.035 * bobAmount
-          local bobUp=playerCamera:getLocalUp()
-          viewPosition={viewPosition[1]+bobUp[1]*bob,viewPosition[2]+bobUp[2]*bob,viewPosition[3]+bobUp[3]*bob}
-          viewCenter={viewCenter[1]+bobUp[1]*bob,viewCenter[2]+bobUp[2]*bob,viewCenter[3]+bobUp[3]*bob}
-        end
-        local view = math3d.lookAt(viewPosition,viewCenter,previewMode and {0,1,0} or activeCamera:getLocalUp())
-        local renderCamera=activeCamera
-        if not previewMode then
-          renderCamera=setmetatable({position=viewPosition,absolutePosition=activeCamera.position},{__index=activeCamera})
-          renderCamera.getFront=function() return activeCamera:getFront() end
-          renderCamera.getLocalUp=function() return activeCamera:getLocalUp() end
-          renderCamera.getCenter=function() local f=activeCamera:getFront() return {viewPosition[1]+f[1],viewPosition[2]+f[2],viewPosition[3]+f[3]} end
-        end
+        local projection = math3d.perspective(CAMERA_FOV, windowWidth / windowHeight, CAMERA_NEAR, CAMERA_FAR)
+        local view = math3d.lookAt(activeCamera.position, activeCamera:getCenter(), {0, 1, 0})
         local frustum = math3d.frustumPlanes(math3d.multiplyMat4(projection, view))
-        local visibleMeshes = previewMode and {} or visibleTerrainMeshes(terrainMeshes, frustum)
-        local visibleLeaves = previewMode and {} or visibleLeafMeshes(visibleMeshes,viewPosition)
-        local visibleIce = previewMode and {} or visibleIceMeshes(visibleMeshes)
-        local visibleWater = previewMode and {} or visibleWaterMeshes(
-          visibleMeshes, farWaterMeshes, terrainMeshes, frustum
+        local centerChunkX = World.chunkCoord(activeCamera.position[1])
+        local centerChunkZ = World.chunkCoord(activeCamera.position[3])
+        local visibleNearMeshes = previewMode and {} or visibleTerrainMeshes(
+          terrainMeshes, frustum, centerChunkX, centerChunkZ, world.chunkRadius
         )
+        local visibleMeshes = appendMeshes({}, visibleNearMeshes)
+        if not previewMode then
+          appendMeshes(visibleMeshes, distantTerrain:visible(
+            frustum, math3d.aabbInFrustum, centerChunkX, centerChunkZ, world.chunkRadius
+          ))
+        end
+        local visibleDielectrics = previewMode and {} or visibleDielectricMeshes(visibleNearMeshes)
+        local visibleWater = previewMode and {} or visibleWaterMeshes(visibleMeshes)
         if displayState.debugScreen and not displayState.screen and not previewMode then
           displayState.debugSampleTimer = displayState.debugSampleTimer + dt
           if not displayState.debugInfo or displayState.debugSampleTimer >= 0.25 then
@@ -4308,20 +3304,18 @@ function game.run()
               currentTime,
               queueStats,
               sky,
-              sunDir,
-              gridWorld
+              sunDir
             )
             displayState.debugSampleTimer = 0.0
           end
         elseif not displayState.debugScreen then
           displayState.debugInfo = nil
         end
-        local lightSpaceMatrix=effects.lightSpaceMatrix(viewPosition,sunDir,TERRAIN_MAX_H,SHADOW_DISTANCE,SHADOW_NEAR,SHADOW_FAR,previewMode and {0,1,0} or activeCamera:getLocalUp())
+        local lightSpaceMatrix = effects.lightSpaceMatrix(activeCamera.position, sunDir, TERRAIN_MAX_H, SHADOW_DISTANCE, SHADOW_NEAR, SHADOW_FAR)
         if not previewMode then
-          effects.renderShadowPass(shadowShader, shadowMap, shadowLocations, visibleMeshes, characterMesh, lightSpaceMatrix, model, SHADOW_MAP_SIZE, windowWidth, windowHeight, atlasTex,
-            viewPosition,currentTime,graphics.terrain)
+          effects.renderShadowPass(shadowShader, shadowMap, shadowLocations, visibleNearMeshes, characterMesh, lightSpaceMatrix, model, SHADOW_MAP_SIZE, windowWidth, windowHeight, atlasTex)
         end
-        effects.renderVolumetricFog(volumetricFog,volumetricFogShaders,renderCamera,sunDir,sky,CAMERA_FOV,windowWidth,windowHeight,currentWaterLevel or -1000.0,previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings,shadowMap,lightSpaceMatrix)
+        effects.renderVolumetricFog(volumetricFog, volumetricFogShaders, activeCamera, sunDir, sky, CAMERA_FOV, windowWidth, windowHeight, currentWaterLevel or WATER_LEVEL, previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings, shadowMap, lightSpaceMatrix)
         if not previewMode and currentWaterLevel and #visibleWater > 0 then
           -- Terrain caustics and the surface must read the same current FFT field.
           effects.updateOceanSimulation(ocean, dt)
@@ -4337,22 +3331,14 @@ function game.run()
         gl.glUniformMatrix4fv(locP, 1, 0, ffi.new("float[16]", projection))
         gl.glUniformMatrix4fv(locV, 1, 0, ffi.new("float[16]", view))
         gl.glUniformMatrix4fv(locLightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
-        gl.glUniform3f(locViewPos,viewPosition[1],viewPosition[2],viewPosition[3])
+        gl.glUniform3f(locViewPos, activeCamera.position[1], activeCamera.position[2], activeCamera.position[3])
         gl.glUniform3f(locLight, -sunDir[1], -sunDir[2], -sunDir[3])
         gl.glUniform1f(locTime, currentTime)
-        gl.glUniform4f(locFoliageParams,
-          graphics.terrain.grassCullStart or 64.0,
-          graphics.terrain.grassCullEnd or 104.0,
-          graphics.terrain.leafWindDistance or 112.0,
-          graphics.terrain.foliageWindStrength or 1.0)
-        local shaderUp=previewMode and {0,1,0} or activeCamera:getLocalUp()
-        gl.glUniform3f(locPlanetUp,shaderUp[1],shaderUp[2],shaderUp[3])
         gl.glUniform3f(locAmbientColor, sky.ambient[1], sky.ambient[2], sky.ambient[3])
         gl.glUniform3f(locLightColor, sky.lightColor[1], sky.lightColor[2], sky.lightColor[3])
         gl.glUniform3f(locMoonLightColor, sky.moonLightColor[1], sky.moonLightColor[2], sky.moonLightColor[3])
         gl.glUniform3f(locLightingParams, sky.daylight, sky.moonAmount, sky.ambientFloor)
         gl.glUniform1f(locShadowStrength, sky.shadowStrength)
-        gl.glUniform1f(locSmoothLighting, displayState.smoothLighting == false and 0.0 or 1.0)
         gl.glUniform1f(locTerrainWaterLevel, previewMode and -1000.0 or (currentWaterLevel or -1000.0))
         gl.glUniform3f(locTerrainWaterCascadeSizes,
           ocean.cascadeSizes[1], ocean.cascadeSizes[2], ocean.cascadeSizes[3])
@@ -4362,73 +3348,8 @@ function game.run()
 
         gl.glClearColor(sky.fogColor[1], sky.fogColor[2], sky.fogColor[3], 1.0)
         gl.glClear(GL_COLOR_BUFFER_BIT + GL_DEPTH_BUFFER_BIT)
-        drawSky(skyShader,skyMesh,skyLocations,moonTexture,renderCamera,sunDir,sky,currentTime,displayState.clouds,skyRotation)
-        -- The sun sphere goes on top of the sky and under everything else, so
-        -- it is drawn before the depth buffer is cleared for world geometry.
-        do
-          local observerAltitude = previewMode and 0.0 or math.max(radialAltitude, 0.0)
-          local sunUp = previewMode and {0,1,0} or activeCamera:getLocalUp()
-          local elevation = sunDir[1]*sunUp[1] + sunDir[2]*sunUp[2] + sunDir[3]*sunUp[3]
-          local transmittance = atmosphere.sunTransmittance(observerAltitude, elevation)
-          local brightness = graphics.celestial.sunBrightness or 24.0
-          local sunDistance = frameNear * 500.0
-          local sunRadius = sunDistance * math.tan(celestial:sunAngularRadius())
-            * (graphics.celestial.sunSizeScale or 1.0)
-          sunPass.draw(sunShader,sunMesh,sunLocations,view,projection,viewPosition,sunDir,
-            sunDistance,sunRadius,
-            {transmittance[1]*brightness,transmittance[2]*brightness,transmittance[3]*brightness})
-        end
+        drawSky(skyShader, skyMesh, skyLocations, moonTexture, activeCamera, sunDir, sky, currentTime)
         gl.glClear(GL_DEPTH_BUFFER_BIT)
-
-        if not previewMode and radialAltitude > 1000.0 and orbitalPlanetMesh then
-          local planetOffset={
-            world.planet.center[1]-world.renderOrigin[1],
-            world.planet.center[2]-world.renderOrigin[2],
-            world.planet.center[3]-world.renderOrigin[3]
-          }
-          gl.glEnable(GL_CULL_FACE)
-          gl.glCullFace(GL_BACK)
-          gl.glUseProgram(orbitalPlanetShader)
-          gl.glUniformMatrix4fv(orbitalPlanetLocations.projection,1,0,ffi.new("float[16]",projection))
-          gl.glUniformMatrix4fv(orbitalPlanetLocations.view,1,0,ffi.new("float[16]",view))
-          gl.glUniform3f(orbitalPlanetLocations.offset,planetOffset[1],planetOffset[2],planetOffset[3])
-          gl.glUniform3f(orbitalPlanetLocations.sunDir,sunDir[1],sunDir[2],sunDir[3])
-          gl.glUniform3f(orbitalPlanetLocations.viewPos,viewPosition[1],viewPosition[2],viewPosition[3])
-          gl.glUniform1f(orbitalPlanetLocations.limbStrength,1.0)
-          rendering.draw(orbitalPlanetMesh)
-          if displayState.clouds ~= false and orbitalCloudMesh then
-            gl.glUseProgram(orbitalCloudShader)
-            gl.glUniformMatrix4fv(orbitalCloudLocations.projection,1,0,ffi.new("float[16]",projection))
-            gl.glUniformMatrix4fv(orbitalCloudLocations.view,1,0,ffi.new("float[16]",view))
-            gl.glUniform3f(orbitalCloudLocations.offset,planetOffset[1],planetOffset[2],planetOffset[3])
-            gl.glUniform3f(orbitalCloudLocations.sunDir,sunDir[1],sunDir[2],sunDir[3])
-            gl.glUniform3f(orbitalCloudLocations.viewPos,viewPosition[1],viewPosition[2],viewPosition[3])
-            gl.glUniform1f(orbitalCloudLocations.time,currentTime)
-            gl.glEnable(GL_BLEND)
-            gl.glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA)
-            gl.glDepthMask(0)
-            rendering.draw(orbitalCloudMesh)
-            gl.glDepthMask(1)
-            gl.glDisable(GL_BLEND)
-          end
-          gl.glDisable(GL_CULL_FACE)
-        end
-
-        if displayState.horizonMesh and not previewMode then
-          -- Distant terrain goes down before the voxels, and sits two metres
-          -- low, so blocks always win where the two overlap.
-          gl.glEnable(GL_CULL_FACE)
-          gl.glCullFace(GL_BACK)
-          gl.glUseProgram(orbitalPlanetShader)
-          gl.glUniformMatrix4fv(orbitalPlanetLocations.projection,1,0,ffi.new("float[16]",projection))
-          gl.glUniformMatrix4fv(orbitalPlanetLocations.view,1,0,ffi.new("float[16]",view))
-          gl.glUniform3f(orbitalPlanetLocations.offset,0.0,0.0,0.0)
-          gl.glUniform3f(orbitalPlanetLocations.sunDir,sunDir[1],sunDir[2],sunDir[3])
-          gl.glUniform3f(orbitalPlanetLocations.viewPos,viewPosition[1],viewPosition[2],viewPosition[3])
-          gl.glUniform1f(orbitalPlanetLocations.limbStrength,0.0)
-          rendering.draw(displayState.horizonMesh)
-          gl.glDisable(GL_CULL_FACE)
-        end
 
         if previewMode then
           gl.glUseProgram(worldgenPreviewShader)
@@ -4445,62 +3366,31 @@ function game.run()
           gl.glActiveTexture(GL_TEXTURE2)
           gl.glBindTexture(GL_TEXTURE_2D, ocean.normalTexture)
           gl.glActiveTexture(GL_TEXTURE0)
-          gl.glUniform1f(locUseVoxelLight, 1.0)
           for _, mesh in ipairs(visibleMeshes) do
             rendering.draw(mesh)
           end
           if characterMesh then
-            gl.glUniform1f(locUseVoxelLight, 0.0)
-            gl.glBindTexture(GL_TEXTURE_2D, characterSkinTexture[0])
             rendering.draw(characterMesh)
-            gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
           end
-          if displayState.clouds ~= false and displayState.graphicsMode ~= "Fast" and not world.planet then
-            drawClouds(cloudShader,cloudMesh,cloudLocations,renderCamera,view,projection,currentTime,sky)
-          end
-          if #visibleIce > 0 then
+          drawDroppedItems(droppedItems, droppedItemMeshes, locM, model)
+          drawFallingTrees(fallingTrees,fallingTreeMeshes,locM,model)
+          if #visibleDielectrics > 0 then
             effects.copySceneTarget(sceneTarget, waterBackgroundTarget)
-            effects.drawIce(
-              iceShader,visibleIce,iceLocations,renderCamera,view,projection,sunDir,sky,
-              waterBackgroundTarget, windowWidth, windowHeight, frameNear, frameFar,
-              atlasTex, graphics.ice, model
+            effects.drawDielectrics(
+              dielectricShader, visibleDielectrics, dielectricLocations, playerCamera,
+              view, projection, sunDir, sky, waterBackgroundTarget,
+              windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR,
+              atlasTex, graphics.dielectrics, model
             )
           end
-          if #visibleWater>0 then
-            gl.glUseProgram(planetWaterShader)
-            gl.glUniformMatrix4fv(planetWaterLocations.projection,1,0,ffi.new("float[16]",projection))
-            gl.glUniformMatrix4fv(planetWaterLocations.view,1,0,ffi.new("float[16]",view))
-            gl.glUniform3f(planetWaterLocations.viewPos,viewPosition[1],viewPosition[2],viewPosition[3])
-            gl.glUniform3f(planetWaterLocations.sunDir,sunDir[1],sunDir[2],sunDir[3])
-            gl.glUniform3f(planetWaterLocations.waterColor,0.055,0.31,0.48)
-            gl.glEnable(GL_BLEND)
-            gl.glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA)
-            gl.glDepthMask(0)
-            for _,waterMesh in ipairs(visibleWater) do rendering.draw(waterMesh) end
-            gl.glDepthMask(1)
-            gl.glDisable(GL_BLEND)
-          end
-          -- Foliage is the final world-space translucent pass. Clouds, ice and
-          -- water have already written depth, so leaves behind them fail depth
-          -- testing while nearby leaves blend correctly over their surfaces.
-          if #visibleLeaves > 0 then
-            gl.glUseProgram(shader)
-            gl.glActiveTexture(GL_TEXTURE0)
-            gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
-            gl.glActiveTexture(GL_TEXTURE1)
-            gl.glBindTexture(GL_TEXTURE_2D, shadowMap.depthTexture[0])
-            gl.glActiveTexture(GL_TEXTURE2)
-            gl.glBindTexture(GL_TEXTURE_2D, ocean.normalTexture)
-            gl.glActiveTexture(GL_TEXTURE0)
-            gl.glUniform1f(locUseVoxelLight, 1.0)
-            gl.glEnable(GL_BLEND)
-            gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            gl.glDepthMask(0)
-            for _, leafMesh in ipairs(visibleLeaves) do
-              rendering.draw(leafMesh)
-            end
-            gl.glDepthMask(1)
-            gl.glDisable(GL_BLEND)
+          drawClouds(cloudShader, cloudMesh, cloudLocations, playerCamera, view, projection, currentTime, sky)
+          if currentWaterLevel and #visibleWater > 0 then
+            effects.copySceneTarget(sceneTarget, waterBackgroundTarget)
+            effects.drawWater(
+              waterShader, visibleWater, waterLocations, playerCamera, view, projection, sunDir, sky,
+              currentWaterLevel, ocean, waterBackgroundTarget, windowWidth, windowHeight,
+              currentTime, CAMERA_NEAR, CAMERA_FAR
+            )
           end
         end
 
@@ -4508,7 +3398,7 @@ function game.run()
         -- than the threshold bleeds. Runs at half resolution downward, so the
         -- whole chain costs about as much as one full-resolution pass.
         local bloomTexture = nil
-        if displayState.bloom ~= false and displayState.graphicsMode ~= "Fast" then
+        if POST.bloom ~= false then
           bloomTexture = effects.renderBloom(bloomShaders, bloomChain, sceneTarget.colorTexture[0], skyMesh, {
             threshold = POST.bloomThreshold or 0.70,
             softKnee = POST.bloomSoftKnee or 0.60,
@@ -4519,26 +3409,14 @@ function game.run()
 
         gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
         gl.glViewport(0, 0, windowWidth, windowHeight)
-        local postWaterLevel = -1000.0
-        if not previewMode and currentWaterLevel and world then
-          local cameraX = math.floor(activeCamera.position[1])
-          local cameraY = math.floor(activeCamera.position[2])
-          local cameraZ = math.floor(activeCamera.position[3])
-          local cameraBlock = world:blockAt(cameraX, cameraY, cameraZ)
-          if cameraBlock == blocks.water or (blocks.water_still and cameraBlock == blocks.water_still) then
-            local localSurface = terrain.waterSurfaceAt(cameraX, cameraZ)
-            if localSurface then
-              postWaterLevel = localSurface + (WATER_LEVEL - terrain.SEA_LEVEL)
-            end
-          end
-        end
-        effects.drawAtmospherePost(atmospherePostShader, skyMesh, atmospherePostLocations, sceneTarget, renderCamera, CAMERA_FOV, windowWidth, windowHeight, frameNear, frameFar, postWaterLevel, previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings, displayState.screen == "pause" and 1.15 or 0.0, underwaterOverlayTexture, currentTime, bloomTexture, POST, volumetricFog)
-        if displayState.screen == "inventory" or displayState.screen == "creative_inventory" then
-          hudOverlay:drawInventory(windowWidth,windowHeight,displayState.screen,displayState,displayState.menuMouseX,displayState.menuMouseY,{id=atlasTex})
+        effects.drawAtmospherePost(atmospherePostShader, skyMesh, atmospherePostLocations, sceneTarget, activeCamera, CAMERA_FOV, windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR, previewMode and -1000.0 or (currentWaterLevel or -1000.0), previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings, displayState.screen == "pause" and 1.15 or 0.0, underwaterOverlayTexture, currentTime, bloomTexture, POST, volumetricFog)
+        if displayState.screen == "inventory" or displayState.screen == "creative_inventory" or displayState.screen == "crafting_table" then
+          hudOverlay:drawInventory(windowWidth, windowHeight, displayState.screen, displayState,
+            displayState.menuMouseX, displayState.menuMouseY, {id = atlasTex}, currentTime)
         elseif displayState.screen then
           hudOverlay:drawMenu(windowWidth, windowHeight, displayState.screen, displayState.menuMouseX, displayState.menuMouseY, displayState, currentTime)
         elseif not previewMode then
-          hudOverlay:draw(windowWidth, windowHeight, currentTime, displayState.selectedSlot, displayState, {id=atlasTex})
+          hudOverlay:draw(windowWidth, windowHeight, currentTime, displayState.selectedSlot, displayState, {id = atlasTex})
           if displayState.debugScreen and displayState.debugInfo then
             hudOverlay:drawDebug(windowWidth, windowHeight, displayState.debugInfo)
           end
@@ -4546,53 +3424,12 @@ function game.run()
         devMenu:draw(window, windowWidth, windowHeight, dt)
         displayState.devMenuOpen = devMenu:isOpen()
 
-        if game.screenshotSchedule and #game.screenshotSchedule > 0 then
-          local due = game.screenshotSchedule[1]
-          if smokeTotal >= due.at then
-            table.remove(game.screenshotSchedule, 1)
-            if game.captureFrame(due.path, windowWidth, windowHeight) then
-              print(string.format("Captured %s at %.1f s, solar %.2f h", due.path, smokeTotal,
-                celestial:timeOfDayHours(playerCamera.position, world.planet.center)))
-            else
-              print("Failed to write " .. due.path)
-            end
-            if #game.screenshotSchedule == 0 and game.exitAfterScreenshots then
-              glfw.glfwSetWindowShouldClose(window, 1)
-            end
-          end
-        end
-
         glfw.glfwSwapBuffers(window)
         glfw.glfwPollEvents()
-
-        smokeTotal = smokeTotal + dt
-        -- Smoke-run telemetry. The headless launch cannot press F3, so the
-        -- numbers that would be on the debug screen are printed instead.
-        if game.autoStartWorld then
-          smokeFrames = smokeFrames + 1
-          smokeElapsed = smokeElapsed + dt
-          if smokeElapsed >= 5.0 then
-            local pending = #displayState.pendingTerrainEntries
-            local resident = 0
-            for _ in pairs(world.chunks) do resident = resident + 1 end
-            print(string.format(
-              "  %5.1f fps  grid %4d chunks %4d meshed %4d pending  drawn %3d  alt %7.2f m",
-              smokeFrames / smokeElapsed,
-              gridWorld and gridWorld:chunkCount() or resident,
-              gridRuntime and (function()
-                local n = 0
-                for _, v in pairs(gridRuntime.meshed) do if v then n = n + 1 end end
-                return n
-              end)() or 0,
-              gridRuntime and (#gridRuntime.pending - gridRuntime.pendingIndex + 1) or pending,
-              #visibleMeshes,
-              world.planet:altitudeMeters(playerCamera.position)))
-            smokeFrames, smokeElapsed = 0, 0.0
-          end
-        end
       end
     end
 
+    saveCurrentPlayer(displayState, playerCamera)
     effects.releaseBloomChain(bloomChain)
     effects.releaseVolumetricFog(volumetricFog, volumetricFogShaders)
     effects.releaseOceanSimulation(ocean)
@@ -4600,14 +3437,12 @@ function game.run()
     effects.releaseSceneTarget(sceneTarget)
     devMenu:release()
     rendering.release(worldgenPreviewMesh)
-    rendering.release(orbitalPlanetMesh)
-    rendering.release(orbitalCloudMesh)
+    releaseDroppedItemMeshes(droppedItemMeshes)
+    releaseFallingTreeMeshes(fallingTreeMeshes)
     releaseTerrainMeshes(terrainMeshes)
-    releaseFarWaterMeshes(farWaterMeshes, farWaterState)
+    distantTerrain:clear()
     rendering.release(characterMesh)
     rendering.release(skyMesh)
-    rendering.release(sunMesh)
-    if displayState.horizonMesh then rendering.release(displayState.horizonMesh) end
     rendering.release(cloudMesh)
     hudOverlay:release()
   end)

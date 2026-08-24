@@ -1,0 +1,8 @@
+{
+  "name": "Glass",
+  "texture": "./textures/blocks/glass.png",
+  "properties": {
+    "solid": true,
+    "glass": true
+  }
+}

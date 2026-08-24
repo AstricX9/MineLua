@@ -20,18 +20,15 @@ function interaction.breakBlock(world, x, y, z)
 
   local properties = def and def.properties
   if properties and properties.doublePlant then
-    local ux,uy,uz=0,1,0
-    if world.planet then ux,uy,uz=world.planet:dominantUpStep({x+0.5,y+0.5,z+0.5}) end
-    local sign=properties.half=="lower" and 1 or -1
-    local linkedX,linkedY,linkedZ=x+ux*sign,y+uy*sign,z+uz*sign
-    local linkedId = world:blockAt(linkedX, linkedY, linkedZ)
+    local linkedY = properties.half == "lower" and y + 1 or y - 1
+    local linkedId = world:blockAt(x, linkedY, z)
     local linkedDef = linkedId and blocks.list[linkedId]
     local linkedProps = linkedDef and linkedDef.properties
     local expectedHalf = properties.half == "lower" and "upper" or "lower"
 
     if linkedProps and linkedProps.doublePlant and linkedProps.half == expectedHalf then
-      world:setBlock(linkedX,linkedY,linkedZ,air())
-      changed[#changed + 1] = {x=linkedX,y=linkedY,z=linkedZ}
+      world:setBlock(x, linkedY, z, air())
+      changed[#changed + 1] = {x = x, y = linkedY, z = z}
     end
   end
 

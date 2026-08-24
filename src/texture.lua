@@ -117,6 +117,23 @@ local function blend_layer(dst, src, tint)
   end
 end
 
+-- Return the number of times an integer can be halved without crossing a
+-- texel boundary. Atlas mipmaps are safe only while every packed rectangle
+-- remains aligned to the downsample grid; beyond that point adjacent block
+-- textures would be averaged together.
+local function mip_alignment(value)
+  if value == 0 then
+    return math.huge
+  end
+
+  local levels = 0
+  while value % 2 == 0 do
+    value = value / 2
+    levels = levels + 1
+  end
+  return levels
+end
+
 function M.createAtlas()
   local self = {
     w = 256,
@@ -125,7 +142,8 @@ function M.createAtlas()
     current_x = 0,
     current_y = 0,
     row_h = 0,
-    mapping = {}
+    mapping = {},
+    max_mip_level = math.huge
   }
   
   -- Fill with magenta (missing texture)
@@ -202,10 +220,21 @@ function M.createAtlas()
       v1 = (self.current_y + copy_h) / self.h
     }
 
+    self.max_mip_level = math.min(self.max_mip_level,
+      mip_alignment(self.current_x), mip_alignment(self.current_y),
+      mip_alignment(copy_w), mip_alignment(copy_h))
+
     self.current_x = self.current_x + copy_w
     self.row_h = math.max(self.row_h, copy_h)
     
     return self.mapping[name]
+  end
+
+  function self:getMaxMipLevel()
+    if self.max_mip_level == math.huge then
+      return 0
+    end
+    return self.max_mip_level
   end
 
   return self

@@ -1,7 +1,0 @@
-{
-  "name": "Gravel",
-  "texture": "./textures/blocks/gravel.png",
-  "properties": {
-    "solid": true
-  }
-}

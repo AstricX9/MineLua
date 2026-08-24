@@ -1,362 +1,642 @@
 local ffi = require("ffi")
 local glfw = require("glfw")
-local math3d = require("math3d")
+local persistence = require("state_persistence")
 
 local Camera = {}
 Camera.__index = Camera
 
-local function clamp(v, low, high) return math.max(low, math.min(high, v)) end
+local function clamp(value, minValue, maxValue)
+  if value < minValue then
+    return minValue
+  end
+  if value > maxValue then
+    return maxValue
+  end
+  return value
+end
+
+local function normalize(v)
+  local length = math.sqrt(v[1] * v[1] + v[2] * v[2] + v[3] * v[3])
+  if length == 0 then
+    return {0, 0, 0}
+  end
+  return {v[1] / length, v[2] / length, v[3] / length}
+end
+
 local function moveToward(current, target, amount)
-  if current < target then return math.min(current + amount, target) end
-  if current > target then return math.max(current - amount, target) end
+  if current < target then
+    return math.min(current + amount, target)
+  end
+  if current > target then
+    return math.max(current - amount, target)
+  end
   return current
 end
-local function isDown(window, key) return glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS end
 
-local BINDING_KEYS = {
-  W=glfw.GLFW_KEY_W,A=glfw.GLFW_KEY_A,S=glfw.GLFW_KEY_S,D=glfw.GLFW_KEY_D,
-  Q=glfw.GLFW_KEY_Q,E=glfw.GLFW_KEY_E,R=glfw.GLFW_KEY_R,C=glfw.GLFW_KEY_C,
-  SPACE=glfw.GLFW_KEY_SPACE,CTRL=glfw.GLFW_KEY_LEFT_CONTROL,
-  UP=glfw.GLFW_KEY_UP,DOWN=glfw.GLFW_KEY_DOWN,LEFT=glfw.GLFW_KEY_LEFT,RIGHT=glfw.GLFW_KEY_RIGHT
-}
-
-local function bindingDown(window, binding, fallback)
-  binding = binding or fallback
-  if binding == "MOUSE1" then return glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS end
-  if binding == "MOUSE2" then return glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_RIGHT) == glfw.GLFW_PRESS end
-  if binding == "MOUSE3" then return glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_MIDDLE) == glfw.GLFW_PRESS end
-  local key = BINDING_KEYS[binding]
-  return key and isDown(window, key) or false
+local function isDown(window, key)
+  return glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
 end
 
-local function rotateAroundAxis(v, axis, angle)
-  local c, s = math.cos(angle), math.sin(angle)
-  local cross = math3d.cross(axis, v)
-  local dot = math3d.dot(axis, v)
-  return {
-    v[1] * c + cross[1] * s + axis[1] * dot * (1.0 - c),
-    v[2] * c + cross[2] * s + axis[2] * dot * (1.0 - c),
-    v[3] * c + cross[3] * s + axis[3] * dot * (1.0 - c)
-  }
-end
+local EPSILON = 0.0001
 
-local function approachVector(current, target, amount)
-  local delta = {target[1]-current[1], target[2]-current[2], target[3]-current[3]}
-  local length = math3d.length(delta)
-  if length <= amount or length < 1e-8 then return {target[1], target[2], target[3]} end
-  local scale = amount / length
-  return {current[1]+delta[1]*scale,current[2]+delta[2]*scale,current[3]+delta[3]*scale}
+-- Keep acceleration as a change in speed, not a slow rotation of the velocity
+-- vector. When input changes direction the new heading takes effect at once;
+-- only its speed ramps. With no input, friction preserves the current heading
+-- while bringing that speed to zero.
+local function approachHorizontalVelocity(x, z, targetX, targetZ, amount)
+  local targetSpeed = math.sqrt(targetX * targetX + targetZ * targetZ)
+  if targetSpeed > EPSILON then
+    local dirX = targetX / targetSpeed
+    local dirZ = targetZ / targetSpeed
+    local speedAlongInput = x * dirX + z * dirZ
+    local nextSpeed = moveToward(speedAlongInput, targetSpeed, amount)
+    return dirX * nextSpeed, dirZ * nextSpeed
+  end
+
+  local currentSpeed = math.sqrt(x * x + z * z)
+  if currentSpeed <= amount or currentSpeed < EPSILON then
+    return 0.0, 0.0
+  end
+
+  local nextSpeed = currentSpeed - amount
+  local scale = nextSpeed / currentSpeed
+  return x * scale, z * scale
 end
 
 function Camera.new(options)
   options = options or {}
-  local position = options.position or {0.5, 6371164.0, 0.5}
+
   return setmetatable({
-    position={position[1],position[2],position[3]}, planet=options.planet,
-    yaw=options.yaw or -90.0,pitch=options.pitch or 0.0,
-    heading=options.heading and math3d.normalize(options.heading) or {0.0,0.0,-1.0},
-    lastX=options.lastX or 640.0,lastY=options.lastY or 360.0,firstMouse=true,
-    velocity=options.velocity or {0.0,0.0,0.0},velocityY=0.0,radialVelocity=0.0,
-    grounded=false,flying=options.flying or false,allowFlight=options.allowFlight or options.flying or false,
-    flightToggleWasDown=false,jumpWasDown=false,jumpBuffer=0.0,coyoteTimer=0.0,
-    eyeHeight=options.eyeHeight or 1.62,standEyeHeight=options.eyeHeight or 1.62,
-    crouchEyeHeight=options.crouchEyeHeight or 1.24,bodyRadius=options.radius or 0.30,
-    walkSpeed=options.walkSpeed or 5.1,sprintSpeed=options.sprintSpeed or 7.2,crouchSpeed=options.crouchSpeed or 2.4,
-    flySpeed=options.flySpeed or 9.5,flySpeedMultiplier=options.flySpeedMultiplier or 1.0,acceleration=options.acceleration or 55.0,
-    airAcceleration=options.airAcceleration or 14.0,flyAcceleration=options.flyAcceleration or 24.0,
-    groundFriction=options.groundFriction or 46.0,airFriction=options.airFriction or 2.0,flyFriction=options.flyFriction or 18.0,
-    gravity=options.gravity or 9.81,jumpSpeed=options.jumpSpeed or 6.4,reach=options.reach or 6.0,
-    stepHeight=options.stepHeight or 1.08,groundSnap=options.groundSnap or 0.36,
-    coyoteTime=options.coyoteTime or 0.10,jumpBufferTime=options.jumpBufferTime or 0.12,
-    mouseSensitivity=options.mouseSensitivity or 0.085,invertMouse=options.invertMouse==true,
-    controlBindings=options.controlBindings or {}
-  },Camera)
+    position = options.position or {16.5, 30.0, 16.5},
+    yaw = options.yaw or -90.0,
+    pitch = options.pitch or 0.0,
+    lastX = options.lastX or 640.0,
+    lastY = options.lastY or 360.0,
+    firstMouse = true,
+    velocity = options.velocity or {0.0, 0.0, 0.0},
+    velocityY = 0.0,
+    grounded = false,
+    flying = options.flying or false,
+    allowFlight = options.allowFlight or options.flying or false,
+    flightToggleWasDown = false,
+    jumpWasDown = false,
+    jumpBuffer = 0.0,
+    coyoteTimer = 0.0,
+    eyeHeight = options.eyeHeight or 1.62,
+    standEyeHeight = options.eyeHeight or 1.62,
+    crouchEyeHeight = options.crouchEyeHeight or 1.24,
+    bodyRadius = options.radius or 0.30,
+    walkSpeed = options.walkSpeed or 5.1,
+    sprintSpeed = options.sprintSpeed or 7.2,
+    crouchSpeed = options.crouchSpeed or 2.4,
+    flySpeed = options.flySpeed or 9.5,
+    acceleration = options.acceleration or 55.0,
+    airAcceleration = options.airAcceleration or 14.0,
+    flyAcceleration = options.flyAcceleration or 24.0,
+    groundFriction = options.groundFriction or 46.0,
+    airFriction = options.airFriction or 2.0,
+    flyFriction = options.flyFriction or 18.0,
+    gravity = options.gravity or 19.5,
+    jumpSpeed = options.jumpSpeed or 7.4,
+    reach = options.reach or 6.0,
+    -- Vanilla-style step clearance is below a full voxel. A value above one
+    -- silently climbed block ledges and felt like forced auto-jump.
+    stepHeight = options.stepHeight or 0.60,
+    swimUpSpeed = options.swimUpSpeed or 4.6,
+    swimSinkSpeed = options.swimSinkSpeed or 0.65,
+    swimAcceleration = options.swimAcceleration or 18.0,
+    groundSnap = options.groundSnap or 0.36,
+    coyoteTime = options.coyoteTime or 0.10,
+    jumpBufferTime = options.jumpBufferTime or 0.12,
+    mouseSensitivity = options.mouseSensitivity or 0.085
+  }, Camera)
 end
 
-function Camera:setPlanet(planet) self.planet = planet end
-function Camera:controlDown(window,name,fallback) return bindingDown(window,self.controlBindings[name],fallback) end
-
-function Camera:getLocalUp(position)
-  position = position or self.position
-  if self.planet then return self.planet:localUp(position) end
-  return {0.0,1.0,0.0}
-end
-
-function Camera:stabilizeHeading()
-  local up = self:getLocalUp()
-  local tangent = math3d.projectOnPlane(self.heading, up)
-  if math3d.length(tangent) < 1e-7 then
-    if self.planet then
-      local east, _, north = self.planet:tangentFrame(self.position)
-      tangent = north or east
-    else
-      tangent = {0,0,-1}
-    end
-  end
-  self.heading = math3d.normalize(tangent)
-  return up
-end
-
-function Camera:getHorizontalFront() self:stabilizeHeading() return {self.heading[1],self.heading[2],self.heading[3]} end
-function Camera:getRight(front)
-  front = front or self:getHorizontalFront()
-  return math3d.normalize(math3d.cross(front,self:getLocalUp()))
-end
 function Camera:getFront()
-  local up = self:stabilizeHeading()
-  local pitch = math.rad(self.pitch)
-  return math3d.normalize({
-    self.heading[1]*math.cos(pitch)+up[1]*math.sin(pitch),
-    self.heading[2]*math.cos(pitch)+up[2]*math.sin(pitch),
-    self.heading[3]*math.cos(pitch)+up[3]*math.sin(pitch)
+  local radYaw = math.rad(self.yaw)
+  local radPitch = math.rad(self.pitch)
+
+  return normalize({
+    math.cos(radYaw) * math.cos(radPitch),
+    math.sin(radPitch),
+    math.sin(radYaw) * math.cos(radPitch)
   })
 end
 
+function Camera:getHorizontalFront()
+  local front = self:getFront()
+  return normalize({front[1], 0.0, front[3]})
+end
+
+function Camera:getRight(front)
+  front = front or self:getHorizontalFront()
+  return normalize({-front[3], 0.0, front[1]})
+end
+
 function Camera:updateMouse(window)
-  local xpos,ypos=ffi.new("double[1]"),ffi.new("double[1]")
-  glfw.glfwGetCursorPos(window,xpos,ypos)
-  local x,y=tonumber(xpos[0]),tonumber(ypos[0])
-  if self.firstMouse then self.lastX,self.lastY,self.firstMouse=x,y,false end
-  local xo=(x-self.lastX)*self.mouseSensitivity
-  local yo=(self.lastY-y)*self.mouseSensitivity
-  if self.invertMouse then yo=-yo end
-  self.lastX,self.lastY=x,y
-  local up=self:stabilizeHeading()
-  self.heading=math3d.normalize(rotateAroundAxis(self.heading,up,math.rad(-xo)))
-  self.yaw=(self.yaw+xo)%360.0
-  self.pitch=clamp(self.pitch+yo,-88.0,88.0)
+  local xpos = ffi.new("double[1]")
+  local ypos = ffi.new("double[1]")
+  glfw.glfwGetCursorPos(window, xpos, ypos)
+
+  local x = tonumber(xpos[0])
+  local y = tonumber(ypos[0])
+
+  if self.firstMouse then
+    self.lastX = x
+    self.lastY = y
+    self.firstMouse = false
+  end
+
+  local xoffset = (x - self.lastX) * self.mouseSensitivity
+  local yoffset = (self.lastY - y) * self.mouseSensitivity
+  self.lastX = x
+  self.lastY = y
+
+  self.yaw = self.yaw + xoffset
+  self.pitch = clamp(self.pitch + yoffset, -88.0, 88.0)
 end
 
-function Camera:getBodyHeight() return self.eyeHeight+0.18 end
-
--- Collision is asked about points, never about integer block indices: the
--- second form assumes a Cartesian lattice and cannot be answered by a
--- spherical voxel grid.
-local function sampleSolid(world,point)
-  return world:isSolidAtPoint(point[1],point[2],point[3])
+function Camera:getBodyHeight()
+  return self.eyeHeight + 0.18
 end
 
-function Camera:hasBodyClearance(world, eyePosition, allowMissingCollision)
-  local up=self:getLocalUp(eyePosition)
-  local forward=math3d.normalize(math3d.projectOnPlane(self.heading,up))
-  local right=math3d.normalize(math3d.cross(forward,up))
-  local feet={eyePosition[1]-up[1]*self.eyeHeight,eyePosition[2]-up[2]*self.eyeHeight,eyePosition[3]-up[3]*self.eyeHeight}
-  local heights={0.08,self:getBodyHeight()*0.50,self:getBodyHeight()-0.05}
-  local rings={{0,0},{1,0},{-1,0},{0,1},{0,-1}}
-  for i=1,#heights do
-    for j=1,#rings do
-      local a,b=rings[j][1]*self.bodyRadius,rings[j][2]*self.bodyRadius
-      local point={feet[1]+up[1]*heights[i]+right[1]*a+forward[1]*b,feet[2]+up[2]*heights[i]+right[2]*a+forward[2]*b,feet[3]+up[3]*heights[i]+right[3]*a+forward[3]*b}
-      local loaded=world:hasCollisionAtPoint(point[1],point[2],point[3])
-      if not allowMissingCollision and not loaded then return false end
-      if loaded and sampleSolid(world,point) then return false end
+function Camera:getCollisionSamples(x, z)
+  local radius = self.bodyRadius
+  return {
+    {x, z},
+    {x + radius, z},
+    {x - radius, z},
+    {x, z + radius},
+    {x, z - radius}
+  }
+end
+
+function Camera:getAabbBlockRange(x, z, feetY)
+  local radius = self.bodyRadius
+  return {
+    minX = math.floor(x - radius + EPSILON),
+    maxX = math.floor(x + radius - EPSILON),
+    minY = math.floor(feetY + EPSILON),
+    maxY = math.floor(feetY + self:getBodyHeight() - EPSILON),
+    minZ = math.floor(z - radius + EPSILON),
+    maxZ = math.floor(z + radius - EPSILON)
+  }
+end
+
+function Camera:hasCollisionData(world, blockX, blockZ)
+  if world.hasCollisionAtBlock then
+    return world:hasCollisionAtBlock(blockX, blockZ)
+  end
+  return world:containsBlock(blockX, blockZ)
+end
+
+function Camera:hasBodyClearance(world, x, z, feetY, allowMissingCollision)
+  local range = self:getAabbBlockRange(x, z, feetY)
+
+  for blockX = range.minX, range.maxX do
+    for blockZ = range.minZ, range.maxZ do
+      if not allowMissingCollision and not self:hasCollisionData(world, blockX, blockZ) then
+        return false
+      end
+
+      if self:hasCollisionData(world, blockX, blockZ) then
+        for y = range.minY, range.maxY do
+          if world:isSolidBlock(blockX, y, blockZ) then
+            return false
+          end
+        end
+      end
     end
   end
   return true
 end
 
--- Distance from the eye down to the ground, refined past the scan step.
---
--- This used to return the last air sample of a 0.04 m scan, so the answer was
--- quantised to 0.04 m. Standing still, gravity pulled the eye down about 2.7 mm
--- per frame while the snap only ever pushed it back in whole 0.04 m steps: the
--- player rose 4 cm, sank for thirteen frames, and rose again -- a 4.6 Hz
--- sawtooth, which is the bobbing seen while doing nothing. Bisecting the
--- bracketing interval takes the residual to well under a millimetre.
-local GROUND_SCAN_STEP=0.04
-local GROUND_REFINE_STEPS=8
+-- Flight passes through chunks that have not generated yet, otherwise
+-- unstreamed terrain would wall the player in. Outrun the streamer and those
+-- chunks materialise around you. The test below is deliberately narrow -- the
+-- head being literally inside a solid block, which normal movement never
+-- produces -- so ground snap and step-ups cannot trigger it.
+local MAX_UNSTICK_RISE = 12
 
-function Camera:groundDistance(world,maxDistance)
-  local down=self.planet and self.planet:localDown(self.position) or {0,-1,0}
-  maxDistance=maxDistance or self.eyeHeight+self.stepHeight+0.5
-  local px,py,pz=self.position[1],self.position[2],self.position[3]
-  local function solidAt(distance)
-    return world:isSolidAtPoint(
-      px+down[1]*distance, py+down[2]*distance, pz+down[3]*distance)
+function Camera:isHeadInsideBlock(world)
+  local pos = self.position
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+  if not self:hasCollisionData(world, blockX, blockZ) then
+    return false
   end
-  local low=self.eyeHeight-0.20
-  local air=nil
-  for distance=low,maxDistance,GROUND_SCAN_STEP do
-    if solidAt(distance) then
-      -- The very first sample being solid means the eye is already inside the
-      -- ground; resolveTerrainOverlap owns that case, so report the scan floor
-      -- and let it push upward.
-      if not air then return low-GROUND_SCAN_STEP end
-      local solid=distance
-      for _=1,GROUND_REFINE_STEPS do
-        local middle=(air+solid)*0.5
-        if solidAt(middle) then solid=middle else air=middle end
-      end
-      return air
-    end
-    air=distance
-  end
-  return nil
+  return world:isSolidBlock(blockX, math.floor(pos[2]), blockZ) == true
 end
 
 function Camera:resolveTerrainOverlap(world)
-  if self:hasBodyClearance(world,self.position,true) then return false end
-  local up=self:getLocalUp()
-  for rise=0.1,12.0,0.1 do
-    local candidate={self.position[1]+up[1]*rise,self.position[2]+up[2]*rise,self.position[3]+up[3]*rise}
-    if self:hasBodyClearance(world,candidate,true) then
-      self.position=candidate self.radialVelocity=0 self.velocityY=0 return true
+  if not self:isHeadInsideBlock(world) then
+    return false
+  end
+
+  local pos = self.position
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+
+  for rise = 1, MAX_UNSTICK_RISE do
+    local clearBody = self:hasBodyClearance(world, pos[1], pos[3], pos[2] - self.eyeHeight + rise, true)
+    local clearHead = not world:isSolidBlock(blockX, math.floor(pos[2] + rise), blockZ)
+    if clearBody and clearHead then
+      pos[2] = pos[2] + rise
+      self.velocityY = 0.0
+      self.velocity[2] = 0.0
+      return true
     end
+  end
+
+  return false
+end
+
+function Camera:getSupportY(world, x, z)
+  local feetY = self.position[2] - self.eyeHeight
+  local range = self:getAabbBlockRange(x, z, feetY)
+  local searchTop = math.floor(feetY + self.stepHeight)
+  local searchBottom = 0
+  local surfaceY = nil
+
+  for blockX = range.minX, range.maxX do
+    for blockZ = range.minZ, range.maxZ do
+      if not self:hasCollisionData(world, blockX, blockZ) then
+        return nil
+      end
+
+      local sampleY = nil
+      for y = searchTop, searchBottom, -1 do
+        if world:isSolidBlock(blockX, y, blockZ) then
+          sampleY = y + 1.0
+          break
+        end
+      end
+
+      if sampleY and (not surfaceY or sampleY > surfaceY) then
+        surfaceY = sampleY
+      end
+    end
+  end
+
+  if surfaceY and not self:hasBodyClearance(world, x, z, surfaceY, false) then
+    return nil
+  end
+
+  return surfaceY
+end
+
+function Camera:getGroundYAt(world, x, z)
+  local surfaceY = self:getSupportY(world, x, z)
+  if not surfaceY then
+    return nil
+  end
+
+  return surfaceY + self.eyeHeight
+end
+
+function Camera:getGroundY(world)
+  return self:getGroundYAt(world, self.position[1], self.position[3]) or self.position[2]
+end
+
+function Camera:findSpawnY(world, x, z)
+  local range = self:getAabbBlockRange(x, z, 0.0)
+  local maxHeight = world.maxHeight or 255
+
+  for blockX = range.minX, range.maxX do
+    for blockZ = range.minZ, range.maxZ do
+      if not self:hasCollisionData(world, blockX, blockZ) then
+        return nil
+      end
+    end
+  end
+
+  for y = maxHeight, 0, -1 do
+    local hasSupport = false
+    for blockX = range.minX, range.maxX do
+      for blockZ = range.minZ, range.maxZ do
+        if world:isSolidBlock(blockX, y, blockZ) then
+          hasSupport = true
+          break
+        end
+      end
+      if hasSupport then
+        break
+      end
+    end
+
+    if hasSupport then
+      local feetY = y + 1.0
+      if self:hasBodyClearance(world, x, z, feetY, false) then
+        return feetY + self.eyeHeight
+      end
+    end
+  end
+
+  return nil
+end
+
+function Camera:placeAtSpawn(world, x, z)
+  self.position[1] = x or self.position[1]
+  self.position[3] = z or self.position[3]
+  self.position[2] = self:findSpawnY(world, self.position[1], self.position[3]) or self.position[2]
+  self.velocityY = 0.0
+  self.velocity[2] = 0.0
+  self.grounded = false
+  self.coyoteTimer = 0.0
+end
+
+function Camera:canStandAt(world, x, z)
+  local groundY = self:getGroundYAt(world, x, z)
+  if not groundY then
+    return false
+  end
+
+  if groundY > self.position[2] + self.stepHeight then
+    return false
+  end
+
+  return true
+end
+
+function Camera:canOccupyAt(world, x, z, eyeY, allowMissingCollision)
+  return self:hasBodyClearance(world, x, z, eyeY - self.eyeHeight, allowMissingCollision)
+end
+
+function Camera:isBodyInLiquid(world)
+  if not world.isLiquidBlock then return false end
+  local pos = self.position
+  local feetY = pos[2] - self.eyeHeight
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+  local bottomY = math.floor(feetY + EPSILON)
+  local topY = math.floor(feetY + self:getBodyHeight() - EPSILON)
+  for y = bottomY, topY do
+    if world:isLiquidBlock(blockX, y, blockZ) then return true end
   end
   return false
 end
 
-function Camera:findSpawnPosition(world,direction)
-  direction=math3d.normalize(direction or world.spawnDirection or {0,0,1})
-  local orbitalOffset=(world.spawnAltitudeMeters or 0.0)/(world.planet.voxelSizeMeters or 1.0)
-  local surface=world:surfacePosition(direction,self.eyeHeight+1.0+orbitalOffset)
-  return surface
-end
+function Camera:applyHorizontalInput(dt, window)
+  local front = self:getHorizontalFront()
+  local right = self:getRight(front)
+  local inputX = 0.0
+  local inputZ = 0.0
+  local forwardInput = 0.0
 
-function Camera:placeAtSpawn(world,x,z)
-  self.planet=world.planet
-  local direction=world.spawnDirection or {0,0,1}
-  if type(x)=="table" then direction=x end
-  self.position=self:findSpawnPosition(world,direction)
-  self.heading=select(3,self.planet:tangentFrame(self.position))
-  self.velocity={0,0,0} self.velocityY=0 self.radialVelocity=0 self.grounded=false self.coyoteTimer=0
+  if isDown(window, glfw.GLFW_KEY_W) then
+    inputX = inputX + front[1]
+    inputZ = inputZ + front[3]
+    forwardInput = forwardInput + 1.0
+  end
+  if isDown(window, glfw.GLFW_KEY_S) then
+    inputX = inputX - front[1]
+    inputZ = inputZ - front[3]
+    forwardInput = forwardInput - 1.0
+  end
+  if isDown(window, glfw.GLFW_KEY_D) then
+    inputX = inputX + right[1]
+    inputZ = inputZ + right[3]
+  end
+  if isDown(window, glfw.GLFW_KEY_A) then
+    inputX = inputX - right[1]
+    inputZ = inputZ - right[3]
+  end
+
+  local inputLength = math.sqrt(inputX * inputX + inputZ * inputZ)
+  if inputLength > 0.0 then
+    inputX = inputX / inputLength
+    inputZ = inputZ / inputLength
+  end
+
+  local crouching = isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) and not self.flying
+  local sprinting = isDown(window, glfw.GLFW_KEY_LEFT_SHIFT) and forwardInput > 0.0 and not crouching
+  local targetEyeHeight = crouching and self.crouchEyeHeight or self.standEyeHeight
+  self.eyeHeight = moveToward(self.eyeHeight, targetEyeHeight, 5.5 * dt)
+
+  local maxSpeed = self.flying and self.flySpeed or self.walkSpeed
+  if self.flying and sprinting then
+    maxSpeed = self.flySpeed * 1.65
+  elseif crouching then
+    maxSpeed = self.crouchSpeed
+  elseif sprinting then
+    maxSpeed = self.sprintSpeed
+  end
+
+  local targetX = inputX * maxSpeed
+  local targetZ = inputZ * maxSpeed
+  local accel = self.flying and self.flyAcceleration or (self.grounded and self.acceleration or self.airAcceleration)
+
+  if inputLength == 0.0 then
+    accel = self.flying and self.flyFriction or (self.grounded and self.groundFriction or self.airFriction)
+  end
+
+  self.velocity[1], self.velocity[3] =
+    approachHorizontalVelocity(self.velocity[1], self.velocity[3], targetX, targetZ, accel * dt)
 end
 
 function Camera:updateFlightToggle(window)
-  if not self.allowFlight then self.flying=false self.flightToggleWasDown=isDown(window,glfw.GLFW_KEY_F) return end
-  local down=isDown(window,glfw.GLFW_KEY_F)
-  if down and not self.flightToggleWasDown then
-    self.flying=not self.flying self.grounded=false self.radialVelocity=0 self.velocityY=0 self.jumpBuffer=0 self.coyoteTimer=0
-  end
-  self.flightToggleWasDown=down
-end
-
-function Camera:effectiveFlySpeed()
-  local speed=self.flySpeed*(self.flySpeedMultiplier or 1.0)
-  if self.flying and self.planet then
-    local altitude=math.max(0.0,self.planet:altitudeMeters(self.position))
-    speed=math.max(speed,math.min(25000.0,altitude*0.05))
-  end
-  return speed
-end
-
--- Latitude and longitude in degrees against the +Y spin axis, altitude in
--- metres above sea level. Below the local ground the surface wins, so asking
--- for zero puts you on the ground rather than inside it.
-function Camera:teleportTo(world,latitudeDegrees,longitudeDegrees,altitudeMeters)
-  local planet=world.planet
-  self.planet=planet
-  local latitude=math.rad(math.max(-89.999,math.min(89.999,latitudeDegrees or 0.0)))
-  local longitude=math.rad(longitudeDegrees or 0.0)
-  local c=math.cos(latitude)
-  local direction={c*math.cos(longitude),math.sin(latitude),c*math.sin(longitude)}
-  local surface,sample=world:surfacePosition(direction,self.eyeHeight+1.5)
-  local surfaceRadius=planet:distanceVoxels(surface)
-  local wantedRadius=planet.radiusVoxels+(altitudeMeters or 0.0)/planet.voxelSizeMeters
-  local radius=math.max(wantedRadius,surfaceRadius)
-  self.position={
-    planet.center[1]+direction[1]*radius,
-    planet.center[2]+direction[2]*radius,
-    planet.center[3]+direction[3]*radius
-  }
-  self.velocity={0,0,0} self.velocityY=0 self.radialVelocity=0
-  self.grounded=false self.coyoteTimer=0 self.jumpBuffer=0
-  self.heading=select(3,planet:tangentFrame(self.position))
-  self:stabilizeHeading()
-  return self.position,sample
-end
-
--- Where the camera is, in the same terms the teleport takes.
-function Camera:geodeticPosition()
-  if not self.planet then return 0.0,0.0,0.0 end
-  local relative=self.planet:relative(self.position)
-  local distance=math.sqrt(relative[1]^2+relative[2]^2+relative[3]^2)
-  if distance<=0.0 then return 0.0,0.0,0.0 end
-  local latitude=math.deg(math.asin(math.max(-1.0,math.min(1.0,relative[2]/distance))))
-  local longitude=math.deg(math.atan2(relative[3],relative[1]))
-  return latitude,longitude,self.planet:altitudeMeters(self.position)
-end
-
-function Camera:movementInput(dt,window)
-  local forward,right=self:getHorizontalFront(),self:getRight()
-  local input={0,0,0} local forwardAmount=0
-  local function add(v,s) input[1]=input[1]+v[1]*s input[2]=input[2]+v[2]*s input[3]=input[3]+v[3]*s end
-  if self:controlDown(window,"forward","W") then add(forward,1) forwardAmount=1 end
-  if self:controlDown(window,"back","S") then add(forward,-1) forwardAmount=-1 end
-  if self:controlDown(window,"right","D") then add(right,1) end
-  if self:controlDown(window,"left","A") then add(right,-1) end
-  if math3d.length(input)>0 then input=math3d.normalize(input) end
-  local crouching=self:controlDown(window,"sneak","CTRL") and not self.flying
-  local sprinting=isDown(window,glfw.GLFW_KEY_LEFT_SHIFT) and forwardAmount>0 and not crouching
-  self.eyeHeight=moveToward(self.eyeHeight,crouching and self.crouchEyeHeight or self.standEyeHeight,5.5*dt)
-  local baseFlySpeed=self:effectiveFlySpeed()
-  local speed=self.flying and baseFlySpeed or (crouching and self.crouchSpeed or (sprinting and self.sprintSpeed or self.walkSpeed))
-  if self.flying and sprinting then speed=baseFlySpeed*1.65 end
-  local target={input[1]*speed,input[2]*speed,input[3]*speed}
-  local accel=math3d.length(input)==0 and (self.flying and self.flyFriction or (self.grounded and self.groundFriction or self.airFriction)) or (self.flying and self.flyAcceleration or (self.grounded and self.acceleration or self.airAcceleration))
-  if self.flying and baseFlySpeed>self.flySpeed then accel=math.max(accel,baseFlySpeed*1.8) end
-  local up=self:getLocalUp()
-  local radial=math3d.dot(self.velocity,up)
-  local tangent=math3d.projectOnPlane(self.velocity,up)
-  tangent=approachVector(tangent,target,accel*dt)
-  self.velocity={tangent[1]+up[1]*radial,tangent[2]+up[2]*radial,tangent[3]+up[3]*radial}
-end
-
-function Camera:updateRadialMovement(dt,window,world)
-  local up=self:getLocalUp()
-  if self.flying then
-    local input=(self:controlDown(window,"jump","SPACE") and 1 or 0)-(self:controlDown(window,"sneak","CTRL") and 1 or 0)
-    local flySpeed=self:effectiveFlySpeed()
-    local radialAcceleration=input==0 and math.max(self.flyFriction,flySpeed*1.2) or math.max(self.flyAcceleration,flySpeed*1.8)
-    self.radialVelocity=moveToward(self.radialVelocity,input*flySpeed,radialAcceleration*dt)
-    self.grounded=false
-  else
-    local distance=self:groundDistance(world,self.eyeHeight+self.groundSnap+self.stepHeight)
-    local onGround=distance and distance<=self.eyeHeight+self.groundSnap and self.radialVelocity<=0
-    if onGround then
-      local correction=self.eyeHeight-distance
-      self.position={self.position[1]+up[1]*correction,self.position[2]+up[2]*correction,self.position[3]+up[3]*correction}
-      self.radialVelocity=0 self.grounded=true self.coyoteTimer=self.coyoteTime
-    else self.grounded=false self.coyoteTimer=math.max(0,self.coyoteTimer-dt) end
-    local jump=self:controlDown(window,"jump","SPACE")
-    if jump and not self.jumpWasDown then self.jumpBuffer=self.jumpBufferTime else self.jumpBuffer=math.max(0,self.jumpBuffer-dt) end
-    self.jumpWasDown=jump
-    if self.jumpBuffer>0 and self.coyoteTimer>0 then self.radialVelocity=self.jumpSpeed self.grounded=false self.jumpBuffer=0 self.coyoteTimer=0 end
-    -- Gravity used to be integrated even on the frames the snap had just zeroed
-    -- the radial velocity, so a standing player sank a few millimetres every
-    -- frame and the snap kept catching them. Nothing is lost by skipping it:
-    -- stepping off a ledge clears grounded, and the next frame accelerates.
-    if not self.grounded then
-      self.radialVelocity=self.radialVelocity-(self.planet and self.planet.gravityAcceleration or self.gravity)*dt
-    end
-  end
-  self.velocityY=self.radialVelocity
-  local tangent=math3d.projectOnPlane(self.velocity,up)
-  self.velocity={tangent[1]+up[1]*self.radialVelocity,tangent[2]+up[2]*self.radialVelocity,tangent[3]+up[3]*self.radialVelocity}
-end
-
-function Camera:updateMovement(dt,window,world)
-  dt=math.min(dt,0.05) self.planet=world.planet self:updateFlightToggle(window) self:movementInput(dt,window) self:updateRadialMovement(dt,window,world)
-  local candidate={self.position[1]+self.velocity[1]*dt,self.position[2]+self.velocity[2]*dt,self.position[3]+self.velocity[3]*dt}
-  -- Developer flight is genuinely no-clip, as its label promises. Collision was
-  -- still being tested before, and at a few hundred metres a second you cross
-  -- whole chunks between frames, so you tunnel into rock and then every
-  -- candidate position is solid -- stuck, with no way out but a teleport.
-  if self.noclip then
-    self.position=candidate
-    self:stabilizeHeading()
+  if not self.allowFlight then
+    self.flying = false
+    self.flightToggleWasDown = isDown(window, glfw.GLFW_KEY_F)
     return
   end
-  if self:hasBodyClearance(world,candidate,self.flying) then self.position=candidate else
-    local up=self:getLocalUp() local tangent=math3d.projectOnPlane(self.velocity,up)
-    local radialOnly={self.position[1]+up[1]*self.radialVelocity*dt,self.position[2]+up[2]*self.radialVelocity*dt,self.position[3]+up[3]*self.radialVelocity*dt}
-    if self:hasBodyClearance(world,radialOnly,self.flying) then self.position=radialOnly else self.radialVelocity=0 self.velocityY=0 end
-    self.velocity={up[1]*self.radialVelocity,up[2]*self.radialVelocity,up[3]*self.radialVelocity}
+
+  local flightDown = isDown(window, glfw.GLFW_KEY_F)
+  if flightDown and not self.flightToggleWasDown then
+    self.flying = not self.flying
+    self.grounded = false
+    self.velocityY = 0.0
+    self.velocity[2] = 0.0
+    self.jumpBuffer = 0.0
+    self.coyoteTimer = 0.0
   end
-  self:resolveTerrainOverlap(world) self:stabilizeHeading()
+
+  self.flightToggleWasDown = flightDown
 end
 
-function Camera:update(dt,window,world) self:updateMouse(window) self:updateMovement(dt,window,world) end
-function Camera:getCenter() local f=self:getFront() return {self.position[1]+f[1],self.position[2]+f[2],self.position[3]+f[3]} end
+function Camera:moveHorizontally(dt, world)
+  local pos = self.position
+  local nextX = pos[1] + self.velocity[1] * dt
+
+  if self.flying and self:canOccupyAt(world, nextX, pos[3], pos[2], true) then
+    pos[1] = nextX
+  elseif not self.flying and self:canOccupyAt(world, nextX, pos[3], pos[2], false) then
+    pos[1] = nextX
+  else
+    self.velocity[1] = 0.0
+  end
+
+  local nextZ = pos[3] + self.velocity[3] * dt
+  if self.flying and self:canOccupyAt(world, pos[1], nextZ, pos[2], true) then
+    pos[3] = nextZ
+  elseif not self.flying and self:canOccupyAt(world, pos[1], nextZ, pos[2], false) then
+    pos[3] = nextZ
+  else
+    self.velocity[3] = 0.0
+  end
+end
+
+function Camera:applyVerticalMovement(dt, window, world)
+  if self.flying then
+    local verticalInput = 0.0
+    if isDown(window, glfw.GLFW_KEY_SPACE) then
+      verticalInput = verticalInput + 1.0
+    end
+    if isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) then
+      verticalInput = verticalInput - 1.0
+    end
+
+    local targetY = verticalInput * self.flySpeed
+    local accel = verticalInput == 0.0 and self.flyFriction or self.flyAcceleration
+    self.velocityY = moveToward(self.velocityY, targetY, accel * dt)
+    self.velocity[2] = self.velocityY
+    local nextY = self.position[2] + self.velocityY * dt
+    if self:canOccupyAt(world, self.position[1], self.position[3], nextY, true) then
+      self.position[2] = nextY
+    else
+      self.velocityY = 0.0
+      self.velocity[2] = 0.0
+    end
+    self.grounded = false
+    self.jumpWasDown = isDown(window, glfw.GLFW_KEY_SPACE)
+    return
+  end
+
+  if self:isBodyInLiquid(world) then
+    local jumpDown = isDown(window, glfw.GLFW_KEY_SPACE)
+    local descendDown = isDown(window, glfw.GLFW_KEY_LEFT_CONTROL)
+    local front = self:getFront()
+    local aimIntent = 0.0
+    if isDown(window, glfw.GLFW_KEY_W) then aimIntent = aimIntent + front[2] end
+    if isDown(window, glfw.GLFW_KEY_S) then aimIntent = aimIntent - front[2] end
+
+    -- Aimed swimming and dedicated rise/dive controls are additive. Looking up
+    -- while holding W reinforces Space; looking the other way counteracts it.
+    -- The small extra range lets combined input feel meaningfully stronger
+    -- without producing an excessive launch at the water surface.
+    local verticalIntent = aimIntent + (jumpDown and 1.0 or 0.0) - (descendDown and 1.0 or 0.0)
+    local targetY = -self.swimSinkSpeed
+    if math.abs(verticalIntent) > 0.02 then
+      targetY = clamp(verticalIntent, -1.35, 1.35) * self.swimUpSpeed
+    end
+    self.velocityY = moveToward(self.velocityY, targetY, self.swimAcceleration * dt)
+    self.velocity[2] = self.velocityY
+
+    local nextY = self.position[2] + self.velocityY * dt
+    if self:canOccupyAt(world, self.position[1], self.position[3], nextY, false) then
+      self.position[2] = nextY
+    else
+      self.velocityY = 0.0
+      self.velocity[2] = 0.0
+    end
+
+    self.grounded = false
+    self.coyoteTimer = 0.0
+    self.jumpBuffer = 0.0
+    self.jumpWasDown = jumpDown
+    return
+  end
+
+  local pos = self.position
+  local groundY = self:getGroundY(world)
+  local distanceToGround = pos[2] - groundY
+  local onGround = distanceToGround <= self.groundSnap and self.velocityY <= 0.0
+
+  if onGround then
+    self.grounded = true
+    self.coyoteTimer = self.coyoteTime
+    if distanceToGround ~= 0.0 then
+      pos[2] = moveToward(pos[2], groundY, math.max(18.0 * dt, math.abs(distanceToGround)))
+    end
+    self.velocityY = 0.0
+  else
+    self.grounded = false
+    self.coyoteTimer = math.max(0.0, self.coyoteTimer - dt)
+  end
+
+  local jumpDown = isDown(window, glfw.GLFW_KEY_SPACE)
+  -- Buffer only the press edge. Holding space must not trigger another jump on
+  -- the first grounded frame after landing.
+  if jumpDown and not self.jumpWasDown then
+    self.jumpBuffer = self.jumpBufferTime
+  else
+    self.jumpBuffer = math.max(0.0, self.jumpBuffer - dt)
+  end
+  self.jumpWasDown = jumpDown
+
+  if self.jumpBuffer > 0.0 and self.coyoteTimer > 0.0 then
+    self.velocityY = self.jumpSpeed
+    self.grounded = false
+    self.coyoteTimer = 0.0
+    self.jumpBuffer = 0.0
+  end
+
+  self.velocity[2] = self.velocityY
+  self.velocityY = self.velocityY - self.gravity * dt
+  local nextY = pos[2] + self.velocityY * dt
+
+  -- Vertical motion uses the same complete body AABB as horizontal motion.
+  -- This stops a jump from crossing a wall lip or ceiling before the later
+  -- ground snap has a chance to notice it.
+  if self:canOccupyAt(world, pos[1], pos[3], nextY, false) then
+    pos[2] = nextY
+  elseif self.velocityY > 0.0 then
+    self.velocityY = 0.0
+    self.velocity[2] = 0.0
+  else
+    local landingY = self:getGroundY(world)
+    pos[2] = landingY
+    self.velocityY = 0.0
+    self.velocity[2] = 0.0
+    self.grounded = true
+    self.coyoteTimer = self.coyoteTime
+  end
+
+  groundY = self:getGroundY(world)
+  if pos[2] < groundY then
+    pos[2] = groundY
+    self.velocityY = 0.0
+    self.velocity[2] = 0.0
+    self.grounded = true
+    self.coyoteTimer = self.coyoteTime
+  end
+end
+
+function Camera:updateMovement(dt, window, world)
+  dt = math.min(dt, 0.05)
+  self:updateFlightToggle(window)
+  self:applyHorizontalInput(dt, window)
+  self:moveHorizontally(dt, world)
+  self:applyVerticalMovement(dt, window, world)
+  -- Only flight can enter unloaded terrain and later materialise inside it.
+  -- Ground movement must never use the upward unstick teleport, because that
+  -- can lift a jumping player through a newly contacted wall.
+  if self.flying then
+    self:resolveTerrainOverlap(world)
+  end
+end
+
+function Camera:update(dt, window, world)
+  self:updateMouse(window)
+  self:updateMovement(dt, window, world)
+end
+
+function Camera:getCenter()
+  local front = self:getFront()
+  return {
+    self.position[1] + front[1],
+    self.position[2] + front[2],
+    self.position[3] + front[3]
+  }
+end
+
+function Camera:saveState()
+  return persistence.snapshot(self)
+end
+
+function Camera:restoreState(saved)
+  persistence.restore(self, saved)
+  -- The physical mouse position is process-local. Re-anchor it on the first
+  -- gameplay frame while preserving the restored view angles.
+  self.firstMouse = true
+  return self
+end
 
 return Camera

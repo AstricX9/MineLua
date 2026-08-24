@@ -1,9 +1,24 @@
 local blocks = require("blocks")
+local crafting = require("crafting")
+local items = require("items")
+local persistence = require("state_persistence")
 
 local Inventory = {}
 Inventory.__index = Inventory
+Inventory.HOTBAR_SIZE = 9
+Inventory.SLOT_COUNT = 36
 
 local STACK_LIMIT = 64
+local DEFAULT_RECIPE_DATA_ROOT = "data"
+local defaultRecipeBook
+local PERSISTENCE_OPTIONS = {exclude = {recipeBook = true}}
+
+local function recipeBook()
+  if not defaultRecipeBook then
+    defaultRecipeBook = crafting.load(DEFAULT_RECIPE_DATA_ROOT)
+  end
+  return defaultRecipeBook
+end
 
 local function copyStack(stack)
   if not stack then return nil end
@@ -38,19 +53,22 @@ function Inventory.catalog()
     local da, db = blocks.mapping[a], blocks.mapping[b]
     return (da and da.id or 0) < (db and db.id or 0)
   end)
-  result[#result + 1] = "stick"
+  for _, item in ipairs(items.catalog()) do result[#result + 1] = item end
   return result
 end
 
-function Inventory.new(gameMode)
+function Inventory.new(gameMode, options)
+  options = options or {}
   local self = setmetatable({
     gameMode = gameMode or "survival",
     slots = {},
     crafting = {},
+    craftingGridSize = 2,
+    recipeBook = options.recipeBook or recipeBook(),
     cursor = nil,
     selected = 1,
     search = "",
-    recipeHint = "Break a tree, then press E to craft planks."
+    recipeHint = "Break gravel for flint, then gather sticks from leaves or wood."
   }, Inventory)
 
   if self.gameMode == "creative" then
@@ -72,6 +90,12 @@ function Inventory:getSelected(index)
   return self.slots[index or self.selected]
 end
 
+function Inventory:normalizeSelected()
+  self.selected = math.max(1, math.min(Inventory.HOTBAR_SIZE,
+    math.floor(tonumber(self.selected) or 1)))
+  return self.selected
+end
+
 function Inventory:blockIdFor(stack)
   stack = stack or self:getSelected()
   local definition = stack and blocks.mapping[stack.item]
@@ -83,7 +107,7 @@ function Inventory:add(item, count)
   count = math.max(0, math.floor(count or 1))
   if not item or count == 0 then return 0 end
 
-  for index = 1, 36 do
+  for index = 1, Inventory.SLOT_COUNT do
     local stack = self.slots[index]
     if stack and stack.item == item and stack.count < STACK_LIMIT then
       local added = math.min(count, STACK_LIMIT - stack.count)
@@ -92,7 +116,7 @@ function Inventory:add(item, count)
       if count == 0 then return 0 end
     end
   end
-  for index = 1, 36 do
+  for index = 1, Inventory.SLOT_COUNT do
     if not self.slots[index] then
       local added = math.min(count, STACK_LIMIT)
       self.slots[index] = {item = item, count = added}
@@ -101,6 +125,21 @@ function Inventory:add(item, count)
     end
   end
   return count
+end
+
+function Inventory:spaceFor(item)
+  item = normalizedItem(item)
+  if not item then return 0 end
+  local space = 0
+  for index = 1, Inventory.SLOT_COUNT do
+    local stack = self.slots[index]
+    if not stack then
+      space = space + STACK_LIMIT
+    elseif stack.item == item then
+      space = space + math.max(0, STACK_LIMIT - stack.count)
+    end
+  end
+  return space
 end
 
 function Inventory:removeAt(index, count)
@@ -120,7 +159,7 @@ end
 
 function Inventory:find(item)
   item = normalizedItem(item)
-  for index = 1, 36 do
+  for index = 1, Inventory.SLOT_COUNT do
     if self.slots[index] and self.slots[index].item == item then return index end
   end
   return nil
@@ -130,7 +169,7 @@ function Inventory:pickBlock(item)
   item = normalizedItem(item)
   if not item then return end
   local found = self:find(item)
-  if found and found <= 9 then
+  if found and found <= Inventory.HOTBAR_SIZE then
     self.selected = found
     return found
   end
@@ -142,7 +181,7 @@ function Inventory:pickBlock(item)
 end
 
 function Inventory:swapOrMerge(index)
-  if index < 1 or index > 36 then return end
+  if index < 1 or index > Inventory.SLOT_COUNT then return end
   local slot = self.slots[index]
   if not self.cursor then
     self.cursor = slot
@@ -160,32 +199,30 @@ function Inventory:swapOrMerge(index)
   end
 end
 
-local function craftGridItems(grid)
-  local counts = {}
-  for index = 1, 4 do
-    local stack = grid[index]
-    if stack then counts[stack.item] = (counts[stack.item] or 0) + 1 end
+local function craftGrid(grid, size)
+  local result = {}
+  for row = 1, size do
+    result[row] = {}
+    for column = 1, size do
+      local stack = grid[(row - 1) * size + column]
+      result[row][column] = stack and stack.item or ""
+    end
   end
-  return counts
+  return result
 end
 
 function Inventory:craftResult()
-  local counts = craftGridItems(self.crafting)
-  local total = 0
-  for _, count in pairs(counts) do total = total + count end
-  if total == 1 and counts.oak_log == 1 then return {item = "oak_planks", count = 4} end
-  if total == 4 and counts.oak_planks == 4 then return {item = "crafting_table", count = 1} end
-  if total == 2 and counts.oak_planks == 2 then
-    local vertical = self.crafting[1] and self.crafting[3] or self.crafting[2] and self.crafting[4]
-    if vertical then return {item = "stick", count = 4} end
-  end
-  return nil
+  return crafting.matchGrid(
+    self.recipeBook,
+    craftGrid(self.crafting, self.craftingGridSize)
+  )
 end
 
 function Inventory:takeCraftResult()
   local result = self:craftResult()
   if not result then return nil end
-  for index = 1, 4 do
+  if self:spaceFor(result.item) < result.count then return nil end
+  for index = 1, self.craftingGridSize * self.craftingGridSize do
     local stack = self.crafting[index]
     if stack then
       stack.count = stack.count - 1
@@ -197,8 +234,69 @@ function Inventory:takeCraftResult()
   return copyStack(result)
 end
 
+function Inventory:craftAll()
+  local crafted = 0
+  while true do
+    local result = self:craftResult()
+    if not result or self:spaceFor(result.item) < result.count then break end
+    local taken = self:takeCraftResult()
+    if not taken then break end
+    crafted = crafted + taken.count
+  end
+  return crafted
+end
+
+function Inventory:placeCraftOne(index)
+  if index < 1 or index > self.craftingGridSize * self.craftingGridSize or not self.cursor then return false end
+  local slot = self.crafting[index]
+  if slot and (slot.item ~= self.cursor.item or slot.count >= STACK_LIMIT) then return false end
+  if slot then
+    slot.count = slot.count + 1
+  else
+    self.crafting[index] = {item = self.cursor.item, count = 1}
+  end
+  self.cursor.count = self.cursor.count - 1
+  if self.cursor.count <= 0 then self.cursor = nil end
+  return true
+end
+
+function Inventory:distributeCraft(indices)
+  if not self.cursor or type(indices) ~= "table" then return 0 end
+  local eligible, seen = {}, {}
+  for _, index in ipairs(indices) do
+    index = math.floor(tonumber(index) or 0)
+    local slot = self.crafting[index]
+    if not seen[index] and index >= 1 and index <= self.craftingGridSize * self.craftingGridSize and
+        (not slot or (slot.item == self.cursor.item and slot.count < STACK_LIMIT)) then
+      seen[index] = true
+      eligible[#eligible + 1] = index
+    end
+  end
+  if #eligible == 0 then return 0 end
+
+  local share = math.max(1, math.floor(self.cursor.count / #eligible))
+  local moved = 0
+  for _, index in ipairs(eligible) do
+    if not self.cursor then break end
+    local slot = self.crafting[index]
+    local capacity = slot and (STACK_LIMIT - slot.count) or STACK_LIMIT
+    local amount = math.min(share, capacity, self.cursor.count)
+    if amount > 0 then
+      if slot then
+        slot.count = slot.count + amount
+      else
+        self.crafting[index] = {item = self.cursor.item, count = amount}
+      end
+      self.cursor.count = self.cursor.count - amount
+      moved = moved + amount
+      if self.cursor.count <= 0 then self.cursor = nil end
+    end
+  end
+  return moved
+end
+
 function Inventory:swapCraft(index)
-  if index < 1 or index > 4 then return end
+  if index < 1 or index > self.craftingGridSize * self.craftingGridSize then return end
   local slot = self.crafting[index]
   if not self.cursor then
     self.cursor = slot
@@ -214,6 +312,33 @@ function Inventory:swapCraft(index)
   else
     self.crafting[index], self.cursor = self.cursor, slot
   end
+end
+
+function Inventory:setCraftingGridSize(size)
+  size = size == 3 and 3 or 2
+  if self.craftingGridSize == size then return end
+  self:returnCraftingItems()
+  self.craftingGridSize = size
+end
+
+function Inventory:returnCraftingItems()
+  for index = 1, 9 do
+    local stack = self.crafting[index]
+    if stack then
+      self:add(stack.item, stack.count)
+      self.crafting[index] = nil
+    end
+  end
+end
+
+function Inventory:saveState()
+  return persistence.snapshot(self, PERSISTENCE_OPTIONS)
+end
+
+function Inventory:restoreState(saved)
+  persistence.restore(self, saved, PERSISTENCE_OPTIONS)
+  self:normalizeSelected()
+  return self
 end
 
 return Inventory

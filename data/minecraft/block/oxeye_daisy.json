@@ -1,0 +1,14 @@
+{
+  "name": "Oxeye Daisy",
+  "texture": "./textures/blocks/flower_oxeye_daisy.png",
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "flower": true,
+    "cross": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true
+  }
+}

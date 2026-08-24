@@ -41,16 +41,18 @@ local M = {
   list = modApi.blocks.byId
 }
 
+local BLOCK_DATA_ROOT = "data/minecraft/block/"
+
 local function loadDataFile(name)
-  local f = io.open("data/" .. name, "r")
+  local f = io.open(BLOCK_DATA_ROOT .. name, "r")
   if not f then return nil end
   local content = f:read("*a")
   f:close()
   return json.decode(content)
 end
 
--- Fallback basic list if data/blocks.json is missing
-local blockList = loadDataFile("blocks.json") or {"air", "grass", "dirt", "stone"}
+-- Preserve registry order so numeric block IDs remain stable across saves.
+local blockList = loadDataFile("index.json") or {"air", "grass", "dirt", "stone"}
 
 for i, bname in ipairs(blockList) do
   local def = loadDataFile(bname .. ".json")

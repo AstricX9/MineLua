@@ -41,19 +41,6 @@ typedef struct MineLuaDevUiState {
   int preview_mode;
   int preview_rebuild_requested;
   int want_capture_mouse;
-  int navigation_open;
-  int fly_enabled;
-  float fly_speed_multiplier;
-  int freeze_streaming;
-  int teleport_requested;
-  int capture_requested;
-  float teleport_latitude;
-  float teleport_longitude;
-  float teleport_altitude;
-  float current_latitude;
-  float current_longitude;
-  float current_altitude;
-  float time_scale;
 } MineLuaDevUiState;
 
 int ml_imgui_init(void);
@@ -62,10 +49,9 @@ void ml_imgui_new_frame(float width, float height, float delta_time,
   float mouse_x, float mouse_y, int mouse_buttons);
 void ml_imgui_draw(MineLuaDevUiState* state);
 void ml_imgui_render(void);
-int ml_imgui_state_size(void);
 ]]
 
-local native = ffi.load("lib/minelua_imgui_tools_v3.dll")
+local native = ffi.load("lib/minelua_imgui_tools_v2.dll")
 
 local DevMenu = {}
 DevMenu.__index = DevMenu
@@ -73,18 +59,6 @@ DevMenu.__index = DevMenu
 function DevMenu.new()
   if native.ml_imgui_init() == 0 then
     error("Failed to initialize Dear ImGui OpenGL renderer")
-  end
-
-  -- The cdef above is a hand-kept mirror of the C++ struct. A mismatch would
-  -- not fail loudly; it would write past the end of the allocation. Compare
-  -- the sizes instead of trusting that both were edited together.
-  local nativeSize = native.ml_imgui_state_size()
-  local mirroredSize = ffi.sizeof("MineLuaDevUiState")
-  if nativeSize ~= mirroredSize then
-    error(string.format(
-      "Dev UI state layout mismatch: the bridge reports %d bytes, dev_menu.lua describes %d. " ..
-      "Rebuild lib/minelua_imgui_tools_v3.dll with build_imgui.bat, or resync the ffi.cdef.",
-      tonumber(nativeSize), tonumber(mirroredSize)))
   end
 
   local state = ffi.new("MineLuaDevUiState[1]")
@@ -126,53 +100,47 @@ function DevMenu.new()
   state[0].preview_mode = 0
   state[0].preview_rebuild_requested = 0
   state[0].want_capture_mouse = 0
-  state[0].navigation_open = 0
-  state[0].fly_enabled = 0
-  state[0].fly_speed_multiplier = 1.0
-  state[0].freeze_streaming = 0
-  state[0].teleport_requested = 0
-  state[0].capture_requested = 0
-  state[0].teleport_latitude = 0.0
-  state[0].teleport_longitude = 0.0
-  state[0].teleport_altitude = 120.0
-  state[0].current_latitude = 0.0
-  state[0].current_longitude = 0.0
-  state[0].current_altitude = 0.0
-  state[0].time_scale = 1.0
 
   return setmetatable({state = state}, DevMenu)
 end
 
 function DevMenu:stagedGenerationSettings()
   local state = self.state[0]
-  return {
-    seed = tonumber(state.seed),
-    seaLevel = graphics.terrainGeneration.seaLevel or 63,
-    continentScale = tonumber(state.continent_scale),
-    biomeScale = tonumber(state.biome_scale),
-    regionScale = tonumber(state.region_scale),
-    mountainScale = tonumber(state.mountain_scale),
-    riverScale = tonumber(state.river_scale),
-    forestScale = tonumber(state.forest_scale),
-    macroWarpScale = tonumber(state.macro_warp_scale),
-    macroWarpAmount = tonumber(state.macro_warp_amount),
-    detailScale = tonumber(state.detail_scale),
-    reliefGain = tonumber(state.relief_gain),
-    localReliefGain = tonumber(state.local_relief_gain),
-    erosionStrength = tonumber(state.erosion_strength),
-    riverCarveStrength = tonumber(state.river_carve_strength),
-    lakeCarveStrength = tonumber(state.lake_carve_strength),
-    mountainSharpness = tonumber(state.mountain_sharpness),
-    shorelineWidth = tonumber(state.shoreline_width),
-    rockyShoreThreshold = tonumber(state.rocky_shore_threshold),
-    biomeClimateInfluence = tonumber(state.biome_climate_influence),
-    snowTemperature = tonumber(state.snow_temperature),
-    elevationCooling = tonumber(state.elevation_cooling),
-    freezeTemperature = tonumber(state.freeze_temperature),
-    grassTintStrength = tonumber(state.grass_tint_strength),
-    treeDensity = tonumber(state.tree_density),
-    grassDensity = graphics.terrainGeneration.grassDensity or 1.35
-  }
+  -- Preserve every central pipeline control even when the native tuning panel
+  -- does not have a widget for it yet. Exported presets remain complete.
+  local staged = {}
+  for key, value in pairs(graphics.terrainGeneration) do staged[key] = value end
+  staged.seed = tonumber(state.seed)
+  staged.seaLevel = graphics.terrainGeneration.seaLevel or 63
+  staged.continentScale = tonumber(state.continent_scale)
+  staged.biomeScale = tonumber(state.biome_scale)
+  staged.regionScale = tonumber(state.region_scale)
+  staged.mountainScale = tonumber(state.mountain_scale)
+  staged.riverScale = tonumber(state.river_scale)
+  staged.forestScale = tonumber(state.forest_scale)
+  staged.macroWarpScale = tonumber(state.macro_warp_scale)
+  staged.macroWarpAmount = tonumber(state.macro_warp_amount)
+  staged.detailScale = tonumber(state.detail_scale)
+  staged.reliefGain = tonumber(state.relief_gain)
+  staged.localReliefGain = tonumber(state.local_relief_gain)
+  staged.terrainVerticalScale = math.max(0.1, staged.reliefGain / 2.4)
+  staged.surfaceDetailStrength = math.max(0.0, staged.localReliefGain / 2.0)
+  staged.erosionStrength = tonumber(state.erosion_strength)
+  staged.riverCarveStrength = tonumber(state.river_carve_strength)
+  staged.riverGridSize = math.max(28.0, math.min(112.0,
+    56.0 * 0.00115 / math.max(0.0001, staged.riverScale)))
+  staged.lakeCarveStrength = tonumber(state.lake_carve_strength)
+  staged.mountainSharpness = tonumber(state.mountain_sharpness)
+  staged.shorelineWidth = tonumber(state.shoreline_width)
+  staged.rockyShoreThreshold = tonumber(state.rocky_shore_threshold)
+  staged.biomeClimateInfluence = tonumber(state.biome_climate_influence)
+  staged.snowTemperature = tonumber(state.snow_temperature)
+  staged.elevationCooling = tonumber(state.elevation_cooling)
+  staged.altitudeLapseRate = staged.elevationCooling
+  staged.freezeTemperature = tonumber(state.freeze_temperature)
+  staged.grassTintStrength = tonumber(state.grass_tint_strength)
+  staged.treeDensity = tonumber(state.tree_density)
+  return staged
 end
 
 function DevMenu:commitGenerationChanges(target)
@@ -215,45 +183,29 @@ function DevMenu:consumePreviewRebuildRequest()
 end
 
 local function generationPresetJson(settings)
-  return string.format([[{
-  "terrainGeneration": {
-    "seed": %d,
-    "seaLevel": %d,
-    "continentScale": %.8g,
-    "biomeScale": %.8g,
-    "regionScale": %.8g,
-    "mountainScale": %.8g,
-    "riverScale": %.8g,
-    "forestScale": %.8g,
-    "macroWarpScale": %.8g,
-    "macroWarpAmount": %.8g,
-    "detailScale": %.8g,
-    "reliefGain": %.8g,
-    "localReliefGain": %.8g,
-    "erosionStrength": %.8g,
-    "riverCarveStrength": %.8g,
-    "lakeCarveStrength": %.8g,
-    "mountainSharpness": %.8g,
-    "shorelineWidth": %.8g,
-    "rockyShoreThreshold": %.8g,
-    "biomeClimateInfluence": %.8g,
-    "snowTemperature": %.8g,
-    "elevationCooling": %.8g,
-    "freezeTemperature": %.8g,
-    "grassTintStrength": %.8g,
-    "treeDensity": %.8g
-  }
-}
-]], settings.seed, settings.seaLevel or 63, settings.continentScale,
-    settings.biomeScale, settings.regionScale, settings.mountainScale,
-    settings.riverScale, settings.forestScale, settings.macroWarpScale,
-    settings.macroWarpAmount, settings.detailScale, settings.reliefGain,
-    settings.localReliefGain, settings.erosionStrength,
-    settings.riverCarveStrength, settings.lakeCarveStrength,
-    settings.mountainSharpness, settings.shorelineWidth,
-    settings.rockyShoreThreshold, settings.biomeClimateInfluence,
-    settings.snowTemperature, settings.elevationCooling,
-    settings.freezeTemperature, settings.grassTintStrength, settings.treeDensity)
+  local keys = {}
+  for key, value in pairs(settings) do
+    if type(value) == "number" or type(value) == "boolean" or type(value) == "string" then
+      keys[#keys + 1] = key
+    end
+  end
+  table.sort(keys)
+  local lines = {"{", "  \"terrainGeneration\": {"}
+  for index, key in ipairs(keys) do
+    local value = settings[key]
+    local encoded
+    if type(value) == "number" then
+      encoded = string.format("%.10g", value)
+    elseif type(value) == "boolean" then
+      encoded = tostring(value)
+    else
+      encoded = string.format("%q", value)
+    end
+    lines[#lines + 1] = string.format("    %q: %s%s", key, encoded, index < #keys and "," or "")
+  end
+  lines[#lines + 1] = "  }"
+  lines[#lines + 1] = "}"
+  return table.concat(lines, "\n") .. "\n"
 end
 
 function DevMenu:processExportRequest()
@@ -261,7 +213,7 @@ function DevMenu:processExportRequest()
     return false
   end
   self.state[0].export_requested = 0
-  local file = io.open("data/worldgen_tuning.json", "w")
+  local file = io.open("data/config/worldgen_tuning.json", "w")
   if not file then
     self.state[0].export_status = -1
     return false
@@ -270,63 +222,6 @@ function DevMenu:processExportRequest()
   file:close()
   self.state[0].export_status = 1
   return true
-end
-
--- Navigation panel. The world that is actually loaded is a ball roughly 100 m
--- across, so exploring it on foot at 5 m/s is not a realistic proposition;
--- these are the controls that make a planet-sized world navigable.
-
-function DevMenu:flyEnabled()
-  return self.state[0].fly_enabled ~= 0
-end
-
-function DevMenu:setFlyEnabled(enabled)
-  self.state[0].fly_enabled = enabled and 1 or 0
-end
-
-function DevMenu:flySpeedMultiplier()
-  return math.max(1.0, tonumber(self.state[0].fly_speed_multiplier) or 1.0)
-end
-
-function DevMenu:freezesStreaming()
-  return self.state[0].freeze_streaming ~= 0
-end
-
-function DevMenu:timeScale()
-  return math.max(0.0, tonumber(self.state[0].time_scale) or 1.0)
-end
-
--- Latitude and longitude in degrees, altitude in metres above sea level.
-function DevMenu:consumeTeleportRequest()
-  if self.state[0].teleport_requested == 0 then return nil end
-  self.state[0].teleport_requested = 0
-  return tonumber(self.state[0].teleport_latitude),
-    tonumber(self.state[0].teleport_longitude),
-    tonumber(self.state[0].teleport_altitude)
-end
-
-function DevMenu:consumeCaptureRequest()
-  if self.state[0].capture_requested == 0 then return false end
-  self.state[0].capture_requested = 0
-  self.state[0].teleport_latitude = self.state[0].current_latitude
-  self.state[0].teleport_longitude = self.state[0].current_longitude
-  self.state[0].teleport_altitude = self.state[0].current_altitude
-  return true
-end
-
-function DevMenu:setCurrentLocation(latitude, longitude, altitude)
-  local state = self.state[0]
-  state.current_latitude = latitude or 0.0
-  state.current_longitude = longitude or 0.0
-  state.current_altitude = altitude or 0.0
-end
-
--- Opens the toolstrip with the navigation panel showing. Used by the headless
--- smoke run: with the menu closed the panel code never executes at all, so a
--- mistake in it would not surface until someone pressed F4.
-function DevMenu:openNavigation()
-  self.state[0].menu_open = 1
-  self.state[0].navigation_open = 1
 end
 
 function DevMenu:isOpen()
