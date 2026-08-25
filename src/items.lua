@@ -6,6 +6,11 @@ local Items = {
 local definitions = {
   {key="stick", name="Stick", texture="./textures/items/stick.png"},
   {key="flint", name="Flint", texture="./textures/items/flint.png"},
+  {key="coal", name="Coal", texture="./textures/items/coal.png"},
+  {key="charcoal", name="Charcoal", texture="./textures/items/charcoal.png"},
+  {key="iron_ingot", name="Iron Ingot", texture="./textures/items/iron_ingot.png"},
+  {key="gold_ingot", name="Gold Ingot", texture="./textures/items/gold_ingot.png"},
+  {key="brick", name="Brick", texture="./textures/items/brick.png"},
   {key="flint_hatchet", name="Flint Hatchet", texture="./textures/items/flint_hatchet.png", toolType="axe", tier=1, speed=2.0},
   {key="wood_pickaxe", name="Wooden Pickaxe", texture="./textures/items/wood_pickaxe.png", toolType="pickaxe", tier=1, speed=2.0},
   {key="wood_axe", name="Wooden Axe", texture="./textures/items/wood_axe.png", toolType="axe", tier=1, speed=2.0},

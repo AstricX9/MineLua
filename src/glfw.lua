@@ -3,6 +3,7 @@ local ffi = require("ffi")
 ffi.cdef[[
 typedef void GLFWwindow;
 typedef void GLFWmonitor;
+typedef void (*GLFWscrollfun)(GLFWwindow* window, double xoffset, double yoffset);
 typedef struct GLFWvidmode {
   int width;
   int height;
@@ -27,6 +28,7 @@ void glfwGetCursorPos(GLFWwindow* window, double* xpos, double* ypos);
 void glfwGetWindowPos(GLFWwindow* window, int* xpos, int* ypos);
 void glfwGetWindowSize(GLFWwindow* window, int* width, int* height);
 void glfwGetFramebufferSize(GLFWwindow* window, int* width, int* height);
+GLFWscrollfun glfwSetScrollCallback(GLFWwindow* window, GLFWscrollfun callback);
 void glfwSetWindowMonitor(GLFWwindow* window, GLFWmonitor* monitor, int xpos, int ypos, int width, int height, int refreshRate);
 GLFWmonitor* glfwGetPrimaryMonitor(void);
 const GLFWvidmode* glfwGetVideoMode(GLFWmonitor* monitor);

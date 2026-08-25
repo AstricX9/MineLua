@@ -80,12 +80,14 @@ end
 
 function M.initTextures(atlas)
   for _, def in pairs(M.list) do
-    def.uvs = { top = nil, bottom = nil, side = nil }
+    def.uvs = { top = nil, bottom = nil, side = nil, front = nil, back = nil }
     def.color = {1.0, 1.0, 1.0}
     def.colors = {
       top = {1.0, 1.0, 1.0},
       bottom = {1.0, 1.0, 1.0},
-      side = {1.0, 1.0, 1.0}
+      side = {1.0, 1.0, 1.0},
+      front = {1.0, 1.0, 1.0},
+      back = {1.0, 1.0, 1.0}
     }
 
     local colormapColor = nil
@@ -100,20 +102,27 @@ function M.initTextures(atlas)
     if type(def.texture) == "string" then
       local uv = atlas:addTexture(def.name, def.texture)
       def.uvs.top = uv; def.uvs.bottom = uv; def.uvs.side = uv
+      def.uvs.front = uv; def.uvs.back = uv
       if colormapColor and not def.biomeTint then
         def.colors.top = colormapColor
         def.colors.bottom = colormapColor
         def.colors.side = colormapColor
+        def.colors.front = colormapColor
+        def.colors.back = colormapColor
       end
     elseif type(def.texture) == "table" then
       def.uvs.top = addFaceTexture(atlas, def.name .. "_top", def.texture.top, atlasTint)
       def.uvs.bottom = addFaceTexture(atlas, def.name .. "_bottom", def.texture.bottom, atlasTint)
       def.uvs.side = addFaceTexture(atlas, def.name .. "_side", def.texture.side, atlasTint)
+      def.uvs.front = addFaceTexture(atlas, def.name .. "_front", def.texture.front or def.texture.side, atlasTint)
+      def.uvs.back = addFaceTexture(atlas, def.name .. "_back", def.texture.back or def.texture.side, atlasTint)
 
       if colormapColor and not def.biomeTint then
         def.colors.top = isLayeredTexture(def.texture.top) and {1.0, 1.0, 1.0} or colormapColor
         def.colors.bottom = isLayeredTexture(def.texture.bottom) and {1.0, 1.0, 1.0} or colormapColor
         def.colors.side = isLayeredTexture(def.texture.side) and {1.0, 1.0, 1.0} or colormapColor
+        def.colors.front = isLayeredTexture(def.texture.front or def.texture.side) and {1.0, 1.0, 1.0} or colormapColor
+        def.colors.back = isLayeredTexture(def.texture.back or def.texture.side) and {1.0, 1.0, 1.0} or colormapColor
       end
     else
       -- air, etc

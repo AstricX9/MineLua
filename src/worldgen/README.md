@@ -25,3 +25,13 @@ All stages are pure functions of world seed and world coordinates. Regional
 caches contain only reproducible derived data and never depend on chunk creation
 order. `terrain.debugFieldsAt` and `terrain.debugColorAt` form the stable debug
 interface for F3 data and future map overlays.
+
+## World strategies
+
+`world_profiles.lua` binds a stable world id to a generator module, atmosphere,
+physics, and population policy. `terrain.setWorldProfile` loads
+`worldgen.<profile.generator>` and consumes the shared semantic methods
+(`sampleColumn`, `heightAt`, `macroAt`, chunk/debug sampling). The Earth pipeline
+above is `worldgen.pipeline`; Mars is the independent `worldgen.mars` strategy.
+Future dimension-like worlds can add a profile and a module without branching
+the terrain adapter, save flow, or renderer.

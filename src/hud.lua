@@ -484,27 +484,6 @@ local function appendStatusBars(meshes, width, height, state)
   end
 end
 
-local function appendHand(vertices, width, height, time, swing)
-  local scale = math.max(0.75, math.min(1.18, height / 720.0))
-  swing = math.max(0, math.min(1, swing or 0))
-  local arc = math.sin(swing * math.pi)
-  local x = width - (128 - arc * 34) * scale
-  local y = height - (205 - arc * 48) * scale
-  local armW = 82 * scale
-  local armH = 218 * scale
-  local points = {
-    {ndcX(x + 12 * scale, width), ndcY(y + 8 * scale, height)},
-    {ndcX(x + armW, width), ndcY(y + 38 * scale, height)},
-    {ndcX(x + armW - 6 * scale, width), ndcY(y + armH, height)},
-    {ndcX(x - 4 * scale, width), ndcY(y + armH, height)}
-  }
-  appendQuad(vertices, {
-    points[1], points[2], points[3], points[4]
-  }, COLORS.white, {{44/64,20/64},{48/64,20/64},{48/64,32/64},{44/64,32/64}}, 1.0, 0.0)
-  -- Sleeve/skin second layer is alpha cut out by the skin texture.
-  appendQuad(vertices, points, {1,1,1,0.92}, {{44/64,36/64},{48/64,36/64},{48/64,48/64},{44/64,48/64}}, 1.0, 0.0)
-end
-
 local function appendHotbar(vertices, width, height, selectedSlot)
   local scale = 2
   local hotbarW = 182 * scale
@@ -524,7 +503,7 @@ local function appendCrosshair(vertices, width, height)
   appendSprite(vertices, width, height, cx, cy, size, size, 0, 0, 9, 9, 9, 9, COLORS.white)
 end
 
-local function appendInventoryItem(vertices, width, height, x, y, size, stack)
+local function appendInventoryItem(vertices, width, height, x, y, size, stack, renderBlockModel)
   if not stack then return end
   local definition = blocks.mapping[stack.item] or items.mapping[stack.item]
   local uv = definition and definition.uvs and (definition.uvs.top or definition.uvs.side)
@@ -533,42 +512,142 @@ local function appendInventoryItem(vertices, width, height, x, y, size, stack)
   local properties = definition.properties or {}
   local topUv = definition.uvs.top or uv
   local sideUv = definition.uvs.side or uv
-  if properties.solid and not itemMesh.isSprite(definition) and topUv and sideUv then
-    -- Minecraft's inventory renderer presents blocks as a lit isometric cube,
-    -- not as a flat sample of the top texture. Keep all geometry in the HUD
-    -- batch so this remains cheap even for the 45-slot creative grid.
+  local frontUv = definition.uvs.front or sideUv
+  if renderBlockModel ~= false and properties.solid and not itemMesh.isSprite(definition) and topUv and sideUv then
+    -- Solid inventory items are equal-dimension 3D cubes fitted into the
+    -- square slot. Sprite items keep their flat/extruded item representation.
     local top = {x + size * 0.50, y + size * 0.04}
     local right = {x + size * 0.91, y + size * 0.26}
     local center = {x + size * 0.50, y + size * 0.49}
     local left = {x + size * 0.09, y + size * 0.26}
-    local bottomRight = {x + size * 0.91, y + size * 0.64}
-    local bottom = {x + size * 0.50, y + size * 0.88}
-    local bottomLeft = {x + size * 0.09, y + size * 0.64}
+    -- The vertical edges match the projected top edges, so this reads as a
+    -- 1:1:1 cube rather than a short rectangular block.
+    local bottomRight = {x + size * 0.91, y + size * 0.725}
+    local bottom = {x + size * 0.50, y + size * 0.945}
+    local bottomLeft = {x + size * 0.09, y + size * 0.725}
     local colors = definition.colors or {}
     local topColor = definition.biomeTint and definition.color or colors.top or definition.color or {1,1,1}
     local sideColor = definition.biomeTint and definition.color or colors.side or definition.color or {1,1,1}
+    local frontColor = definition.biomeTint and definition.color or colors.front or sideColor
     local function shade(color, amount)
       return {color[1] * amount, color[2] * amount, color[3] * amount, 1.0}
     end
     local function point(p) return {ndcX(p[1],width),ndcY(p[2],height)} end
     local sideUvs = {{sideUv.u0,sideUv.v0},{sideUv.u1,sideUv.v0},{sideUv.u1,sideUv.v1},{sideUv.u0,sideUv.v1}}
+    local frontUvs = {{frontUv.u0,frontUv.v0},{frontUv.u1,frontUv.v0},{frontUv.u1,frontUv.v1},{frontUv.u0,frontUv.v1}}
     appendQuad(vertices,{point(left),point(center),point(bottom),point(bottomLeft)},shade(sideColor,0.72),sideUvs,1.0,0.0)
-    appendQuad(vertices,{point(center),point(right),point(bottomRight),point(bottom)},shade(sideColor,0.88),sideUvs,1.0,0.0)
+    appendQuad(vertices,{point(center),point(right),point(bottomRight),point(bottom)},shade(frontColor,0.88),frontUvs,1.0,0.0)
     appendQuad(vertices,{point(top),point(right),point(center),point(left)},shade(topColor,1.0),
       {{topUv.u0,topUv.v0},{topUv.u1,topUv.v0},{topUv.u1,topUv.v1},{topUv.u0,topUv.v1}},1.0,0.0)
   else
-    appendQuad(vertices, {
-      {ndcX(x,width),ndcY(y,height)}, {ndcX(x+size,width),ndcY(y,height)},
-      {ndcX(x+size,width),ndcY(y+size,height)}, {ndcX(x,width),ndcY(y+size,height)}
-    }, definition.color and {definition.color[1],definition.color[2],definition.color[3],1} or COLORS.white,
-    {{uv.u0,uv.v0},{uv.u1,uv.v0},{uv.u1,uv.v1},{uv.u0,uv.v1}}, 1.0, 0.0)
+    local iconScale=1.0
+    if itemMesh.isSprite(definition) then
+      iconScale=items.mapping[stack.item] and 0.82 or 0.90
+      if stack.item=="flint" then iconScale=0.68 end
+    end
+    local iconSize=size*iconScale
+    local iconX=x+(size-iconSize)*0.5
+    local iconY=y+(size-iconSize)*0.5
+    local iconUvs={{uv.u0,uv.v0},{uv.u1,uv.v0},{uv.u1,uv.v1},{uv.u0,uv.v1}}
+    local function iconQuad(px,py,color)
+      appendQuad(vertices,{
+        {ndcX(px,width),ndcY(py,height)}, {ndcX(px+iconSize,width),ndcY(py,height)},
+        {ndcX(px+iconSize,width),ndcY(py+iconSize,height)}, {ndcX(px,width),ndcY(py+iconSize,height)}
+      },color,iconUvs,1.0,0.0)
+    end
+    if itemMesh.isSprite(definition) then
+      local offset=math.max(1,math.floor(size*0.055))
+      iconQuad(iconX+offset,iconY+offset,{0.0,0.0,0.0,0.32})
+    end
+    iconQuad(iconX,iconY,
+      definition.color and {definition.color[1],definition.color[2],definition.color[3],1} or COLORS.white)
+  end
+end
+
+-- Held foliage and tools use the same thin, pixel-extruded silhouette as world
+-- item drops.  The HUD has no depth buffer, so project that shape directly
+-- into screen space: a dark back layer and only the exposed pixel edges give
+-- the sprite real thickness without turning inventory icons into hundreds of
+-- tiny quads as well.
+local function appendHeldSprite(vertices, width, height, definition, centerX, centerY, size, swing)
+  local uv = definition.uv or definition.uvs.top or definition.uvs.side
+  if not uv then return end
+  local color = definition.color or {1,1,1}
+  local tint = {color[1],color[2],color[3],1}
+  local edgeTint = {color[1]*0.48,color[2]*0.48,color[3]*0.48,1}
+  local arc = math.sin(math.max(0,math.min(1,swing or 0))*math.pi)
+  centerX, centerY = centerX-arc*28, centerY+arc*38
+  local depth = math.max(5,math.floor(size*0.065))
+  -- `item/handheld` rotates the generated item -90 degrees around Y and 25
+  -- degrees around Z.  In this orthographic HUD projection the Y turn presents
+  -- the reverse face (a horizontal mirror); the Z turn remains a screen-space
+  -- rotation.  The 0.68 model scale is baked into `size` below.
+  local angle=math.rad(25+arc*22)
+  local cosine,sine=math.cos(angle),math.sin(angle)
+  local function screen(px,py)
+    local localX=-(px-0.5)*size
+    local localY=(py-0.5)*size
+    local projectedX=centerX+localX*cosine+localY*sine
+    local projectedY=centerY-localX*sine+localY*cosine
+    return {ndcX(projectedX,width),ndcY(projectedY,height)}
+  end
+  local front = {screen(0,0),screen(1,0),screen(1,1),screen(0,1)}
+
+  local value = definition.texture
+  if type(value)=="table" then
+    value=value.top or value.side
+    if type(value)=="table" then value=value[1] end
+  end
+  local image = type(value)=="string" and texture.loadPng(value) or nil
+  if image then
+    local function opaque(px,py)
+      if px<0 or py<0 or px>=image.w or py>=image.h then return false end
+      return image.data[(py*image.w+px)*4+3]>=128
+    end
+    local function edge(x0,y0,x1,y1,sampleX,sampleY)
+      local p0=screen(x0/image.w,y0/image.h)
+      local p1=screen(x1/image.w,y1/image.h)
+      local dx=depth*2/width local dy=depth*2/height
+      local eu=uv.u0+(uv.u1-uv.u0)*(sampleX+0.5)/image.w
+      local ev=uv.v0+(uv.v1-uv.v0)*(sampleY+0.5)/image.h
+      appendQuad(vertices,{p0,p1,{p1[1]+dx,p1[2]-dy},{p0[1]+dx,p0[2]-dy}},edgeTint,
+        {{eu,ev},{eu,ev},{eu,ev},{eu,ev}},1,0)
+    end
+    for py=0,image.h-1 do for px=0,image.w-1 do if opaque(px,py) then
+      if not opaque(px-1,py) then edge(px,py+1,px,py,px,py) end
+      if not opaque(px+1,py) then edge(px+1,py,px+1,py+1,px,py) end
+      if not opaque(px,py-1) then edge(px,py,px+1,py,px,py) end
+      if not opaque(px,py+1) then edge(px+1,py+1,px,py+1,px,py) end
+    end end end
+  else
+    local dx=depth*2/width local dy=depth*2/height
+    appendQuad(vertices,{{front[1][1]+dx,front[1][2]-dy},{front[2][1]+dx,front[2][2]-dy},
+      {front[3][1]+dx,front[3][2]-dy},{front[4][1]+dx,front[4][2]-dy}},edgeTint,
+      {{uv.u0,uv.v0},{uv.u1,uv.v0},{uv.u1,uv.v1},{uv.u0,uv.v1}},1,0)
+  end
+  appendQuad(vertices,front,tint,
+    {{uv.u0,uv.v0},{uv.u1,uv.v0},{uv.u1,uv.v1},{uv.u0,uv.v1}},1,0)
+end
+
+local function appendHeldItem(vertices,width,height,stack,swing)
+  local definition=stack and (blocks.mapping[stack.item] or items.mapping[stack.item])
+  if not definition or not definition.uvs then return end
+  if itemMesh.isSprite(definition) then
+    -- Use a slightly more distant 0.50 first-person scale (rather than the raw
+    -- model's 0.68) and anchor it low/right.  This corresponds roughly to view
+    -- position (0.58,-0.62,-1.05): the handle deliberately exits the viewport.
+    local displayScale=math.max(0.82,math.min(1.28,height/720))
+    appendHeldSprite(vertices,width,height,definition,width-100*displayScale,
+      height-76*displayScale,170*displayScale,swing)
+  else
+    local arc=math.sin(math.max(0,math.min(1,swing or 0))*math.pi)
+    appendInventoryItem(vertices,width,height,width-276-arc*32,height-318+arc*42,190,stack,true)
   end
 end
 
 local function buildMeshes(width, height, selectedSlot, state, time)
   local meshes = {
     color = {},
-    skin = {},
     widgets = {},
     heartEmpty = {},
     heartHalf = {},
@@ -588,9 +667,8 @@ local function buildMeshes(width, height, selectedSlot, state, time)
     return definition and {item = definition.key, count = 1} or nil
   end
 
-  appendHand(meshes.skin, width, height, time, state and state.handSwing)
   local held = hotbarStack(selectedSlot)
-  if held then appendInventoryItem(meshes.terrain,width,height,width-142,height-190,72,held) end
+  if held then appendHeldItem(meshes.terrain,width,height,held,state and state.handSwing) end
   if not state or state.worldGameMode ~= "creative" then appendStatusBars(meshes, width, height, state) end
   appendHotbar(meshes.widgets, width, height, selectedSlot)
   appendCrosshair(meshes.crosshair, width, height)
@@ -680,17 +758,15 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
       appendText(meshes.font, width, height, scale, "Seed for the World Generator", cx - 100, 47, TEXT_MUTED)
       appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, menuState.worldSeedText or "")
       appendText(meshes.font, width, height, scale, "Leave blank for a random seed", cx - 100, 84, TEXT_MUTED)
-      appendText(meshes.font, width, height, scale, "Villages, dungeons, etc.", cx - 155, 124, TEXT_MUTED)
-      appendText(meshes.font, width, height, scale, "Commands like /gamemode", cx - 155, 160, TEXT_MUTED)
     else
       local worldName = menuState.worldNameText or "New World"
       appendText(meshes.font, width, height, scale, "World Name", cx - 100, 47, TEXT_MUTED)
       appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, worldName)
       appendText(meshes.font, width, height, scale, "Will be saved in: " .. worldName, cx - 100, 85, TEXT_MUTED)
       if (menuState.worldGameMode or "survival") == "creative" then
-        appendText(meshes.font, width, height, scale, "Unlimited resources and free flying", cx - 100, 124, TEXT_MUTED)
+        appendText(meshes.font, width, height, scale, "Unlimited resources and free flying", cx - 100, 152, TEXT_MUTED)
       else
-        appendText(meshes.font, width, height, scale, "Search for resources, craft and survive", cx - 100, 124, TEXT_MUTED)
+        appendText(meshes.font, width, height, scale, "Search for resources, craft and survive", cx - 100, 152, TEXT_MUTED)
       end
     end
   elseif screen == "options" then
@@ -736,9 +812,11 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
         local fill = hovered and {0.24, 0.24, 0.24, 0.94} or {0.04, 0.04, 0.04, 0.88}
         appendScaledRect(meshes.color, width, height, scale, button.x, button.y, button.w, button.h, border)
         appendScaledRect(meshes.color, width, height, scale, button.x + 1, button.y + 1, button.w - 2, button.h - 2, fill)
-        appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 3, 28, 28,
-          world.generatorType == "superflat" and {0.34, 0.65, 0.20, 1.0} or {0.16, 0.43, 0.72, 1.0})
-        appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 19, 28, 12, {0.20, 0.52, 0.16, 1.0})
+        local iconSky = world.worldId == "mars" and {0.66, 0.31, 0.17, 1.0} or
+          (world.generatorType == "superflat" and {0.34, 0.65, 0.20, 1.0} or {0.16, 0.43, 0.72, 1.0})
+        local iconGround = world.worldId == "mars" and {0.44, 0.20, 0.12, 1.0} or {0.20, 0.52, 0.16, 1.0}
+        appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 3, 28, 28, iconSky)
+        appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 19, 28, 12, iconGround)
         appendText(meshes.font, width, height, scale, tostring(world.worldName):sub(1, 34), button.x + 36, button.y + 3, TEXT_WHITE)
         appendText(meshes.font, width, height, scale,
           (tostring(world.folderName):sub(1, 18) .. " - " .. tostring(world.lastPlayedText)), button.x + 36, button.y + 13, TEXT_MUTED)
@@ -928,6 +1006,20 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
       return {kind="result",x=result.x,y=result.y,w=result.w,h=result.h}
     end
   end
+  if screen == "furnace" then
+    local input=inventoryRect(layout,56,17,16)
+    local fuel=inventoryRect(layout,56,53,16)
+    local output=inventoryRect(layout,116,35,16)
+    if pointIn(mouseX,mouseY,input.x,input.y,input.w,input.h) then
+      return {kind="furnace_input",x=input.x,y=input.y,w=input.w,h=input.h}
+    end
+    if pointIn(mouseX,mouseY,fuel.x,fuel.y,fuel.w,fuel.h) then
+      return {kind="furnace_fuel",x=fuel.x,y=fuel.y,w=fuel.w,h=fuel.h}
+    end
+    if pointIn(mouseX,mouseY,output.x,output.y,output.w,output.h) then
+      return {kind="furnace_output",x=output.x,y=output.y,w=output.w,h=output.h}
+    end
+  end
 
   for row=0,2 do for col=0,8 do
     local x,y=layout.x+16+col*36,layout.y+168+row*36
@@ -937,7 +1029,7 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
     local x,y=layout.x+16+col*36,layout.y+284
     if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1,x=x,y=y,w=32,h=32} end
   end
-  if screen == "crafting_table" then return nil end
+  if screen == "crafting_table" or screen == "furnace" then return nil end
   for row=0,3 do
     local rect=inventoryRect(layout,8,8+row*18,16)
     if pointIn(mouseX,mouseY,rect.x,rect.y,rect.w,rect.h) then
@@ -1007,7 +1099,9 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
     end
   else
     appendSprite(meshes.panel,width,height,layout.x,layout.y,layout.w,layout.h,0,0,176,166,176,166,COLORS.white)
-    if screen ~= "crafting_table" then appendInventorySteve(meshes.skin,width,height,layout,mouseX,mouseY,time) end
+    if screen ~= "crafting_table" and screen ~= "furnace" then
+      appendInventorySteve(meshes.skin,width,height,layout,mouseX,mouseY,time)
+    end
     local inv=state.inventory
     for row=0,2 do for col=0,8 do
       local index=10+row*9+col local x,y=layout.x+16+col*36,layout.y+168+row*36
@@ -1019,14 +1113,38 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
       appendInventoryItem(meshes.terrain,width,height,x,y,32,stack)
       if stack and stack.count>1 then appendText(meshes.font,width,height,1,tostring(stack.count),x+18,y+20,TEXT_WHITE) end
     end
-    local gridSize=screen=="crafting_table" and 3 or 2
-    local gridX,gridY=screen=="crafting_table" and 30 or 98,screen=="crafting_table" and 17 or 18
-    for row=0,gridSize-1 do for col=0,gridSize-1 do
-      local rect=inventoryRect(layout,gridX+col*18,gridY+row*18,16)
-      appendInventoryItem(meshes.terrain,width,height,rect.x,rect.y,rect.w,inv.crafting[1+row*gridSize+col])
-    end end
-    local result=inventoryRect(layout,screen=="crafting_table" and 124 or 154,screen=="crafting_table" and 35 or 28,16)
-    appendInventoryItem(meshes.terrain,width,height,result.x,result.y,result.w,inv:craftResult())
+    if screen=="furnace" then
+      local furnace=inv.furnace or {}
+      local input=inventoryRect(layout,56,17,16)
+      local fuel=inventoryRect(layout,56,53,16)
+      local output=inventoryRect(layout,116,35,16)
+      appendInventoryItem(meshes.terrain,width,height,input.x,input.y,input.w,furnace.input)
+      appendInventoryItem(meshes.terrain,width,height,fuel.x,fuel.y,fuel.w,furnace.fuel)
+      appendInventoryItem(meshes.terrain,width,height,output.x,output.y,output.w,furnace.output)
+      for _,entry in ipairs({{furnace.input,input},{furnace.fuel,fuel},{furnace.output,output}}) do
+        local stack,rect=entry[1],entry[2]
+        if stack and stack.count>1 then appendText(meshes.font,width,height,1,tostring(stack.count),rect.x+18,rect.y+20,TEXT_WHITE) end
+      end
+      local burn=(furnace.burnTotal or 0)>0 and (furnace.burnTime or 0)/furnace.burnTotal or 0
+      local cook=(furnace.cookTotal or 10)>0 and (furnace.cookTime or 0)/furnace.cookTotal or 0
+      if burn>0 then
+        local flameH=math.floor(26*math.min(1,burn)+0.5)
+        appendRect(meshes.overlay,width,height,layout.x+114,layout.y+104-flameH,26,flameH,{1.0,0.52,0.08,0.82})
+      end
+      if cook>0 then
+        appendRect(meshes.overlay,width,height,layout.x+158,layout.y+70,
+          math.floor(46*math.min(1,cook)+0.5),10,{0.90,0.66,0.30,0.78})
+      end
+    else
+      local gridSize=screen=="crafting_table" and 3 or 2
+      local gridX,gridY=screen=="crafting_table" and 30 or 98,screen=="crafting_table" and 17 or 18
+      for row=0,gridSize-1 do for col=0,gridSize-1 do
+        local rect=inventoryRect(layout,gridX+col*18,gridY+row*18,16)
+        appendInventoryItem(meshes.terrain,width,height,rect.x,rect.y,rect.w,inv.crafting[1+row*gridSize+col])
+      end end
+      local result=inventoryRect(layout,screen=="crafting_table" and 124 or 154,screen=="crafting_table" and 35 or 28,16)
+      appendInventoryItem(meshes.terrain,width,height,result.x,result.y,result.w,inv:craftResult())
+    end
   end
   local hovered=hud.inventorySlotAt(screen,width,height,mouseX or -1,mouseY or -1,state)
   if hovered and hovered.x then
@@ -1148,6 +1266,7 @@ function hud.create(skinPath)
       skin = createTexture(skinPath or "assets/textures/entity/steve.png"),
       inventory = createTexture("assets/textures/gui/container/inventory.png"),
       craftingTable = createTexture("assets/textures/gui/container/crafting_table.png"),
+      furnace = createTexture("assets/textures/gui/container/furnace.png"),
       creativeItems = createTexture("assets/textures/gui/container/creative_inventory/tab_items.png"),
       creativeSearch = createTexture("assets/textures/gui/container/creative_inventory/tab_item_search.png"),
       creativeInventory = createTexture("assets/textures/gui/container/creative_inventory/tab_inventory.png"),
@@ -1193,7 +1312,6 @@ function hud:ensureMeshes(width, height, selectedSlot, state, time)
   rendering.releaseGroup(self.meshes)
   self.meshes = {
     color = upload(rawMeshes.color),
-    skin = upload(rawMeshes.skin),
     widgets = upload(rawMeshes.widgets),
     heartEmpty = upload(rawMeshes.heartEmpty),
     heartHalf = upload(rawMeshes.heartHalf),
@@ -1230,7 +1348,6 @@ function hud:draw(width, height, time, selectedSlot, state, atlasTexture)
   gl.glUniform1i(self.textureLocation, 0)
 
   self:drawMesh(self.meshes.color, self.textures.white)
-  self:drawMesh(self.meshes.skin, self.textures.skin)
   self:drawMesh(self.meshes.widgets, self.textures.widgets)
   self:drawMesh(self.meshes.heartEmpty, self.textures.heartEmpty)
   self:drawMesh(self.meshes.heartHalf, self.textures.heartHalf)
@@ -1261,7 +1378,9 @@ function hud:drawInventory(width,height,screen,state,mouseX,mouseY,atlasTexture,
   gl.glDisable(GL_DEPTH_TEST) gl.glEnable(GL_BLEND) gl.glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA) gl.glDepthMask(0)
   gl.glUseProgram(self.shader) gl.glUniform1f(self.timeLocation,0) gl.glUniform1i(self.textureLocation,0)
   self:drawMesh(self.inventoryMeshes.color,self.textures.white)
-  self:drawMesh(self.inventoryMeshes.panel,screen=="crafting_table" and self.textures.craftingTable or self.textures.inventory)
+  local panelTexture=screen=="crafting_table" and self.textures.craftingTable or
+    (screen=="furnace" and self.textures.furnace or self.textures.inventory)
+  self:drawMesh(self.inventoryMeshes.panel,panelTexture)
   local creativeBackground = state.creativeTab == "search" and self.textures.creativeSearch or self.textures.creativeItems
   self:drawMesh(self.inventoryMeshes.creativePanel,creativeBackground)
   self:drawMesh(self.inventoryMeshes.creativeTabs,self.textures.creativeTabs)

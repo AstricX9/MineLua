@@ -152,11 +152,18 @@ local FACE_DATA = {
   {normal={-1, 0, 0}, corners={{-1,-1,-1},{-1,-1, 1},{-1, 1, 1},{-1, 1,-1}}, texture="side"},
   {normal={ 0, 1, 0}, corners={{-1, 1, 1},{ 1, 1, 1},{ 1, 1,-1},{-1, 1,-1}}, texture="top"},
   {normal={ 0,-1, 0}, corners={{-1,-1,-1},{ 1,-1,-1},{ 1,-1, 1},{-1,-1, 1}}, texture="bottom"},
-  {normal={ 0, 0, 1}, corners={{-1,-1, 1},{ 1,-1, 1},{ 1, 1, 1},{-1, 1, 1}}, texture="side"},
-  {normal={ 0, 0,-1}, corners={{ 1,-1,-1},{-1,-1,-1},{-1, 1,-1},{ 1, 1,-1}}, texture="side"}
+  {normal={ 0, 0, 1}, corners={{-1,-1, 1},{ 1,-1, 1},{ 1, 1, 1},{-1, 1, 1}}, texture="front"},
+  {normal={ 0, 0,-1}, corners={{ 1,-1,-1},{-1,-1,-1},{-1, 1,-1},{ 1, 1,-1}}, texture="back"}
 }
 local ORDER = {1,2,3,3,4,1}
 local UV_CORNERS = {{0,1},{1,1},{1,0},{0,0}}
+local ATLAS_HALF_TEXEL = 0.5 / 256
+
+local function insetUv(uv)
+  local du = math.min(ATLAS_HALF_TEXEL, (uv.u1 - uv.u0) * 0.25)
+  local dv = math.min(ATLAS_HALF_TEXEL, (uv.v1 - uv.v0) * 0.25)
+  return uv.u0 + du, uv.v0 + dv, uv.u1 - du, uv.v1 - dv
+end
 
 function DroppedItems.meshVertices(item)
   local definition = blocks.mapping[item] or items.mapping[item]
@@ -172,6 +179,10 @@ function DroppedItems.meshVertices(item)
   for _, face in ipairs(FACE_DATA) do
     local uv = definition.uvs[face.texture] or definition.uvs.side or definition.uvs.top
     if uv then
+      -- Never sample the exact packed-atlas boundary: that coordinate belongs
+      -- equally to the adjacent tile and causes bright/dark seams on small,
+      -- rotating item cubes.
+      local u0,v0,u1,v1 = insetUv(uv)
       local color = definition.biomeTint and definition.color or colors[face.texture] or definition.color or {1,1,1}
       for _, cornerIndex in ipairs(ORDER) do
         local corner = face.corners[cornerIndex]
@@ -185,8 +196,8 @@ function DroppedItems.meshVertices(item)
         vertices[#vertices+1] = color[1]
         vertices[#vertices+1] = color[2]
         vertices[#vertices+1] = color[3]
-        vertices[#vertices+1] = tex[1] == 0 and uv.u0 or uv.u1
-        vertices[#vertices+1] = tex[2] == 0 and uv.v0 or uv.v1
+        vertices[#vertices+1] = tex[1] == 0 and u0 or u1
+        vertices[#vertices+1] = tex[2] == 0 and v0 or v1
         vertices[#vertices+1] = 0.0
         vertices[#vertices+1] = 0.0
         vertices[#vertices+1] = 1.0

@@ -1,6 +1,7 @@
 local ffi = require("ffi")
 local filesystem = require("filesystem")
 local json = require("json")
+local worldProfiles = require("world_profiles")
 
 local saves = {}
 
@@ -211,6 +212,7 @@ function saves.createWorld(options)
   local worldName = options.worldName or "New World"
   local path, folderName = reserveWorldFolder(worldName)
   local now = os.time()
+  local worldId = worldProfiles.id(options.worldId)
 
   ensureMinecraftLayout(path)
   writeFile(path .. "/session.lock", tostring(now) .. "\n")
@@ -249,6 +251,7 @@ function saves.createWorld(options)
     lastPlayed = now * 1000,
     seed = options.seed or 1,
     saveFormat = "minecraft-like",
+    worldId = worldId,
     worldName = worldName
   }) .. "\n")
 
@@ -256,6 +259,9 @@ function saves.createWorld(options)
     path = path,
     folderName = folderName,
     seed = options.seed or 1,
+    gameMode = options.gameMode or "survival",
+    generatorType = options.generatorType or "default",
+    worldId = worldId,
     worldName = worldName
   }
 end
@@ -277,6 +283,8 @@ function saves.listWorlds()
       local lastPlayed = jsonNumber(metadata, "lastPlayed") or jsonNumber(level, "LastPlayed") or 0
       local versionName = jsonString(level, "Name") or VERSION_NAME
       local modeLabel = gameMode == "creative" and "Creative Mode" or "Survival Mode"
+      local worldId = worldProfiles.id(jsonString(metadata, "worldId"))
+      local worldNameLabel = worldProfiles.get(worldId).name
 
       worlds[#worlds + 1] = {
         path = path,
@@ -284,13 +292,14 @@ function saves.listWorlds()
         worldName = worldName,
         gameMode = gameMode,
         generatorType = generatorType,
+        worldId = worldId,
         seed = jsonNumber(metadata, "seed") or jsonNumber(level, "RandomSeed") or 1,
         generateStructures = jsonBoolean(metadata, "generateStructures") ~= false,
         allowCheats = jsonBoolean(metadata, "allowCheats") == true,
         bonusChest = jsonBoolean(metadata, "bonusChest") == true,
         lastPlayed = lastPlayed,
         lastPlayedText = lastPlayed > 0 and os.date("%d/%m/%Y %I:%M %p", math.floor(lastPlayed / 1000)) or "Unknown date",
-        summary = modeLabel .. ", Version: " .. versionName
+        summary = worldNameLabel .. " / " .. modeLabel .. ", Version: " .. versionName
       }
     end
   end

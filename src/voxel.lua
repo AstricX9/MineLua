@@ -367,14 +367,14 @@ function M.meshChunk(chunk, maxh, offsetX, offsetZ, options)
             targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 4, 0, -1, 0, r, g, b, uvs.bottom, def, skyAt, thickness)
           end
           if not occludes_face(x, y, z + 1, id, currentIsLeaves, currentIsDielectric) then
-            local r, g, b = faceRGB(def, "side", biomeTint, tintAllFaces, ao)
+            local r, g, b = faceRGB(def, "front", biomeTint, tintAllFaces, ao)
             local thickness = currentIsDielectric and dielectricThickness(x, y, z, 0, 0, -1, id) or nil
-            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 5, 0, 0, 1, r, g, b, uvs.side, def, skyAt, thickness)
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 5, 0, 0, 1, r, g, b, uvs.front or uvs.side, def, skyAt, thickness)
           end
           if not occludes_face(x, y, z - 1, id, currentIsLeaves, currentIsDielectric) then
-            local r, g, b = faceRGB(def, "side", biomeTint, tintAllFaces, ao)
+            local r, g, b = faceRGB(def, "back", biomeTint, tintAllFaces, ao)
             local thickness = currentIsDielectric and dielectricThickness(x, y, z, 0, 0, 1, id) or nil
-            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 6, 0, 0, -1, r, g, b, uvs.side, def, skyAt, thickness)
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 6, 0, 0, -1, r, g, b, uvs.back or uvs.side, def, skyAt, thickness)
           end
 
           if currentIsDielectric then

@@ -1,0 +1,13 @@
+{
+  "block": "minecraft:coal_ore",
+  "drops": [
+    {
+      "item": "minecraft:coal",
+      "count": 3,
+      "tool": {
+        "type": "pickaxe",
+        "min_tier": 1
+      }
+    }
+  ]
+}

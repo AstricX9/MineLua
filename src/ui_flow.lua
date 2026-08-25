@@ -1,4 +1,5 @@
 local flow = {}
+local worldProfiles = require("world_profiles")
 
 local function cycleValue(current, values)
   for index = 1, #values do
@@ -23,12 +24,14 @@ local CONTROL_CHOICES = {
   inventory = {"E", "R"}
 }
 
-local function queueWorldStart(state, gameMode, generatorType, worldName, existingWorld)
+local function queueWorldStart(state, gameMode, generatorType, worldId, worldName, existingWorld)
   state.worldGameMode = gameMode or state.worldGameMode or "survival"
   state.worldGeneratorType = generatorType or state.worldGeneratorType or "default"
+  state.worldId = worldProfiles.id(worldId or state.worldId)
   state.pendingNewWorldConfig = {
     gameMode = state.worldGameMode,
     generatorType = state.worldGeneratorType,
+    worldId = state.worldId,
     seed = tonumber(state.worldSeedText),
     worldName = worldName or "New World",
     generateStructures = state.generateStructures ~= false,
@@ -52,7 +55,7 @@ function flow.back(state)
     state.screen = "pause"
   elseif state.screen == "pause" then
     state.screen = nil
-  elseif state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" then
+  elseif state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" or state.screen == "furnace" then
     state.screen = nil
   elseif state.screen == "select_world" or state.screen == "multiplayer" or state.screen == "texture_packs" then
     state.screen = "main"
@@ -83,10 +86,10 @@ function flow.applyAction(state, action)
   elseif action == "texture_packs" then
     state.screen = "texture_packs"
   elseif action == "start_survival" then
-    queueWorldStart(state, "survival", "default", "Survival World")
+    queueWorldStart(state, "survival", "default", "earth", "Survival World")
     return "started_world"
   elseif action == "start_creative" then
-    queueWorldStart(state, "creative", "default", "Creative World")
+    queueWorldStart(state, "creative", "default", "earth", "Creative World")
     return "started_world"
   elseif action == "create_world" then
     state.screen = "create_world"
@@ -97,6 +100,7 @@ function flow.applyAction(state, action)
     state.generateStructures = true
     state.allowCheats = false
     state.bonusChest = false
+    state.worldId = worldProfiles.id(state.worldId)
   elseif action == "mode_survival" then
     state.worldGameMode = "survival"
   elseif action == "mode_creative" then
@@ -105,6 +109,8 @@ function flow.applyAction(state, action)
     state.moreWorldOptions = not state.moreWorldOptions
   elseif action == "toggle_generator" then
     state.worldGeneratorType = state.worldGeneratorType == "superflat" and "default" or "superflat"
+  elseif action == "cycle_world" then
+    state.worldId = worldProfiles.next(state.worldId)
   elseif action == "toggle_structures" then
     state.generateStructures = not state.generateStructures
   elseif action == "toggle_cheats" then
@@ -145,7 +151,9 @@ function flow.applyAction(state, action)
       state.generateStructures = selected.generateStructures ~= false
       state.allowCheats = selected.allowCheats == true
       state.bonusChest = selected.bonusChest == true
-      queueWorldStart(state, selected.gameMode, selected.generatorType, selected.worldName, selected)
+      state.worldId = worldProfiles.id(selected.worldId)
+      queueWorldStart(state, selected.gameMode, selected.generatorType, selected.worldId,
+        selected.worldName, selected)
       return "started_world"
     end
   elseif action == "delete_selected_world" then
@@ -175,7 +183,7 @@ function flow.applyAction(state, action)
   elseif action == "start_world" then
     local worldName = tostring(state.worldNameText or "New World"):gsub("^%s+", ""):gsub("%s+$", "")
     if worldName == "" then worldName = "New World" end
-    queueWorldStart(state, state.worldGameMode, state.worldGeneratorType, worldName)
+    queueWorldStart(state, state.worldGameMode, state.worldGeneratorType, state.worldId, worldName)
     return "started_world"
   elseif action == "quit" then
     return "quit_game"

@@ -1,7 +1,9 @@
 local blocks = require("blocks")
+local blockDrops = require("block_drops")
 local items = require("items")
 
 local Mining = {}
+local dropRules = blockDrops.load("data")
 
 local profiles = {
   grass={hardness=.6, tool="shovel"}, dirt={hardness=.5, tool="shovel"},
@@ -22,6 +24,7 @@ local profiles = {
   oak_log={hardness=2.0, tool="axe", requiredTier=1}, oak_log_x={hardness=2.0, tool="axe", requiredTier=1}, oak_log_z={hardness=2.0, tool="axe", requiredTier=1},
   spruce_log={hardness=2.0, tool="axe", requiredTier=1}, spruce_log_x={hardness=2.0, tool="axe", requiredTier=1}, spruce_log_z={hardness=2.0, tool="axe", requiredTier=1},
   oak_planks={hardness=2.0, tool="axe"}, spruce_planks={hardness=2.0, tool="axe"}, crafting_table={hardness=2.5, tool="axe"},
+  furnace={hardness=3.5,tool="pickaxe",requiredTier=1},
   oak_leaves={hardness=.2}, spruce_leaves={hardness=.2},
   glass={hardness=.3}, ice={hardness=.5, tool="pickaxe"}, packed_ice={hardness=.5, tool="pickaxe"},
   tall_grass={hardness=0}, double_grass_lower={hardness=0}, double_grass_upper={hardness=0},
@@ -56,6 +59,13 @@ function Mining.canHarvest(block, item)
   if not profile.requiredTier then return true end
   local tool=Mining.tool(item)
   return tool and tool.toolType==profile.tool and (tool.tier or 0)>=profile.requiredTier or false
+end
+
+function Mining.drop(block, item)
+  local def = definition(block)
+  if not def then return nil end
+  local properties = def.properties or {}
+  return blockDrops.resolve(dropRules, def.key, Mining.tool(item), properties.drop or def.key)
 end
 
 function Mining.breakDuration(block, item, gameMode)

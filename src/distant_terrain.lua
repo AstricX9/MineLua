@@ -245,13 +245,13 @@ function DistantTerrain.build(record, step, options)
           if neighbour and neighbour.height and neighbour.height < y then
             appendTerrainQuad(terrainVertices,
               {{x0,neighbour.height,z1},{x1,neighbour.height,z1},{x1,y,z1},{x0,y,z1}},
-              {0,0,1}, def, "side", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
+              {0,0,1}, def, "front", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
           end
           neighbour = cellAt(gx, gz - 1)
           if neighbour and neighbour.height and neighbour.height < y then
             appendTerrainQuad(terrainVertices,
               {{x1,neighbour.height,z0},{x0,neighbour.height,z0},{x0,y,z0},{x1,y,z0}},
-              {0,0,-1}, def, "side", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
+              {0,0,-1}, def, "back", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
           end
           -- Missing neighbouring records are left open. Filling that void with
           -- a skirt or floor would reintroduce the fake under-mesh this renderer

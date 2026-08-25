@@ -1,0 +1,74 @@
+{
+  "format": "minelua-player",
+  "savedAt": 1787631130000,
+  "state": {
+    "camera": {
+      "acceleration": 55,
+      "airAcceleration": 14,
+      "airFriction": 2,
+      "allowFlight": false,
+      "bodyRadius": 0.3,
+      "coyoteTime": 0.1,
+      "coyoteTimer": 0.1,
+      "crouchEyeHeight": 1.24,
+      "crouchSpeed": 2.4,
+      "eyeHeight": 1.62,
+      "firstMouse": false,
+      "flightToggleWasDown": false,
+      "flyAcceleration": 24,
+      "flyFriction": 18,
+      "flySpeed": 9.5,
+      "flying": false,
+      "gravity": 7.371,
+      "groundFriction": 46,
+      "groundSnap": 0.36,
+      "grounded": true,
+      "jumpBuffer": 0,
+      "jumpBufferTime": 0.12,
+      "jumpSpeed": 7.4,
+      "jumpWasDown": false,
+      "lastX": 17,
+      "lastY": 714,
+      "mouseSensitivity": 0.085,
+      "pitch": -13.005,
+      "position": [
+        -32.823737750645,
+        82.62,
+        -285.227879657
+      ],
+      "reach": 6,
+      "sprintSpeed": 7.2,
+      "standEyeHeight": 1.62,
+      "stepHeight": 0.6,
+      "swimAcceleration": 18,
+      "swimSinkSpeed": 0.65,
+      "swimUpSpeed": 4.6,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "velocityY": 0,
+      "walkSpeed": 5.1,
+      "yaw": 62.235
+    },
+    "inventory": {
+      "crafting": {
+      },
+      "craftingGridSize": 2,
+      "furnace": {
+        "burnTime": 0,
+        "burnTotal": 0,
+        "cookTime": 0,
+        "cookTotal": 10
+      },
+      "gameMode": "survival",
+      "recipeHint": "Break gravel for flint, then gather sticks from leaves or wood.",
+      "search": "",
+      "selected": 1,
+      "slots": {
+      }
+    }
+  },
+  "version": 1
+}

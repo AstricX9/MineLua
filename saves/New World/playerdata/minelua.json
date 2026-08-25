@@ -1,6 +1,6 @@
 {
   "format": "minelua-player",
-  "savedAt": 1787573916000,
+  "savedAt": 1787630817000,
   "state": {
     "camera": {
       "acceleration": 55,
@@ -27,14 +27,14 @@
       "jumpBufferTime": 0.12,
       "jumpSpeed": 7.4,
       "jumpWasDown": false,
-      "lastX": 1316,
-      "lastY": 777,
+      "lastX": -1233,
+      "lastY": 464,
       "mouseSensitivity": 0.085,
-      "pitch": -51.255,
+      "pitch": -50.175,
       "position": [
-        15.481447744046,
-        82.62,
-        333.9790241721
+        -155.15412367919,
+        89.62,
+        387.65188025662
       ],
       "reach": 6,
       "sprintSpeed": 7.2,
@@ -50,24 +50,46 @@
       ],
       "velocityY": 0,
       "walkSpeed": 5.1,
-      "yaw": -640.46
+      "yaw": -2423.76
     },
     "inventory": {
       "crafting": {
       },
       "craftingGridSize": 2,
+      "furnace": {
+        "burnTime": 0,
+        "burnTotal": 0,
+        "cookTime": 0,
+        "cookTotal": 10
+      },
       "gameMode": "survival",
       "recipeHint": "Recipe crafted!",
       "search": "",
-      "selected": 2,
+      "selected": 4,
       "slots": {
         "1": {
-          "count": 6,
-          "item": "tall_grass"
+          "count": 1,
+          "item": "stone_pickaxe"
+        },
+        "10": {
+          "count": 12,
+          "item": "clay"
+        },
+        "12": {
+          "count": 17,
+          "item": "stone"
+        },
+        "13": {
+          "count": 12,
+          "item": "stick"
+        },
+        "14": {
+          "count": 1,
+          "item": "flint"
         },
         "15": {
-          "count": 8,
-          "item": "stick"
+          "count": 1,
+          "item": "oak_planks"
         },
         "2": {
           "count": 1,
@@ -77,9 +99,61 @@
           "count": 1,
           "item": "allium"
         },
-        "3": {
-          "count": 4,
+        "22": {
+          "count": 37,
+          "item": "cobblestone"
+        },
+        "27": {
+          "count": 13,
           "item": "oak_log"
+        },
+        "29": {
+          "count": 1,
+          "item": "wood_pickaxe"
+        },
+        "3": {
+          "count": 1,
+          "item": "wood_axe"
+        },
+        "30": {
+          "count": 6,
+          "item": "double_grass_lower"
+        },
+        "31": {
+          "count": 64,
+          "item": "tall_grass"
+        },
+        "32": {
+          "count": 64,
+          "item": "tall_grass"
+        },
+        "33": {
+          "count": 14,
+          "item": "tall_grass"
+        },
+        "34": {
+          "count": 1,
+          "item": "oxeye_daisy"
+        },
+        "4": {
+          "count": 1,
+          "item": "wood_shovel"
+        },
+        "5": {
+          "count": 9,
+          "item": "coal_ore"
+        },
+        "7": {
+          "count": 40,
+          "item": "dirt"
+        },
+        "8": {
+          "count": 13,
+          "item": "coal"
+        },
+        "9": {
+          "count": 34,
+          "item": "grass"
         }
       }
     }

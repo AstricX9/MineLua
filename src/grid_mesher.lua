@@ -29,8 +29,8 @@ local FACES = {
   {axis = 1, sign = -1, kind = "bottom"},
   {axis = 2, sign = 1, kind = "side"},
   {axis = 2, sign = -1, kind = "side"},
-  {axis = 3, sign = 1, kind = "side"},
-  {axis = 3, sign = -1, kind = "side"}
+  {axis = 3, sign = 1, kind = "front"},
+  {axis = 3, sign = -1, kind = "back"}
 }
 
 -- Corner offsets for a face, in (along, across, up-of-texture) order so the

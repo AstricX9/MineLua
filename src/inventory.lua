@@ -1,6 +1,7 @@
 local blocks = require("blocks")
 local crafting = require("crafting")
 local items = require("items")
+local smelting = require("smelting")
 local persistence = require("state_persistence")
 
 local Inventory = {}
@@ -64,6 +65,7 @@ function Inventory.new(gameMode, options)
     slots = {},
     crafting = {},
     craftingGridSize = 2,
+    furnace = {burnTime=0,burnTotal=0,cookTime=0,cookTotal=10},
     recipeBook = options.recipeBook or recipeBook(),
     cursor = nil,
     selected = 1,
@@ -199,6 +201,147 @@ function Inventory:swapOrMerge(index)
   end
 end
 
+function Inventory:collectToCursor()
+  if not self.cursor or self.cursor.count >= STACK_LIMIT then return 0 end
+  local moved = 0
+  for index = 1, Inventory.SLOT_COUNT do
+    local slot = self.slots[index]
+    if slot and slot.item == self.cursor.item then
+      local amount = math.min(slot.count, STACK_LIMIT - self.cursor.count)
+      self.cursor.count = self.cursor.count + amount
+      slot.count = slot.count - amount
+      moved = moved + amount
+      if slot.count <= 0 then self.slots[index] = nil end
+      if self.cursor.count >= STACK_LIMIT then break end
+    end
+  end
+  return moved
+end
+
+function Inventory:distributeSlots(indices)
+  if not self.cursor or type(indices) ~= "table" then return 0 end
+  local eligible, seen = {}, {}
+  for _, index in ipairs(indices) do
+    index = math.floor(tonumber(index) or 0)
+    local slot = self.slots[index]
+    if not seen[index] and index >= 1 and index <= Inventory.SLOT_COUNT and
+        (not slot or (slot.item == self.cursor.item and slot.count < STACK_LIMIT)) then
+      seen[index] = true
+      eligible[#eligible + 1] = index
+    end
+  end
+  if #eligible == 0 then return 0 end
+
+  local share = math.max(1, math.floor(self.cursor.count / #eligible))
+  local moved = 0
+  for _, index in ipairs(eligible) do
+    if not self.cursor then break end
+    local slot = self.slots[index]
+    local capacity = slot and (STACK_LIMIT - slot.count) or STACK_LIMIT
+    local amount = math.min(share, capacity, self.cursor.count)
+    if amount > 0 then
+      if slot then
+        slot.count = slot.count + amount
+      else
+        self.slots[index] = {item = self.cursor.item, count = amount}
+      end
+      self.cursor.count = self.cursor.count - amount
+      moved = moved + amount
+      if self.cursor.count <= 0 then self.cursor = nil end
+    end
+  end
+  return moved
+end
+
+function Inventory:rightClickSlot(index)
+  if index < 1 or index > Inventory.SLOT_COUNT then return false end
+  local slot = self.slots[index]
+  if self.cursor then
+    if slot and (slot.item ~= self.cursor.item or slot.count >= STACK_LIMIT) then return false end
+    if slot then
+      slot.count = slot.count + 1
+    else
+      self.slots[index] = {item = self.cursor.item, count = 1}
+    end
+    self.cursor.count = self.cursor.count - 1
+    if self.cursor.count <= 0 then self.cursor = nil end
+    return true
+  end
+  if not slot then return false end
+  local taken = math.ceil(slot.count / 2)
+  self.cursor = {item = slot.item, count = taken}
+  slot.count = slot.count - taken
+  if slot.count <= 0 then self.slots[index] = nil end
+  return true
+end
+
+local function furnaceSlotName(kind)
+  if kind=="furnace_input" then return "input" end
+  if kind=="furnace_fuel" then return "fuel" end
+  if kind=="furnace_output" then return "output" end
+end
+
+function Inventory:swapFurnace(kind)
+  local name=furnaceSlotName(kind)
+  if not name then return false end
+  local furnace=self.furnace
+  local slot=furnace[name]
+  if name=="output" then
+    if not slot then return false end
+    if self.cursor and (self.cursor.item~=slot.item or self.cursor.count>=STACK_LIMIT) then return false end
+    if self.cursor then
+      local moved=math.min(slot.count,STACK_LIMIT-self.cursor.count)
+      self.cursor.count=self.cursor.count+moved
+      slot.count=slot.count-moved
+      if slot.count<=0 then furnace.output=nil end
+    else
+      self.cursor=slot furnace.output=nil
+    end
+    return true
+  end
+  if self.cursor and name=="fuel" and not smelting.fuelTime(self.cursor.item) then return false end
+  if self.cursor and name=="input" and not smelting.recipe(self.cursor.item) then return false end
+  if not self.cursor then
+    self.cursor=slot furnace[name]=nil
+  elseif not slot then
+    furnace[name]=self.cursor self.cursor=nil
+  elseif slot.item==self.cursor.item and slot.count<STACK_LIMIT then
+    local moved=math.min(self.cursor.count,STACK_LIMIT-slot.count)
+    slot.count=slot.count+moved
+    self.cursor.count=self.cursor.count-moved
+    if self.cursor.count<=0 then self.cursor=nil end
+  else
+    furnace[name],self.cursor=self.cursor,slot
+  end
+  return true
+end
+
+function Inventory:rightClickFurnace(kind)
+  local name=furnaceSlotName(kind)
+  if not name or name=="output" then return self:swapFurnace(kind) end
+  local furnace=self.furnace
+  local slot=furnace[name]
+  if self.cursor then
+    if name=="fuel" and not smelting.fuelTime(self.cursor.item) then return false end
+    if name=="input" and not smelting.recipe(self.cursor.item) then return false end
+    if slot and (slot.item~=self.cursor.item or slot.count>=STACK_LIMIT) then return false end
+    if slot then slot.count=slot.count+1 else furnace[name]={item=self.cursor.item,count=1} end
+    self.cursor.count=self.cursor.count-1
+    if self.cursor.count<=0 then self.cursor=nil end
+    return true
+  end
+  if not slot then return false end
+  local taken=math.ceil(slot.count/2)
+  self.cursor={item=slot.item,count=taken}
+  slot.count=slot.count-taken
+  if slot.count<=0 then furnace[name]=nil end
+  return true
+end
+
+function Inventory:updateSmelting(dt)
+  return smelting.update(self.furnace,dt)
+end
+
 local function craftGrid(grid, size)
   local result = {}
   for row = 1, size do
@@ -257,6 +400,18 @@ function Inventory:placeCraftOne(index)
   end
   self.cursor.count = self.cursor.count - 1
   if self.cursor.count <= 0 then self.cursor = nil end
+  return true
+end
+
+function Inventory:rightClickCraft(index)
+  if index < 1 or index > self.craftingGridSize * self.craftingGridSize then return false end
+  if self.cursor then return self:placeCraftOne(index) end
+  local slot = self.crafting[index]
+  if not slot then return false end
+  local taken = math.ceil(slot.count / 2)
+  self.cursor = {item = slot.item, count = taken}
+  slot.count = slot.count - taken
+  if slot.count <= 0 then self.crafting[index] = nil end
   return true
 end
 
@@ -337,6 +492,7 @@ end
 
 function Inventory:restoreState(saved)
   persistence.restore(self, saved, PERSISTENCE_OPTIONS)
+  self.furnace=self.furnace or {burnTime=0,burnTotal=0,cookTime=0,cookTotal=10}
   self:normalizeSelected()
   return self
 end

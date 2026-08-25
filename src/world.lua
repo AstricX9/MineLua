@@ -2,6 +2,7 @@ local Chunk = require("chunk")
 local blocks = require("blocks")
 local lighting = require("lighting")
 local terrain = require("terrain")
+local worldProfiles = require("world_profiles")
 
 local World = {}
 World.__index = World
@@ -17,6 +18,8 @@ function World.new(options)
   self.chunkRadius = options.chunkRadius or 4
   self.maxHeight = options.maxHeight or 24
   self.generatorType = options.generatorType or "default"
+  self.worldId = worldProfiles.id(options.worldId)
+  self.worldProfile = worldProfiles.get(self.worldId)
   self.superflatLayers = options.superflatLayers
   self.seed = options.seed or 1
   self.lightDirty = false
@@ -50,6 +53,8 @@ function World:createChunk(chunkX, chunkZ, generationOptions)
   generationOptions.generatorType = self.generatorType
   generationOptions.superflatLayers = self.superflatLayers
   generationOptions.seed = self.seed
+  generationOptions.worldId = self.worldId
+  terrain.setWorldProfile(self.worldId)
   terrain.setSeed(self.seed)
 
   terrain.fillChunk(chunk, offsetX, offsetZ, CHUNK_SIZE, CHUNK_SIZE, self.maxHeight, generationOptions)

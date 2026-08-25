@@ -2,6 +2,7 @@ local texture = require("texture")
 
 local ItemMesh = {}
 local ORDER = {1,2,3,3,4,1}
+local ATLAS_HALF_TEXEL = 0.5 / 256
 
 local function vertex(vertices, x,y,z, nx,ny,nz, color, u,v)
   local values = {x,y,z,nx,ny,nz,color[1],color[2],color[3],u,v,0,0,1}
@@ -43,10 +44,13 @@ function ItemMesh.vertices(definition, radius)
   if not uv then return {} end
   local color = definition.color or {1,1,1}
   local depth = radius * 0.16
+  local du=math.min(ATLAS_HALF_TEXEL,(uv.u1-uv.u0)*0.25)
+  local dv=math.min(ATLAS_HALF_TEXEL,(uv.v1-uv.v0)*0.25)
+  local atlasU0,atlasV0,atlasU1,atlasV1=uv.u0+du,uv.v0+dv,uv.u1-du,uv.v1-dv
   local pointsFront={{-radius,-radius,depth},{radius,-radius,depth},{radius,radius,depth},{-radius,radius,depth}}
   local pointsBack={{radius,-radius,-depth},{-radius,-radius,-depth},{-radius,radius,-depth},{radius,radius,-depth}}
-  local faceUvs={{uv.u0,uv.v1},{uv.u1,uv.v1},{uv.u1,uv.v0},{uv.u0,uv.v0}}
-  local backUvs={{uv.u1,uv.v1},{uv.u0,uv.v1},{uv.u0,uv.v0},{uv.u1,uv.v0}}
+  local faceUvs={{atlasU0,atlasV1},{atlasU1,atlasV1},{atlasU1,atlasV0},{atlasU0,atlasV0}}
+  local backUvs={{atlasU1,atlasV1},{atlasU0,atlasV1},{atlasU0,atlasV0},{atlasU1,atlasV0}}
   local vertices={}
   quad(vertices,pointsFront,{0,0,1},color,faceUvs)
   quad(vertices,pointsBack,{0,0,-1},color,backUvs)
@@ -69,10 +73,14 @@ function ItemMesh.vertices(definition, radius)
     local u1=uv.u0+(uv.u1-uv.u0)*(x+1)/image.w
     local v0=uv.v0+(uv.v1-uv.v0)*y/image.h
     local v1=uv.v0+(uv.v1-uv.v0)*(y+1)/image.h
-    if not opaque(x-1,y) then edge(x,y,x,y+1,{-1,0,0},{{u0,v0},{u0,v1},{u0,v1},{u0,v0}}) end
-    if not opaque(x+1,y) then edge(x+1,y+1,x+1,y,{1,0,0},{{u1,v1},{u1,v0},{u1,v0},{u1,v1}}) end
-    if not opaque(x,y-1) then edge(x+1,y,x,y,{0,1,0},{{u1,v0},{u0,v0},{u0,v0},{u1,v0}}) end
-    if not opaque(x,y+1) then edge(x,y+1,x+1,y+1,{0,-1,0},{{u0,v1},{u1,v1},{u1,v1},{u0,v1}}) end
+    -- Side walls sample the centre of their opaque source pixel. Sampling the
+    -- perimeter itself can cross into a transparent pixel or another atlas tile.
+    local uc,vc=(u0+u1)*0.5,(v0+v1)*0.5
+    local sideUv={{uc,vc},{uc,vc},{uc,vc},{uc,vc}}
+    if not opaque(x-1,y) then edge(x,y,x,y+1,{-1,0,0},sideUv) end
+    if not opaque(x+1,y) then edge(x+1,y+1,x+1,y,{1,0,0},sideUv) end
+    if not opaque(x,y-1) then edge(x+1,y,x,y,{0,1,0},sideUv) end
+    if not opaque(x,y+1) then edge(x,y+1,x+1,y+1,{0,-1,0},sideUv) end
   end end end
   return vertices
 end

@@ -1,4 +1,5 @@
 local menu = {}
+local worldProfiles = require("world_profiles")
 
 menu.RENDER_DISTANCE_MIN = 4
 menu.RENDER_DISTANCE_MAX = 128
@@ -73,7 +74,9 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
     local mode = menuState.worldGameMode or "survival"
     local generator = menuState.worldGeneratorType or "default"
     local modeLabel = mode == "creative" and "Game Mode: Creative" or "Game Mode: Survival"
-    local generatorLabel = generator == "superflat" and "World Type: Superflat" or "World Type: Default"
+    local generatorLabel = generator == "superflat" and "Terrain: Superflat" or "Terrain: Default"
+    local profile = worldProfiles.get(menuState.worldId)
+    local worldLabel = "World: " .. profile.name
     local buttons = {
       {id = "start_world", label = "Create New World", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20},
       {id = "back_select", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20}
@@ -82,12 +85,14 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
     if menuState.moreWorldOptions then
       buttons[#buttons + 1] = {id = "toggle_structures", label = "Generate Structures: " .. onOff(menuState.generateStructures), x = cx - 155, y = 100, w = 150, h = 20}
       buttons[#buttons + 1] = {id = "toggle_generator", label = generatorLabel, x = cx + 5, y = 100, w = 150, h = 20}
-      buttons[#buttons + 1] = {id = "toggle_cheats", label = "Allow Cheats: " .. onOff(menuState.allowCheats), x = cx - 155, y = 136, w = 150, h = 20}
-      buttons[#buttons + 1] = {id = "toggle_bonus_chest", label = "Bonus Chest: " .. onOff(menuState.bonusChest), x = cx + 5, y = 136, w = 150, h = 20}
-      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "Done", x = cx - 75, y = 172, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "cycle_world", label = worldLabel, x = cx - 100, y = 124, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_cheats", label = "Allow Cheats: " .. onOff(menuState.allowCheats), x = cx - 155, y = 148, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_bonus_chest", label = "Bonus Chest: " .. onOff(menuState.bonusChest), x = cx + 5, y = 148, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "Done", x = cx - 75, y = 176, w = 150, h = 20}
     else
       buttons[#buttons + 1] = {id = mode == "creative" and "mode_survival" or "mode_creative", label = modeLabel, x = cx - 100, y = 100, w = 200, h = 20}
-      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "More World Options...", x = cx - 100, y = 148, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "cycle_world", label = worldLabel, x = cx - 100, y = 128, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "More World Options...", x = cx - 100, y = 164, w = 200, h = 20}
     end
 
     return buttons
@@ -158,7 +163,8 @@ function menu.stateKey(menuState)
   local bindings = menuState.controlBindings or {}
   local stats = menuState.stats or {}
   return table.concat({
-    menuState.worldGameMode or "survival", menuState.worldGeneratorType or "default", menuState.worldNameText or "",
+    menuState.worldGameMode or "survival", menuState.worldGeneratorType or "default",
+    worldProfiles.id(menuState.worldId), menuState.worldNameText or "",
     menuState.moreWorldOptions and "more" or "simple", menuState.worldSeedText or "",
     tostring(menuState.generateStructures), tostring(menuState.allowCheats), tostring(menuState.bonusChest),
     tostring(menuState.worldListVersion or 0), tostring(menuState.selectedWorldIndex or 0), tostring(menuState.worldListPage or 1),

@@ -2,16 +2,41 @@ local ffi = require("ffi")
 local blocks = require("blocks")
 local settings = require("graphics_settings").terrainGeneration or {}
 local texture = require("texture")
-local WorldgenPipeline = require("worldgen.pipeline")
+local worldProfiles = require("world_profiles")
 
 local terrain = {}
 
 terrain.SEA_LEVEL = settings.seaLevel or 63
 terrain.activeSeed = settings.seed or 1
-local worldgen = WorldgenPipeline.new(settings, terrain.activeSeed)
+terrain.activeWorldId = "earth"
+terrain.activeProfile = worldProfiles.get(terrain.activeWorldId)
+
+local function createWorldgen(profile, seed)
+  local generator = require("worldgen." .. profile.generator)
+  assert(type(generator) == "table" and type(generator.new) == "function",
+    "world generator must expose new(settings, seed): " .. profile.generator)
+  return generator.new(settings, seed)
+end
+
+local worldgen = createWorldgen(terrain.activeProfile, terrain.activeSeed)
 local macroCache = {}
 local macroCacheCount = 0
 local MACRO_CACHE_LIMIT = 160000
+
+function terrain.setWorldProfile(worldId)
+  local profile = worldProfiles.get(worldId)
+  if profile.id == terrain.activeWorldId then return profile end
+  terrain.activeWorldId = profile.id
+  terrain.activeProfile = profile
+  worldgen = createWorldgen(profile, terrain.activeSeed)
+  macroCache = {}
+  macroCacheCount = 0
+  return profile
+end
+
+function terrain.worldProfile()
+  return terrain.activeProfile
+end
 
 function terrain.setSeed(seed)
   local nextSeed = tonumber(seed) or settings.seed or 1
@@ -243,6 +268,66 @@ local biomeProfiles = {
     treeSpacing = 16,
     treeChance = 0.0,
     snow = true
+  },
+  mars_lowlands = {
+    name = "Martian Northern Plains",
+    color = 0xA94F29,
+    temperature = 0.18,
+    rainfall = 0.0,
+    topBlock = "red_sand",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_highlands = {
+    name = "Martian Cratered Highlands",
+    color = 0xB86234,
+    temperature = 0.14,
+    rainfall = 0.0,
+    topBlock = "red_sand",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_crater = {
+    name = "Martian Impact Terrain",
+    color = 0x75402E,
+    temperature = 0.13,
+    rainfall = 0.0,
+    topBlock = "red_sand",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_volcanic = {
+    name = "Martian Volcanic Rise",
+    color = 0x312C2A,
+    temperature = 0.12,
+    rainfall = 0.0,
+    topBlock = "stone",
+    fillerBlock = "stone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_canyon = {
+    name = "Martian Fault Canyon",
+    color = 0x65301F,
+    temperature = 0.16,
+    rainfall = 0.0,
+    topBlock = "stone",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_polar = {
+    name = "Martian Polar Cap",
+    color = 0xD5DEE3,
+    temperature = 0.02,
+    rainfall = 0.0,
+    topBlock = "packed_ice",
+    fillerBlock = "packed_ice",
+    treeSpacing = 16,
+    treeChance = 0.0
   }
 }
 
@@ -519,8 +604,8 @@ function terrain.columnAt(x, z, maxHeight)
   local stoneNoise = fbm(x, z, 41, 2, 1.0 / 16.0)
   local fillerDepth = math.floor((stoneNoise * 2.0 + 2.5 + hash2(x, z, 311) * 0.45) *
     (sample.soilDepthScale or 1.0))
-  local topBlock = profile.topBlock
-  local fillerBlock = profile.fillerBlock
+  local topBlock = sample.topBlock or profile.topBlock
+  local fillerBlock = sample.fillerBlock or profile.fillerBlock
 
   if biome == "beach" then
     topBlock = "sand"
@@ -589,7 +674,8 @@ local unsafeSpawnBiomes = {
   rockyShore = true,
   frozenShore = true,
   swampland = true,
-  iceDesert = true
+  iceDesert = true,
+  mars_polar = true
 }
 
 local function spawnCandidateAt(x, z, maxHeight)
@@ -771,6 +857,7 @@ local function surfaceBlocksForColumn(column, y)
 end
 
 local function applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
+  local surfaceFloor = terrain.activeProfile.surfaceMinTopY or (terrain.SEA_LEVEL - 4)
   for x = 0, width - 1 do
     for z = 0, depth - 1 do
       local worldX = x + offsetX
@@ -788,7 +875,7 @@ local function applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, ma
         elseif id == blocks.stone then
           if depthLeft == -1 then
             depthLeft = column.fillerDepth
-            if y >= terrain.SEA_LEVEL - 4 then
+            if y >= surfaceFloor then
               chunk:setBlock(x, y, z, topBlock)
               if column.hasSnow and y > terrain.SEA_LEVEL and blocks.snow then
                 chunk:setBlock(x, y, z, blocks.snow)
@@ -1384,8 +1471,14 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
   options = options or {}
   local step = options.yieldStep
   if options.generatorType == "superflat" then
-    fillSuperflatChunk(chunk, width, depth, maxHeight, options.superflatLayers, step)
-    chunk.environment = {biome = "superflat", landform = "plain", averageElevation = 3}
+    local profileLayers = terrain.activeProfile.generation and terrain.activeProfile.generation.superflatLayers
+    fillSuperflatChunk(chunk, width, depth, maxHeight, options.superflatLayers or profileLayers, step)
+    chunk.environment = {
+      world = terrain.activeWorldId,
+      biome = terrain.activeWorldId == "mars" and "mars_lowlands" or "superflat",
+      landform = "plain",
+      averageElevation = 3
+    }
     return
   end
 
@@ -1452,41 +1545,43 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
   end
 
   applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
-  populateOres(chunk, offsetX, offsetZ)
+  local generation = terrain.activeProfile.generation or {}
+  if generation.ores ~= false then populateOres(chunk, offsetX, offsetZ) end
   if step then step() end
-  carveChunkCaves(chunk, offsetX, offsetZ, maxHeight)
+  if generation.caves ~= false then carveChunkCaves(chunk, offsetX, offsetZ, maxHeight) end
   if step then step() end
 
-  for x = -3, width + 2 do
-    for z = -3, depth + 2 do
-      local treeX = offsetX + x
-      local treeZ = offsetZ + z
-      local column = terrain.columnAt(treeX, treeZ, maxHeight)
-      local lx = treeX - offsetX
-      local lz = treeZ - offsetZ
-      local groundY = nil
+  if generation.vegetation ~= false then
+    for x = -3, width + 2 do
+      for z = -3, depth + 2 do
+        local treeX = offsetX + x
+        local treeZ = offsetZ + z
+        local column = terrain.columnAt(treeX, treeZ, maxHeight)
+        local lx = treeX - offsetX
+        local lz = treeZ - offsetZ
+        local groundY = nil
 
-      if lx >= 0 and lx < 16 and lz >= 0 and lz < 16 then
-        for y = maxHeight, terrain.SEA_LEVEL + 1, -1 do
-          local id = chunk:getBlock(lx, y, lz)
-          if id and id ~= blocks.air and id ~= blocks.water and id ~= blocks.lava and not isLeafBlock(id) then
-            groundY = y
-            break
+        if lx >= 0 and lx < 16 and lz >= 0 and lz < 16 then
+          for y = maxHeight, terrain.SEA_LEVEL + 1, -1 do
+            local id = chunk:getBlock(lx, y, lz)
+            if id and id ~= blocks.air and id ~= blocks.water and id ~= blocks.lava and not isLeafBlock(id) then
+              groundY = y
+              break
+            end
           end
+        else
+          groundY = column.height
         end
-      else
-        groundY = column.height
-      end
 
-      if groundY and not column.waterLevel and groundY > terrain.SEA_LEVEL + 1 and
-          isTreeCenter(treeX, treeZ, column.biome) then
-        addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, column.biome, maxHeight)
+        if groundY and not column.waterLevel and groundY > terrain.SEA_LEVEL + 1 and
+            isTreeCenter(treeX, treeZ, column.biome) then
+          addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, column.biome, maxHeight)
+        end
       end
+      if step then step() end
     end
-    if step then step() end
+    populateGrassFoliage(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
   end
-
-  populateGrassFoliage(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
 end
 
 -- Stable development interface for field maps, F3 information and future
