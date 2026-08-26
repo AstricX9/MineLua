@@ -64,6 +64,17 @@ struct MineLuaDevUiState {
     float current_longitude;
     float current_altitude;
     float time_scale;
+    // Camera-relative held-item transform, expressed in the 720p reference
+    // coordinate system used by the Lua HUD projector.
+    int held_item_open;
+    float held_item_x_inset;
+    float held_item_y_inset;
+    float held_item_size;
+    float held_item_roll;
+    float held_item_yaw;
+    float held_item_pitch;
+    float held_item_thickness;
+    float held_item_perspective;
 };
 
 static bool g_initialized = false;
@@ -112,6 +123,17 @@ static void ResetGeneration(MineLuaDevUiState* state) {
     state->elevation_cooling = 0.0045f;
     state->freeze_temperature = 0.08f;
     state->generation_dirty = 1;
+}
+
+static void ResetHeldItem(MineLuaDevUiState* state) {
+    state->held_item_x_inset = 161.5f;
+    state->held_item_y_inset = 254.7f;
+    state->held_item_size = 526.8f;
+    state->held_item_roll = 35.8f;
+    state->held_item_yaw = -46.1f;
+    state->held_item_pitch = -7.2f;
+    state->held_item_thickness = 1.0f / 16.0f;
+    state->held_item_perspective = 3.2f;
 }
 
 static bool ScaleSlider(const char* label, float* value, float minimum, float maximum) {
@@ -190,6 +212,8 @@ MINELUA_EXPORT void ml_imgui_draw(MineLuaDevUiState* state) {
             if (ImGui::Button("World Generation")) state->generation_open = state->generation_open ? 0 : 1;
             ImGui::SameLine();
             if (ImGui::Button("Navigation")) state->navigation_open = state->navigation_open ? 0 : 1;
+            ImGui::SameLine();
+            if (ImGui::Button("Held Item")) state->held_item_open = state->held_item_open ? 0 : 1;
             ImGui::SameLine();
             if (ImGui::Button(state->preview_mode ? "Exit RTS Preview" : "RTS Preview")) {
                 state->preview_mode = state->preview_mode ? 0 : 1;
@@ -312,6 +336,49 @@ MINELUA_EXPORT void ml_imgui_draw(MineLuaDevUiState* state) {
             }
             ImGui::End();
             state->navigation_open = navigation_open ? 1 : 0;
+        }
+
+        bool held_item_open = state->held_item_open != 0;
+        if (held_item_open) {
+            ImGui::SetNextWindowPos(ImVec2(444.0f, 64.0f), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(410.0f, 0.0f), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Held Item Transform", &held_item_open, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextWrapped("Adjusts the equipped item immediately. Position and size use a 720p reference and scale with the viewport.");
+                ImGui::Separator();
+
+                if (ImGui::CollapsingHeader("Placement", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("X inset from right", &state->held_item_x_inset, -300.0f, 900.0f, "%.1f px");
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("Y inset from bottom", &state->held_item_y_inset, -300.0f, 720.0f, "%.1f px");
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("Size", &state->held_item_size, 80.0f, 1000.0f, "%.1f px");
+                }
+
+                if (ImGui::CollapsingHeader("Orientation", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("Roll", &state->held_item_roll, -180.0f, 180.0f, "%.1f deg");
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("Yaw", &state->held_item_yaw, -80.0f, 80.0f, "%.1f deg");
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("Pitch", &state->held_item_pitch, -80.0f, 80.0f, "%.1f deg");
+                }
+
+                if (ImGui::CollapsingHeader("Projection", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("Model depth", &state->held_item_thickness, 0.002f, 0.20f, "%.4f");
+                    ImGui::SetNextItemWidth(250.0f);
+                    ImGui::SliderFloat("Perspective distance", &state->held_item_perspective, 1.20f, 6.0f, "%.2f");
+                    ImGui::TextDisabled("1/16 depth matches one model pixel; lower distance strengthens perspective.");
+                }
+
+                ImGui::Separator();
+                if (ImGui::Button("Reset held item")) ResetHeldItem(state);
+                ImGui::SameLine();
+                ImGui::TextDisabled("Updates while dragging");
+            }
+            ImGui::End();
+            state->held_item_open = held_item_open ? 1 : 0;
         }
 
         bool generation_open = state->generation_open != 0;

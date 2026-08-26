@@ -69,6 +69,7 @@ void glUniform3f(GLint location, float v0, float v1, float v2);
 void glUniform4f(GLint location, float v0, float v1, float v2, float v3);
 void glUniform1f(GLint location, float v0);
 void glUniform1i(GLint location, GLint v0);
+  void glUniformMatrix3fv(GLint location, GLsizei count, unsigned char transpose, const float* value);
   void glUniformMatrix4fv(GLint location, GLsizei count, unsigned char transpose, const float* value);
   const unsigned char* glGetString(GLenum name);
   void glEnable(GLenum cap);
@@ -146,6 +147,7 @@ void glDeleteVertexArrays(GLsizei n, const GLuint* arrays);
   gl.glUniform4f = loader.load("glUniform4f", "void", "GLint", "float", "float", "float", "float")
   gl.glUniform1f = loader.load("glUniform1f", "void", "GLint", "float")
   gl.glUniform1i = loader.load("glUniform1i", "void", "GLint", "GLint")
+  gl.glUniformMatrix3fv = loader.load("glUniformMatrix3fv", "void", "GLint", "GLsizei", "unsigned char", "const float*")
   gl.glUniformMatrix4fv = loader.load("glUniformMatrix4fv", "void", "GLint", "GLsizei", "unsigned char", "const float*")
   gl.glGetString = loader.load("glGetString", "const unsigned char*", "unsigned int")
   gl.glEnable = loader.load("glEnable", "void", "unsigned int")

@@ -7,6 +7,7 @@ local uiMenu = require("ui_menu")
 local blocks = require("blocks")
 local items = require("items")
 local itemMesh = require("item_mesh")
+local heldItem = require("held_item")
 
 local hud = {}
 hud.__index = hud
@@ -18,6 +19,8 @@ local GL_STATIC_DRAW = 0x88E4
 local GL_FLOAT = 0x1406
 local GL_TRIANGLES = 0x0004
 local GL_DEPTH_TEST = 0x0B71
+local GL_DEPTH_BUFFER_BIT = 0x00000100
+local GL_LESS = 0x0201
 local GL_BLEND = 0x0BE2
 local GL_SRC_ALPHA = 0x0302
 local GL_ONE_MINUS_SRC_ALPHA = 0x0303
@@ -35,6 +38,9 @@ local GL_UNSIGNED_BYTE = 0x1401
 local GL_TEXTURE0 = 0x84C0
 
 local STRIDE_FLOATS = 11
+
+-- How long a newly selected item takes to rise into frame.
+local HELD_EQUIP_SECONDS = 0.24
 
 local COLORS = {
   white = {1.0, 1.0, 1.0, 1.0},
@@ -66,11 +72,10 @@ out float vUseTexture;
 uniform float uTime;
 
 void main() {
-  vec2 p = aPos.xy;
-  gl_Position = vec4(p, 0.0, 1.0);
+  gl_Position = vec4(aPos.xy, 0.0, 1.0);
   vColor = vec4(aColor, aInfo.x);
   vTexCoord = aTexCoord;
-  vUseTexture = aInfo.y;
+  vUseTexture = step(0.5, aInfo.y);
 }
 ]]
 
@@ -87,6 +92,88 @@ void main() {
   vec4 color = mix(vec4(1.0), sampled, step(0.5, vUseTexture)) * vColor;
   if (color.a < 0.01) discard;
   FragColor = color;
+}
+]]
+
+  return shaderModule.fromSource(vertSource, fragSource)
+end
+
+-- The held model is a separate program from the flat HUD: it owns a real
+-- vertex format (position, normal, texture coordinate) and finishes its own
+-- projection, so animating it costs nothing but a handful of uniforms.
+local function createHeldShader()
+  local vertSource = [[
+#version 460 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aTexCoord;
+out vec2 vTexCoord;
+out vec3 vNormal;
+uniform mat3 uPose;        // authored orientation
+uniform mat3 uSwing;       // animation, applied about the wrist
+uniform vec3 uModelScale;  // per-axis scale of the unit model
+uniform vec3 uPivot;       // wrist position in posed model space
+uniform vec3 uTranslate;   // animation offset in posed model space
+uniform vec2 uCenter;      // model origin in normalised device coordinates
+uniform vec2 uScale;       // device units per model unit
+uniform vec3 uProjection;  // camera distance, near plane, far plane
+
+void main() {
+  vec3 posed = uPose * (aPos * uModelScale);
+  vec3 model = uSwing * (posed - uPivot) + uPivot + uTranslate;
+  float cameraZ = max(uProjection.x - model.z, 0.05);
+  float perspective = uProjection.x / cameraZ;
+  vec2 device = uCenter + model.xy * uScale * perspective;
+  float near = uProjection.y;
+  float far = uProjection.z;
+  float depth = (far + near) / (far - near) - (2.0 * far * near) / ((far - near) * cameraZ);
+  // The perspective divide is finished here and the clip W stays 1. Every
+  // quad in this model carries a constant texture coordinate, so none of them
+  // needs a perspective-correct interpolant, and a unit W keeps the varyings
+  // out of the driver's perspective rescaling entirely.
+  gl_Position = vec4(device, clamp(depth, -1.0, 1.0), 1.0);
+  vTexCoord = aTexCoord;
+  vNormal = uSwing * (uPose * aNormal);
+}
+]]
+
+  local fragSource = [[
+#version 460 core
+in vec2 vTexCoord;
+in vec3 vNormal;
+out vec4 FragColor;
+uniform sampler2D uTexture;
+uniform vec3 uTint;
+uniform vec3 uAmbient;
+uniform vec3 uSunColor;
+uniform vec3 uMoonColor;
+uniform vec3 uLightDir;
+uniform vec3 uParams; // local skylight, underwater amount, ambient floor
+
+vec3 srgbToLinear(vec3 color) {
+  return pow(max(color, vec3(0.0)), vec3(2.2));
+}
+
+vec3 linearToSrgb(vec3 color) {
+  return pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+void main() {
+  vec4 sampled = texture(uTexture, vTexCoord);
+  if (sampled.a < 0.5) discard;
+  vec3 normal = normalize(vNormal);
+  vec3 sunDirection = normalize(uLightDir);
+  float sunDiffuse = max(dot(normal, sunDirection), 0.0);
+  float moonDiffuse = max(dot(normal, -sunDirection), 0.0);
+  float localLight = mix(0.08, 1.0, clamp(uParams.x, 0.0, 1.0));
+  vec3 totalLight = uAmbient * localLight;
+  totalLight += uSunColor * mix(0.26, 1.0, sunDiffuse) * localLight;
+  totalLight += uMoonColor * mix(0.34, 0.82, moonDiffuse) * localLight;
+  totalLight = max(totalLight, vec3(uParams.z));
+  vec3 color = linearToSrgb(srgbToLinear(sampled.rgb * uTint) * totalLight);
+  float underwater = clamp(uParams.y, 0.0, 1.0);
+  color = mix(color, color * vec3(0.30, 0.68, 0.88), underwater * 0.58);
+  FragColor = vec4(color, 1.0);
 }
 ]]
 
@@ -564,87 +651,6 @@ local function appendInventoryItem(vertices, width, height, x, y, size, stack, r
   end
 end
 
--- Held foliage and tools use the same thin, pixel-extruded silhouette as world
--- item drops.  The HUD has no depth buffer, so project that shape directly
--- into screen space: a dark back layer and only the exposed pixel edges give
--- the sprite real thickness without turning inventory icons into hundreds of
--- tiny quads as well.
-local function appendHeldSprite(vertices, width, height, definition, centerX, centerY, size, swing)
-  local uv = definition.uv or definition.uvs.top or definition.uvs.side
-  if not uv then return end
-  local color = definition.color or {1,1,1}
-  local tint = {color[1],color[2],color[3],1}
-  local edgeTint = {color[1]*0.48,color[2]*0.48,color[3]*0.48,1}
-  local arc = math.sin(math.max(0,math.min(1,swing or 0))*math.pi)
-  centerX, centerY = centerX-arc*28, centerY+arc*38
-  local depth = math.max(5,math.floor(size*0.065))
-  -- `item/handheld` rotates the generated item -90 degrees around Y and 25
-  -- degrees around Z.  In this orthographic HUD projection the Y turn presents
-  -- the reverse face (a horizontal mirror); the Z turn remains a screen-space
-  -- rotation.  The 0.68 model scale is baked into `size` below.
-  local angle=math.rad(25+arc*22)
-  local cosine,sine=math.cos(angle),math.sin(angle)
-  local function screen(px,py)
-    local localX=-(px-0.5)*size
-    local localY=(py-0.5)*size
-    local projectedX=centerX+localX*cosine+localY*sine
-    local projectedY=centerY-localX*sine+localY*cosine
-    return {ndcX(projectedX,width),ndcY(projectedY,height)}
-  end
-  local front = {screen(0,0),screen(1,0),screen(1,1),screen(0,1)}
-
-  local value = definition.texture
-  if type(value)=="table" then
-    value=value.top or value.side
-    if type(value)=="table" then value=value[1] end
-  end
-  local image = type(value)=="string" and texture.loadPng(value) or nil
-  if image then
-    local function opaque(px,py)
-      if px<0 or py<0 or px>=image.w or py>=image.h then return false end
-      return image.data[(py*image.w+px)*4+3]>=128
-    end
-    local function edge(x0,y0,x1,y1,sampleX,sampleY)
-      local p0=screen(x0/image.w,y0/image.h)
-      local p1=screen(x1/image.w,y1/image.h)
-      local dx=depth*2/width local dy=depth*2/height
-      local eu=uv.u0+(uv.u1-uv.u0)*(sampleX+0.5)/image.w
-      local ev=uv.v0+(uv.v1-uv.v0)*(sampleY+0.5)/image.h
-      appendQuad(vertices,{p0,p1,{p1[1]+dx,p1[2]-dy},{p0[1]+dx,p0[2]-dy}},edgeTint,
-        {{eu,ev},{eu,ev},{eu,ev},{eu,ev}},1,0)
-    end
-    for py=0,image.h-1 do for px=0,image.w-1 do if opaque(px,py) then
-      if not opaque(px-1,py) then edge(px,py+1,px,py,px,py) end
-      if not opaque(px+1,py) then edge(px+1,py,px+1,py+1,px,py) end
-      if not opaque(px,py-1) then edge(px,py,px+1,py,px,py) end
-      if not opaque(px,py+1) then edge(px+1,py+1,px,py+1,px,py) end
-    end end end
-  else
-    local dx=depth*2/width local dy=depth*2/height
-    appendQuad(vertices,{{front[1][1]+dx,front[1][2]-dy},{front[2][1]+dx,front[2][2]-dy},
-      {front[3][1]+dx,front[3][2]-dy},{front[4][1]+dx,front[4][2]-dy}},edgeTint,
-      {{uv.u0,uv.v0},{uv.u1,uv.v0},{uv.u1,uv.v1},{uv.u0,uv.v1}},1,0)
-  end
-  appendQuad(vertices,front,tint,
-    {{uv.u0,uv.v0},{uv.u1,uv.v0},{uv.u1,uv.v1},{uv.u0,uv.v1}},1,0)
-end
-
-local function appendHeldItem(vertices,width,height,stack,swing)
-  local definition=stack and (blocks.mapping[stack.item] or items.mapping[stack.item])
-  if not definition or not definition.uvs then return end
-  if itemMesh.isSprite(definition) then
-    -- Use a slightly more distant 0.50 first-person scale (rather than the raw
-    -- model's 0.68) and anchor it low/right.  This corresponds roughly to view
-    -- position (0.58,-0.62,-1.05): the handle deliberately exits the viewport.
-    local displayScale=math.max(0.82,math.min(1.28,height/720))
-    appendHeldSprite(vertices,width,height,definition,width-100*displayScale,
-      height-76*displayScale,170*displayScale,swing)
-  else
-    local arc=math.sin(math.max(0,math.min(1,swing or 0))*math.pi)
-    appendInventoryItem(vertices,width,height,width-276-arc*32,height-318+arc*42,190,stack,true)
-  end
-end
-
 local function buildMeshes(width, height, selectedSlot, state, time)
   local meshes = {
     color = {},
@@ -667,8 +673,6 @@ local function buildMeshes(width, height, selectedSlot, state, time)
     return definition and {item = definition.key, count = 1} or nil
   end
 
-  local held = hotbarStack(selectedSlot)
-  if held then appendHeldItem(meshes.terrain,width,height,held,state and state.handSwing) end
   if not state or state.worldGameMode ~= "creative" then appendStatusBars(meshes, width, height, state) end
   appendHotbar(meshes.widgets, width, height, selectedSlot)
   appendCrosshair(meshes.crosshair, width, height)
@@ -1245,12 +1249,87 @@ local function createTexture(path, repeatWrap, linear)
   return {id = tex, image = img}
 end
 
+local function heldTextureFor(self,path)
+  if not path then return nil end
+  local cached=self.heldTextures[path]
+  if not cached then
+    cached=createTexture(path)
+    self.heldTextures[path]=cached
+  end
+  return cached
+end
+
+-- One upload per item. The model is independent of the pose, so switching back
+-- to something already carried costs nothing.
+local function uploadHeldModel(vertices)
+  local vao = ffi.new("GLuint[1]")
+  local vbo = ffi.new("GLuint[1]")
+  local data = ffi.new("float[?]", #vertices, vertices)
+  local stride = heldItem.STRIDE_FLOATS * 4
+
+  gl.glGenVertexArrays(1, vao)
+  gl.glBindVertexArray(vao[0])
+  gl.glGenBuffers(1, vbo)
+  gl.glBindBuffer(GL_ARRAY_BUFFER, vbo[0])
+  gl.glBufferData(GL_ARRAY_BUFFER, #vertices * 4, data, GL_STATIC_DRAW)
+  gl.glVertexAttribPointer(0, 3, GL_FLOAT, 0, stride, nil)
+  gl.glEnableVertexAttribArray(0)
+  gl.glVertexAttribPointer(1, 3, GL_FLOAT, 0, stride, ffi.cast("void*", 3 * 4))
+  gl.glEnableVertexAttribArray(1)
+  gl.glVertexAttribPointer(2, 2, GL_FLOAT, 0, stride, ffi.cast("void*", 6 * 4))
+  gl.glEnableVertexAttribArray(2)
+  gl.glBindVertexArray(0)
+
+  return {vao = vao, vbo = vbo, data = data, count = #vertices / heldItem.STRIDE_FLOATS}
+end
+
+local function heldModelFor(self, stack)
+  local definition = stack and (blocks.mapping[stack.item] or items.mapping[stack.item])
+  if not definition then return nil end
+  local cached = self.heldModels[stack.item]
+  if cached == nil then
+    local model = heldItem.model(definition)
+    cached = false
+    if model and #model.vertices > 0 then
+      cached = {
+        mesh = uploadHeldModel(model.vertices),
+        sprite = model.sprite,
+        atlas = model.atlas,
+        source = model.source,
+        definition = definition
+      }
+    end
+    self.heldModels[stack.item] = cached
+  end
+  return cached or nil
+end
+
 function hud.create(skinPath)
   local shader = createShader()
+  local heldShader = createHeldShader()
+  local function heldUniform(name) return gl.glGetUniformLocation(heldShader, name) end
   return setmetatable({
     shader = shader,
     timeLocation = gl.glGetUniformLocation(shader, "uTime"),
     textureLocation = gl.glGetUniformLocation(shader, "uTexture"),
+    heldShader = heldShader,
+    heldLocations = {
+      texture = heldUniform("uTexture"),
+      pose = heldUniform("uPose"),
+      swing = heldUniform("uSwing"),
+      modelScale = heldUniform("uModelScale"),
+      pivot = heldUniform("uPivot"),
+      translate = heldUniform("uTranslate"),
+      center = heldUniform("uCenter"),
+      scale = heldUniform("uScale"),
+      projection = heldUniform("uProjection"),
+      tint = heldUniform("uTint"),
+      ambient = heldUniform("uAmbient"),
+      sunColor = heldUniform("uSunColor"),
+      moonColor = heldUniform("uMoonColor"),
+      lightDir = heldUniform("uLightDir"),
+      params = heldUniform("uParams")
+    },
     textures = {
       widgets = createTexture("assets/textures/gui/widgets.png"),
       heartEmpty = createTexture("assets/textures/gui/icons/heart_empty.png"),
@@ -1281,6 +1360,10 @@ function hud.create(skinPath)
       },
       white = createTexture("assets/textures/gui/widgets.png")
     },
+    heldTextures = {},
+    heldModels = {},
+    heldEquipKey = nil,
+    heldEquipStart = 0.0,
     meshes = nil,
     menuMeshes = nil,
     menuKey = nil,
@@ -1299,7 +1382,9 @@ end
 function hud:ensureMeshes(width, height, selectedSlot, state, time)
   selectedSlot = selectedSlot or 1
   local inventoryVersion = state and state.inventoryVersion or 0
-  local statusKey = table.concat({selectedSlot, math.ceil(state and state.health or 20), math.ceil(state and state.hunger or 20), state and state.worldGameMode or "survival", inventoryVersion, math.floor((state and state.handSwing or 0)*12)}, ":")
+  -- The held model animates from uniforms now, so the flat HUD only rebuilds
+  -- when something it actually draws changes.
+  local statusKey = table.concat({selectedSlot, math.ceil(state and state.health or 20), math.ceil(state and state.hunger or 20), state and state.worldGameMode or "survival", inventoryVersion}, ":")
   if self.meshes and self.width == width and self.height == height and self.statusKey == statusKey then
     return
   end
@@ -1336,17 +1421,114 @@ function hud:drawMesh(mesh, tex)
   gl.glDrawArrays(GL_TRIANGLES, 0, mesh.count)
 end
 
-function hud:draw(width, height, time, selectedSlot, state, atlasTexture)
+-- Draws the first-person model. The mesh is a cached unit model; placement,
+-- the mining swing, the equip lift and camera sway are all uniforms, so this
+-- runs every frame without touching a vertex buffer.
+function hud:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture, environment)
+  local stack = state and state.inventory and state.inventory.slots and state.inventory.slots[selectedSlot or 1]
+  if not stack then
+    self.heldEquipKey = nil
+    return
+  end
+  local model = heldModelFor(self, stack)
+  if not model or model.mesh.count == 0 then return end
+
+  local texture = model.atlas and atlasTexture or heldTextureFor(self, model.source)
+  if not texture then return end
+
+  -- A new item rises into frame instead of appearing. Tracking the key here
+  -- keeps the animation working for hotbar scrolling, crafting and pick-block
+  -- alike, without the game loop having to notice the change.
+  if self.heldEquipKey ~= stack.item then
+    self.heldEquipKey = stack.item
+    self.heldEquipStart = time or 0.0
+  end
+  local equip = heldItem.equipPose(((time or 0.0) - self.heldEquipStart) / HELD_EQUIP_SECONDS)
+  local swingStyle = state.handSwingStyle
+  local swing = heldItem.swingPose(state.handSwing, swingStyle)
+  local transform = environment.heldTransform or {}
+  local defaults = heldItem.DEFAULTS
+  local motion = heldItem.motionOffset(environment.heldMotion)
+
+  -- Placement is authored against 720p and scales with the drawable, so the
+  -- model keeps the same share of the frame on any display.
+  local displayScale = math.max(0.75, height / 720)
+  local blockScale = model.sprite and 1.0 or heldItem.BLOCK_SCALE
+  local size = (transform.size or defaults.size) * displayScale * blockScale
+  local centerX = width - ((transform.xInset or defaults.xInset) + motion.x) * displayScale
+  local centerY = height - ((transform.yInset or defaults.yInset) + motion.y) * displayScale
+
+  local basePose = heldItem.BLOCK_POSE
+  if model.sprite then
+    basePose = {
+      roll = transform.roll or defaults.roll,
+      yaw = transform.yaw or defaults.yaw,
+      pitch = transform.pitch or defaults.pitch
+    }
+  end
+  local poseMatrix = heldItem.rotationMatrix(basePose.roll, basePose.yaw, basePose.pitch)
+  local swingMatrix = heldItem.rotationMatrix(
+    swing.roll + equip.roll, swing.yaw + equip.yaw, swing.pitch + equip.pitch)
+
+  local cameraDistance = math.max(1.2, transform.perspective or defaults.perspective)
+  local near = math.max(0.1, cameraDistance - 1.4)
+  local far = cameraDistance + 1.4
+  local thickness = model.sprite and math.max(0.002, transform.thickness or defaults.thickness) or 1.0
+
+  local tint = model.definition.color or {1,1,1}
+  local ambient = environment.ambient or {0.72,0.75,0.80}
+  local sunColor = environment.sunColor or {0.38,0.38,0.36}
+  local moonColor = environment.moonColor or {0.0,0.0,0.0}
+  local lightDir = environment.lightDir or {0.3,0.8,0.5}
+  local locations = self.heldLocations
+
+  gl.glUseProgram(self.heldShader)
+  gl.glUniform1i(locations.texture, 0)
+  gl.glUniformMatrix3fv(locations.pose, 1, 0, ffi.new("float[9]", poseMatrix))
+  gl.glUniformMatrix3fv(locations.swing, 1, 0, ffi.new("float[9]", swingMatrix))
+  gl.glUniform3f(locations.modelScale, 1.0, 1.0, thickness)
+  local pivot = heldItem.pivotFor(swingStyle)
+  gl.glUniform3f(locations.pivot, pivot[1], pivot[2], pivot[3])
+  gl.glUniform3f(locations.translate, swing.x + equip.x, swing.y + equip.y, swing.z + equip.z)
+  gl.glUniform2f(locations.center, ndcX(centerX, width), ndcY(centerY, height))
+  gl.glUniform2f(locations.scale, size / width * 2.0, size / height * 2.0)
+  gl.glUniform3f(locations.projection, cameraDistance, near, far)
+  gl.glUniform3f(locations.tint, tint[1], tint[2], tint[3])
+  gl.glUniform3f(locations.ambient, ambient[1], ambient[2], ambient[3])
+  gl.glUniform3f(locations.sunColor, sunColor[1], sunColor[2], sunColor[3])
+  gl.glUniform3f(locations.moonColor, moonColor[1], moonColor[2], moonColor[3])
+  gl.glUniform3f(locations.lightDir, lightDir[1], lightDir[2], lightDir[3])
+  gl.glUniform3f(locations.params, environment.localLight or 1.0,
+    environment.underwater and 1.0 or 0.0, environment.ambientFloor or 0.04)
+
+  -- A real depth-tested model, isolated from both the world's depth buffer and
+  -- the flat HUD that follows it.
+  gl.glDisable(GL_BLEND)
+  gl.glEnable(GL_DEPTH_TEST)
+  gl.glDepthFunc(GL_LESS)
+  gl.glDepthMask(1)
+  gl.glClear(GL_DEPTH_BUFFER_BIT)
+  gl.glActiveTexture(GL_TEXTURE0)
+  gl.glBindTexture(GL_TEXTURE_2D, texture.id[0])
+  gl.glBindVertexArray(model.mesh.vao[0])
+  gl.glDrawArrays(GL_TRIANGLES, 0, model.mesh.count)
+  gl.glBindVertexArray(0)
+end
+
+function hud:draw(width, height, time, selectedSlot, state, atlasTexture, environment)
+  environment=environment or {}
   self:ensureMeshes(width, height, selectedSlot, state, time)
+
+  self:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture, environment)
+
+  gl.glUseProgram(self.shader)
+  gl.glUniform1f(self.timeLocation, time)
+  gl.glUniform1i(self.textureLocation, 0)
 
   gl.glDisable(GL_DEPTH_TEST)
   gl.glEnable(GL_BLEND)
   gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
   gl.glDepthMask(0)
-  gl.glUseProgram(self.shader)
-  gl.glUniform1f(self.timeLocation, time)
-  gl.glUniform1i(self.textureLocation, 0)
-
   self:drawMesh(self.meshes.color, self.textures.white)
   self:drawMesh(self.meshes.widgets, self.textures.widgets)
   self:drawMesh(self.meshes.heartEmpty, self.textures.heartEmpty)
@@ -1539,11 +1721,22 @@ function hud:release()
   rendering.releaseGroup(self.loadingMeshes)
   rendering.releaseGroup(self.debugMeshes)
   rendering.releaseGroup(self.inventoryMeshes)
+  for _,model in pairs(self.heldModels or {}) do
+    if model then
+      gl.glDeleteVertexArrays(1, model.mesh.vao)
+      gl.glDeleteBuffers(1, model.mesh.vbo)
+    end
+  end
+  self.heldModels = {}
+  for _,heldTexture in pairs(self.heldTextures or {}) do
+    if heldTexture.id then gl.glDeleteTextures(1,heldTexture.id) end
+  end
   self.meshes = nil
   self.menuMeshes = nil
   self.loadingMeshes = nil
   self.debugMeshes = nil
   self.inventoryMeshes = nil
+  self.heldTextures = {}
   self.menuKey = nil
   self.loadingKey = nil
   self.debugKey = nil

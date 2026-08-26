@@ -13,9 +13,8 @@ debugger.printIssues()
 --
 --   --world [seed]                     skip the menus into a generated world
 --   --time <hour>                      hold the sun at that solar hour
---   --teleport <lat,lon,altitude>      start somewhere other than spawn
---   --look sun                         aim the camera at the sun
---   --devmenu                          open the developer navigation panel
+--   --hold <item>                      equip that item in the first hotbar slot
+--   --cartesian                        fall back to the old aligned voxel grid
 --   --screenshot <seconds,...> <path>  write a PPM per listed time, then quit
 --
 -- Example:
@@ -29,30 +28,17 @@ local OPTIONS = {
     game.autoStartWorld = tonumber(value) or true
     return tonumber(value) and 1 or 0
   end,
-  ["--walk"] = function(value)
-    game.autoWalk = tonumber(value) or 8.0
-    return tonumber(value) and 1 or 0
-  end,
   ["--cartesian"] = function()
     -- Falls back to the old globally aligned voxel lattice.
     require("graphics_settings").world.sphericalVoxels = false
     return 0
   end,
-  ["--devmenu"] = function()
-    game.openDevMenu = true
-    return 0
-  end,
-  ["--teleport"] = function(value)
-    local latitude, longitude, altitude = tostring(value):match("([^,]+),([^,]+),([^,]+)")
-    game.startTeleport = latitude and {tonumber(latitude), tonumber(longitude), tonumber(altitude)}
+  ["--hold"] = function(value)
+    game.startHold = value
     return 1
   end,
   ["--time"] = function(value)
     game.forceTimeOfDay = tonumber(value)
-    return 1
-  end,
-  ["--look"] = function(value)
-    game.lookAt = value
     return 1
   end,
   ["--screenshot"] = function(times, prefix)

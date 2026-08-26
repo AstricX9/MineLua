@@ -1,5 +1,6 @@
 local blocks = require("blocks")
 local blockDrops = require("block_drops")
+local heldItem = require("held_item")
 local items = require("items")
 
 local Mining = {}
@@ -68,6 +69,37 @@ function Mining.drop(block, item)
   return blockDrops.resolve(dropRules, def.key, Mining.tool(item), properties.drop or def.key)
 end
 
+-- Chopping is not mining. A real axe lands a few heavy blows spaced about a
+-- swing apart rather than sanding the log away, so wood costs a whole number of
+-- swings and the crack overlay jumps a step per blow.
+-- One blow per swing, so the cadence is the swing itself. Reading it from the
+-- animation keeps the crack overlay and the arm in step; two constants would
+-- drift apart the first time either is tuned.
+Mining.CHOP_INTERVAL = heldItem.CHOP_SECONDS
+
+-- Hardness removed per blow. Tiers buy efficiency, not speed: the swing takes
+-- the same two seconds whatever you are holding, but a better head bites deeper,
+-- and a top-tier axe fells anything wooden in a single stroke.
+local CHOP_POWER = {0.7, 1.1, 2.2, 4.0}
+
+function Mining.chopPower(tool)
+  if not tool or tool.toolType ~= "axe" then return nil end
+  if tool.chopPower then return tonumber(tool.chopPower) end
+  local tier = math.max(1, math.floor(tonumber(tool.tier) or 1))
+  return CHOP_POWER[math.min(tier, #CHOP_POWER)]
+end
+
+-- How many swings this axe needs on this block, or nil when the pair is not a
+-- chop at all: bare hands on a log, or an axe on stone, mine the old way.
+function Mining.chopsRequired(block, item, gameMode)
+  if gameMode == "creative" then return nil end
+  local profile = Mining.profile(block)
+  if profile.tool ~= "axe" or (profile.hardness or 0) <= 0 then return nil end
+  local power = Mining.chopPower(Mining.tool(item))
+  if not power or power <= 0 then return nil end
+  return math.max(1, math.ceil(profile.hardness / power - 1e-9))
+end
+
 function Mining.breakDuration(block, item, gameMode)
   if gameMode=="creative" then return 0 end
   local profile=Mining.profile(block)
@@ -77,6 +109,24 @@ function Mining.breakDuration(block, item, gameMode)
   local speed=correct and (tool.speed or 1) or 1
   local base=(correct and Mining.canHarvest(block,item)) and 1.5 or 5.0
   return math.max(.05, profile.hardness*base/speed)
+end
+
+-- Advances one frame of breaking against the current target and reports whether
+-- it gives way. Chopping only moves when a blow lands, so wood jumps a crack
+-- stage per swing; everything else still wears down continuously.
+function Mining.advanceBreak(state, block, item, gameMode, dt, landedBlow)
+  local chops = Mining.chopsRequired(block, item, gameMode)
+  state.breakProgress = state.breakProgress or 0
+  if chops then
+    state.breakDuration = chops * Mining.CHOP_INTERVAL
+    if landedBlow then
+      state.breakProgress = math.min(state.breakDuration, state.breakProgress + Mining.CHOP_INTERVAL)
+    end
+  else
+    state.breakDuration = Mining.breakDuration(block, item, gameMode)
+    state.breakProgress = state.breakProgress + math.max(0, dt or 0)
+  end
+  return state.breakProgress >= state.breakDuration
 end
 
 return Mining

@@ -1,6 +1,6 @@
 {
   "format": "minelua-player",
-  "savedAt": 1787630817000,
+  "savedAt": 1787649488000,
   "state": {
     "camera": {
       "acceleration": 55,
@@ -9,7 +9,7 @@
       "allowFlight": false,
       "bodyRadius": 0.3,
       "coyoteTime": 0.1,
-      "coyoteTimer": 0.1,
+      "coyoteTimer": 0,
       "crouchEyeHeight": 1.24,
       "crouchSpeed": 2.4,
       "eyeHeight": 1.62,
@@ -22,19 +22,19 @@
       "gravity": 19.5,
       "groundFriction": 46,
       "groundSnap": 0.36,
-      "grounded": true,
+      "grounded": false,
       "jumpBuffer": 0,
       "jumpBufferTime": 0.12,
       "jumpSpeed": 7.4,
       "jumpWasDown": false,
-      "lastX": -1233,
-      "lastY": 464,
+      "lastX": 1631,
+      "lastY": 718,
       "mouseSensitivity": 0.085,
-      "pitch": -50.175,
+      "pitch": -19.32,
       "position": [
-        -155.15412367919,
-        89.62,
-        387.65188025662
+        22.334620390763,
+        82.523865650033,
+        334.33166570157
       ],
       "reach": 6,
       "sprintSpeed": 7.2,
@@ -44,13 +44,13 @@
       "swimSinkSpeed": 0.65,
       "swimUpSpeed": 4.6,
       "velocity": [
-        0,
-        0,
-        0
+        3.5322572234692,
+        -7.0684423,
+        5.6451168634226
       ],
-      "velocityY": 0,
+      "velocityY": -7.3749199,
       "walkSpeed": 5.1,
-      "yaw": -2423.76
+      "yaw": -2104.67
     },
     "inventory": {
       "crafting": {
@@ -65,7 +65,7 @@
       "gameMode": "survival",
       "recipeHint": "Recipe crafted!",
       "search": "",
-      "selected": 4,
+      "selected": 1,
       "slots": {
         "1": {
           "count": 1,
@@ -75,37 +75,73 @@
           "count": 12,
           "item": "clay"
         },
+        "11": {
+          "count": 25,
+          "item": "sand"
+        },
         "12": {
           "count": 17,
           "item": "stone"
         },
         "13": {
-          "count": 12,
+          "count": 22,
           "item": "stick"
         },
         "14": {
           "count": 1,
-          "item": "flint"
+          "item": "oak_planks"
         },
         "15": {
-          "count": 1,
-          "item": "oak_planks"
+          "count": 64,
+          "item": "tall_grass"
+        },
+        "16": {
+          "count": 36,
+          "item": "oak_log"
+        },
+        "17": {
+          "count": 44,
+          "item": "flint"
+        },
+        "18": {
+          "count": 2,
+          "item": "double_grass_upper"
+        },
+        "19": {
+          "count": 11,
+          "item": "grass"
         },
         "2": {
           "count": 1,
           "item": "flint_hatchet"
         },
         "20": {
-          "count": 1,
+          "count": 2,
           "item": "allium"
         },
+        "21": {
+          "count": 1,
+          "item": "dirt"
+        },
         "22": {
-          "count": 37,
+          "count": 64,
           "item": "cobblestone"
         },
-        "27": {
-          "count": 13,
-          "item": "oak_log"
+        "23": {
+          "count": 9,
+          "item": "coal_ore"
+        },
+        "24": {
+          "count": 2,
+          "item": "poppy"
+        },
+        "25": {
+          "count": 29,
+          "item": "tall_grass"
+        },
+        "26": {
+          "count": 64,
+          "item": "tall_grass"
         },
         "29": {
           "count": 1,
@@ -116,7 +152,7 @@
           "item": "wood_axe"
         },
         "30": {
-          "count": 6,
+          "count": 9,
           "item": "double_grass_lower"
         },
         "31": {
@@ -124,11 +160,11 @@
           "item": "tall_grass"
         },
         "32": {
-          "count": 64,
-          "item": "tall_grass"
+          "count": 4,
+          "item": "dandelion"
         },
         "33": {
-          "count": 14,
+          "count": 64,
           "item": "tall_grass"
         },
         "34": {
@@ -139,12 +175,12 @@
           "count": 1,
           "item": "wood_shovel"
         },
-        "5": {
-          "count": 9,
-          "item": "coal_ore"
+        "6": {
+          "count": 24,
+          "item": "cobblestone"
         },
         "7": {
-          "count": 40,
+          "count": 64,
           "item": "dirt"
         },
         "8": {
@@ -152,7 +188,7 @@
           "item": "coal"
         },
         "9": {
-          "count": 34,
+          "count": 64,
           "item": "grass"
         }
       }

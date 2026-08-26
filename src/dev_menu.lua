@@ -1,6 +1,7 @@
 local ffi = require("ffi")
 local glfw = require("glfw")
 local graphics = require("graphics_settings")
+local heldItem = require("held_item")
 
 ffi.cdef[[
 typedef struct MineLuaDevUiState {
@@ -41,8 +42,31 @@ typedef struct MineLuaDevUiState {
   int preview_mode;
   int preview_rebuild_requested;
   int want_capture_mouse;
+  int navigation_open;
+  int fly_enabled;
+  float fly_speed_multiplier;
+  int freeze_streaming;
+  int teleport_requested;
+  int capture_requested;
+  float teleport_latitude;
+  float teleport_longitude;
+  float teleport_altitude;
+  float current_latitude;
+  float current_longitude;
+  float current_altitude;
+  float time_scale;
+  int held_item_open;
+  float held_item_x_inset;
+  float held_item_y_inset;
+  float held_item_size;
+  float held_item_roll;
+  float held_item_yaw;
+  float held_item_pitch;
+  float held_item_thickness;
+  float held_item_perspective;
 } MineLuaDevUiState;
 
+int ml_imgui_state_size(void);
 int ml_imgui_init(void);
 void ml_imgui_shutdown(void);
 void ml_imgui_new_frame(float width, float height, float delta_time,
@@ -51,12 +75,17 @@ void ml_imgui_draw(MineLuaDevUiState* state);
 void ml_imgui_render(void);
 ]]
 
-local native = ffi.load("lib/minelua_imgui_tools_v2.dll")
+local native = ffi.load("lib/minelua_imgui_tools_v4.dll")
 
 local DevMenu = {}
 DevMenu.__index = DevMenu
 
 function DevMenu.new()
+  local luaStateSize=ffi.sizeof("MineLuaDevUiState")
+  local nativeStateSize=tonumber(native.ml_imgui_state_size())
+  if luaStateSize~=nativeStateSize then
+    error(string.format("Developer UI state mismatch: Lua %d bytes, native %d bytes",luaStateSize,nativeStateSize))
+  end
   if native.ml_imgui_init() == 0 then
     error("Failed to initialize Dear ImGui OpenGL renderer")
   end
@@ -100,6 +129,30 @@ function DevMenu.new()
   state[0].preview_mode = 0
   state[0].preview_rebuild_requested = 0
   state[0].want_capture_mouse = 0
+  state[0].navigation_open = 0
+  state[0].fly_enabled = 0
+  state[0].fly_speed_multiplier = 1.0
+  state[0].freeze_streaming = 0
+  state[0].teleport_requested = 0
+  state[0].capture_requested = 0
+  state[0].teleport_latitude = 0.0
+  state[0].teleport_longitude = 0.0
+  state[0].teleport_altitude = 0.0
+  state[0].current_latitude = 0.0
+  state[0].current_longitude = 0.0
+  state[0].current_altitude = 0.0
+  state[0].time_scale = 1.0
+  -- The panel opens on the authored placement, so "Reset held item" and a
+  -- fresh launch agree with what the game ships.
+  state[0].held_item_open = 0
+  state[0].held_item_x_inset = heldItem.DEFAULTS.xInset
+  state[0].held_item_y_inset = heldItem.DEFAULTS.yInset
+  state[0].held_item_size = heldItem.DEFAULTS.size
+  state[0].held_item_roll = heldItem.DEFAULTS.roll
+  state[0].held_item_yaw = heldItem.DEFAULTS.yaw
+  state[0].held_item_pitch = heldItem.DEFAULTS.pitch
+  state[0].held_item_thickness = heldItem.DEFAULTS.thickness
+  state[0].held_item_perspective = heldItem.DEFAULTS.perspective
 
   return setmetatable({state = state}, DevMenu)
 end
@@ -252,6 +305,20 @@ end
 
 function DevMenu:fogStrength()
   return tonumber(self.state[0].fog_strength)
+end
+
+function DevMenu:heldItemTransform()
+  local state=self.state[0]
+  return {
+    xInset=tonumber(state.held_item_x_inset),
+    yInset=tonumber(state.held_item_y_inset),
+    size=tonumber(state.held_item_size),
+    roll=tonumber(state.held_item_roll),
+    yaw=tonumber(state.held_item_yaw),
+    pitch=tonumber(state.held_item_pitch),
+    thickness=tonumber(state.held_item_thickness),
+    perspective=tonumber(state.held_item_perspective)
+  }
 end
 
 function DevMenu:wantsMouse()

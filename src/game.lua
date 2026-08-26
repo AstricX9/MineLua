@@ -16,6 +16,7 @@ local math3d = require("math3d")
 local rendering = require("rendering")
 local saves = require("saves")
 local shaderModule = require("shader")
+local heldItem = require("held_item")
 local spawnLoading = require("spawn_loading")
 local terrain = require("terrain")
 local texture = require("texture")
@@ -2316,6 +2317,10 @@ local function createDisplayState()
     breakTarget = nil,
     breakProgress = 0.0,
     handSwing = 0.0,
+    handSwinging = false,
+    handSwingStyle = "quick",
+    -- Smoothed turn rates and a walk phase for the held model's sway.
+    heldMotion = {lookX = 0.0, lookY = 0.0, bob = 0.0, walkPhase = 0.0, yaw = nil, pitch = nil},
     placeWasDown = false,
     dropWasDown = false,
     menuClickWasDown = false,
@@ -2330,7 +2335,10 @@ local function createDisplayState()
     debugFrameMs = 0.0,
     debugLastFrameMs = 0.0,
     lastQueueStats = nil,
-    screen = "main",
+    -- game.autoStartWorld skips the menus and drops straight into a generated
+    -- world. Only a scripted smoke run sets it, so a launch from the command
+    -- line exercises worldgen, meshing and the HUD instead of the title screen.
+    screen = game.autoStartWorld and "loading" or "main",
     cursorMode = nil,
     menuMouseX = -1,
     menuMouseY = -1,
@@ -2354,7 +2362,13 @@ local function createDisplayState()
     hasWorld = false,
     menuParentScreen = nil,
     currentWorldSave = nil,
-    pendingNewWorldConfig = nil,
+    pendingNewWorldConfig = game.autoStartWorld and {
+      gameMode = "creative",
+      generatorType = "default",
+      seed = tonumber(game.autoStartWorld) or 1,
+      worldName = "Smoke Test",
+      spawnAltitudeMeters = 0.0
+    } or nil,
     loadingJob = nil,
     pendingTerrainEntries = {},
     selectedSlot = 1,
@@ -2857,6 +2871,13 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
     end
   end
 
+  -- The swing runs before the break loop so a chop can bite at the moment the
+  -- animation says the blade arrives, rather than on the button press.
+  local heldStack=state.inventory.slots[state.selectedSlot]
+  local landedBlow=heldItem.updateSwing(state, dt,
+    breakDown or (placeDown and not state.placeWasDown),
+    heldItem.isHeavy(Mining.tool(heldStack and heldStack.item)))
+
   if breakDown then
     local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
     if hit then
@@ -2866,13 +2887,10 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
         state.breakTarget=targetKey
         state.breakProgress=0
       end
-      local held=state.inventory.slots[state.selectedSlot]
-      local duration=Mining.breakDuration(definition,held and held.item,state.worldGameMode)
+      local held=heldStack
+      local broke=Mining.advanceBreak(state,definition,held and held.item,state.worldGameMode,dt,landedBlow)
       state.breakTargetPosition={x=hit.x,y=hit.y,z=hit.z}
-      state.breakDuration=duration
-      state.breakProgress=state.breakProgress+math.max(0,dt or 0)
-      state.handSwing=duration>0 and math.min(1,state.breakProgress/duration) or 1
-      if state.breakProgress>=duration and (state.worldGameMode~="creative" or not state.breakWasDown) then
+      if broke and (state.worldGameMode~="creative" or not state.breakWasDown) then
         local tree,changed
         local canHarvest=state.worldGameMode=="creative" or Mining.canHarvest(definition,held and held.item)
         if FallingTrees.isLog(definition) and canHarvest then tree,changed=fallingTrees:start(world,hit.x,hit.y,hit.z,playerCamera:getFront()) end
@@ -2887,13 +2905,12 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
         state.breakTarget=nil
         state.breakTargetPosition=nil state.breakDuration=nil
         state.breakProgress=0
-        state.handSwing=0
       end
     else
-      state.breakTarget=nil state.breakTargetPosition=nil state.breakDuration=nil state.breakProgress=0 state.handSwing=0
+      state.breakTarget=nil state.breakTargetPosition=nil state.breakDuration=nil state.breakProgress=0
     end
   else
-    state.breakTarget=nil state.breakTargetPosition=nil state.breakDuration=nil state.breakProgress=0 state.handSwing=0
+    state.breakTarget=nil state.breakTargetPosition=nil state.breakDuration=nil state.breakProgress=0
   end
 
   if placeDown and not state.placeWasDown then
@@ -2960,6 +2977,24 @@ local function initWindow()
   glfw.glfwSetInputMode(window, glfw.GLFW_CURSOR, glfw.GLFW_CURSOR_NORMAL)
 
   return window
+end
+
+-- Read the default framebuffer back to a PPM. Scripted runs use this instead
+-- of a screenshot key, which no headless launch can press.
+function game.captureFrame(path, width, height)
+  local pixels = ffi.new("unsigned char[?]", width * height * 3)
+  gl.glPixelStorei(0x0D05, 1) -- GL_PACK_ALIGNMENT
+  gl.glReadPixels(0, 0, width, height, 0x1907, 0x1401, pixels) -- GL_RGB, GL_UNSIGNED_BYTE
+  local file = io.open(path, "wb")
+  if not file then return false end
+  file:write(string.format("P6\n%d %d\n255\n", width, height))
+  -- OpenGL hands back the bottom row first; PPM wants the top row first.
+  local stride = width * 3
+  for row = height - 1, 0, -1 do
+    file:write(ffi.string(pixels + row * stride, stride))
+  end
+  file:close()
+  return true
 end
 
 function game.run()
@@ -3262,6 +3297,11 @@ function game.run()
           displayState.inventory = Inventory.new(job.config.gameMode)
           displayState.selectedSlot = 1
           restorePlayer(displayState, playerCamera, job.savedPlayer)
+          if game.startHold then
+            displayState.inventory.slots[1] = {item = game.startHold, count = 1}
+            displayState.inventory.selected = 1
+            displayState.selectedSlot = 1
+          end
           -- Physics belongs to the selected world, not to an old camera
           -- snapshot. This also lets profile upgrades correct existing saves.
           playerCamera.gravity = (graphics.player.gravity or 19.5) *
@@ -3382,6 +3422,7 @@ function game.run()
           end
         elseif not displayState.screen and not displayState.devMenuOpen then
           playerCamera:update(dt, window, world)
+          heldItem.updateMotion(displayState.heldMotion, playerCamera, dt)
           updateBlockEditInput(window, displayState, world, displayState.pendingTerrainEntries, playerCamera, droppedItems, fallingTrees, dt)
         else
           displayState.hotbarScroll = 0.0
@@ -3393,6 +3434,9 @@ function game.run()
         local worldCycleSpeed = SUN_CYCLE_SPEED / (activeWorldProfile.dayLengthScale or 1.0)
         devMenu:setNaturalTimeOfDay(timeOfDayForSimulationTime(currentTime, worldCycleSpeed))
         local atmosphereTime = currentTime
+        if game.forceTimeOfDay then
+          atmosphereTime = simulationTimeForTimeOfDay(game.forceTimeOfDay, worldCycleSpeed)
+        end
         if devMenu:usesTimeOverride() then
           atmosphereTime = simulationTimeForTimeOfDay(devMenu:timeOfDay(), worldCycleSpeed)
         end
@@ -3546,13 +3590,50 @@ function game.run()
         elseif displayState.screen then
           hudOverlay:drawMenu(windowWidth, windowHeight, displayState.screen, displayState.menuMouseX, displayState.menuMouseY, displayState, currentTime)
         elseif not previewMode then
-          hudOverlay:draw(windowWidth, windowHeight, currentTime, displayState.selectedSlot, displayState, {id = atlasTex})
+          -- The held model is camera-relative, but its light remains anchored
+          -- to the world. Transform the sun into view space and sample the
+          -- player's local skylight so caves, night, and water affect it too.
+          local heldLightDir={
+            view[1]*sunDir[1]+view[5]*sunDir[2]+view[9]*sunDir[3],
+            view[2]*sunDir[1]+view[6]*sunDir[2]+view[10]*sunDir[3],
+            view[3]*sunDir[1]+view[7]*sunDir[2]+view[11]*sunDir[3]
+          }
+          local heldLocalLight=world:skyLightAt(
+            math.floor(playerCamera.position[1]),math.floor(playerCamera.position[2]),
+            math.floor(playerCamera.position[3]))/15
+          hudOverlay:draw(windowWidth, windowHeight, currentTime, displayState.selectedSlot, displayState,
+            {id = atlasTex},{
+              ambient=sky.ambient,
+              sunColor=sky.lightColor,
+              moonColor=sky.moonLightColor,
+              ambientFloor=sky.ambientFloor,
+              lightDir=heldLightDir,
+              localLight=heldLocalLight,
+              underwater=currentWaterLevel and playerCamera.position[2]<currentWaterLevel,
+              heldTransform=devMenu:heldItemTransform(),
+              heldMotion=displayState.viewBobbing == false and {lookX=displayState.heldMotion.lookX,lookY=displayState.heldMotion.lookY} or displayState.heldMotion
+            })
           if displayState.debugScreen and displayState.debugInfo then
             hudOverlay:drawDebug(windowWidth, windowHeight, displayState.debugInfo)
           end
         end
         devMenu:draw(window, windowWidth, windowHeight, dt)
         displayState.devMenuOpen = devMenu:isOpen()
+
+        if game.screenshotSchedule and #game.screenshotSchedule > 0 then
+          local due = game.screenshotSchedule[1]
+          if currentTime >= due.at then
+            table.remove(game.screenshotSchedule, 1)
+            if game.captureFrame(due.path, windowWidth, windowHeight) then
+              print(string.format("Captured %s at %.1f s", due.path, currentTime))
+            else
+              print("Failed to write " .. due.path)
+            end
+            if #game.screenshotSchedule == 0 and game.exitAfterScreenshots then
+              glfw.glfwSetWindowShouldClose(window, 1)
+            end
+          end
+        end
 
         glfw.glfwSwapBuffers(window)
         glfw.glfwPollEvents()
