@@ -56,9 +56,14 @@ function Fields:sample(x, z)
   local chainA = noise.ridgeChain(wx + 300.0, wz - 450.0, 97, mountainScale, 0.58, 0.34, seed)
   local chainB = noise.ridgeChain(wx - 12000.0, wz + 9400.0, 101, mountainScale * 0.72, -0.82, 0.28, seed)
   local chainC = noise.ridgeChain(wx + 19000.0, wz + 2100.0, 103, mountainScale * 1.18, 1.36, 0.42, seed)
-  local chain = math.max(chainA, chainB * 0.92, chainC * 0.76)
-  local mountainPotential = noise.edge(chain, 0.47, 0.84) *
-    noise.edge(tectonicActivity, 0.34, 0.78) * noise.edge(continentalness, 0.40, 0.62)
+  local chain = math.max(chainA, chainB * 0.92, chainC * 0.82)
+  -- Mountain chains need a broad uplifted body, not only a thin ridge line.
+  -- The tectonic field modulates their height instead of deleting whole
+  -- stretches, producing long forested ranges with connected foothills.
+  local mountainBelt = noise.edge(chain, 0.34, 0.81)
+  local tectonicUplift = 0.18 + noise.edge(tectonicActivity, 0.34, 0.78) * 0.82
+  local inlandUplift = noise.edge(continentalness, 0.38, 0.64)
+  local mountainPotential = mountainBelt * tectonicUplift * inlandUplift
   local ridge = noise.ridged(noise.fbm(wx + 1700.0, wz - 2200.0, 37, 5, mountainScale * 6.15, seed))
 
   local latitudeScale = s.climateLatitudeScale or 0.000075

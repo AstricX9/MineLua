@@ -58,7 +58,9 @@ end
 
 local seconds, blows, stages = fell("wood_axe")
 assert(blows == 3, "a wooden axe should fell a log in three blows, took " .. blows)
-assert(seconds > 4.5 and seconds < 6.0, "three blows at the chop cadence, got " .. seconds .. "s")
+local expectedThreeBlows = heldItem.CHOP_SECONDS * (1.0 + heldItem.CHOP_IMPACT_A)
+assert(math.abs(seconds - expectedThreeBlows) < 2 / 60,
+  "three blows follow the faster chop cadence, got " .. seconds .. "s")
 -- The crack overlay must step, not creep: a chopped log only ever shows the
 -- stages its blows have earned.
 local seen = {}

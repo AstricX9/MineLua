@@ -19,6 +19,7 @@ end
 
 ensureRenderData(blocks.grass)
 ensureRenderData(blocks.dirt)
+ensureRenderData(blocks.oak_leaves)
 
 local function generatedEntry(chunkX, chunkZ)
   local chunk = Chunk.new()
@@ -57,6 +58,16 @@ assert(record.source == "generated_chunk", "LOD retains generated-chunk provenan
 assert(record.heights[1] == 5 and record.heights[9] == 9, "captured heights come from voxel data")
 assert(record.waterSurface[1] == 5.65, "captured water comes from the chunk")
 
+-- Trees must not become terrain control points. At coarse LOD that would pull
+-- an entire tile up to the canopy and turn leaves into long green wedges.
+local treeEntry = generatedEntry(0, 0)
+treeEntry.chunk:setBlock(8, 20, 8, blocks.oak_leaves)
+treeEntry.chunk:setBlock(8, 15, 8, assert(blocks.oak_log_alive))
+local treeRecord = DistantTerrain.capture(treeEntry, 31, blocks.water, blocks.water_still)
+local treeColumn = 8 + 8 * 16 + 1
+assert(treeRecord.heights[treeColumn] == 9 and treeRecord.blockIds[treeColumn] == blocks.grass,
+  "foliage and living trunks do not stretch the distant terrain height field")
+
 local vertices, waterVertices = DistantTerrain.build(record, 2, {maxHeight = 31})
 assert(#vertices > 0 and #vertices % DistantTerrain.TERRAIN_STRIDE == 0,
   "captured columns build a terrain LOD")
@@ -64,6 +75,34 @@ assert(#waterVertices > 0 and #waterVertices % DistantTerrain.WATER_STRIDE == 0,
   "captured water builds a far water LOD")
 assert(#vertices < 16 * 16 * 6 * 6 * DistantTerrain.TERRAIN_STRIDE,
   "LOD is smaller than a naive full voxel surface")
+
+-- A far mesh must be allowed to sample the compact columns of an adjacent
+-- real chunk. Otherwise its boundary cliff is left open until both sides have
+-- independently passed through the far cache.
+local seamUploads = {}
+local seamManager = DistantTerrain.new({
+  radius = 3, generationSteps = 1, buildBudget = 1, frameBudgetMs = 1000,
+  maxHeight = 31, waterId = blocks.water, stillWaterId = blocks.water_still,
+  now = function() return 0 end,
+  upload = function(_, solid)
+    seamUploads[#seamUploads + 1] = #solid
+    return {count = #solid / DistantTerrain.TERRAIN_STRIDE}
+  end,
+  release = function() end
+})
+local realEntry = generatedEntry(0, 0)
+realEntry.hasMesh = true
+local farEntry = generatedEntry(1, 0)
+local farRecord = seamManager:_capture(farEntry)
+local isolatedVertices = DistantTerrain.build(farRecord, 2, {maxHeight = 31})
+seamManager:_replaceMesh(farRecord, 2, {
+  chunks = {["0,0"] = realEntry}
+})
+assert(seamManager.records["0,0"] ~= nil,
+  "building a boundary LOD captures its adjacent real chunk as a seam source")
+assert(seamUploads[1] > #isolatedVertices,
+  "the real-to-LOD height difference is closed by boundary geometry")
+seamManager:clear()
 
 -- A missing coordinate must complete the ordinary chunk job before any record
 -- or mesh can exist. The fake world makes the yield boundary deterministic.
@@ -91,7 +130,8 @@ local manager = DistantTerrain.new({
   now = function() return 0 end,
   upload = function(captured, solid, water, bounds, step)
     uploads = uploads + 1
-    return {count = #solid / 14, waterMesh = #water > 0 and {count = #water / 11} or nil,
+    return {count = #solid / DistantTerrain.TERRAIN_STRIDE,
+      waterMesh = #water > 0 and {count = #water / DistantTerrain.WATER_STRIDE} or nil,
       bounds = bounds, chunkX = captured.chunkX, chunkZ = captured.chunkZ, lodStep = step}
   end,
   release = function() releases = releases + 1 end
@@ -113,6 +153,31 @@ end
 manager:clear()
 assert(releases > 0, "clearing distant terrain releases its GPU representations")
 
+-- The far scheduler must keep the process pool occupied. Polling remains
+-- time-sliced, but launching only one job here would serialize a large render
+-- distance even when the world has many generation workers available.
+local parallelWorld = {chunks = {}, chunkRadius = 1, jobs = 0}
+function parallelWorld:chunkWorkerCount() return 4 end
+function parallelWorld:createChunkJob(chunkX, chunkZ)
+  self.jobs = self.jobs + 1
+  local job = {chunkX = chunkX, chunkZ = chunkZ}
+  job.thread = coroutine.create(function()
+    for _ = 1, 20 do coroutine.yield(false) end
+  end)
+  return job
+end
+local parallelManager = DistantTerrain.new({
+  radius = 4, generationSteps = 1, buildBudget = 1, frameBudgetMs = 1000,
+  maxHeight = 31, waterId = blocks.water, stillWaterId = blocks.water_still,
+  now = function() return 0 end,
+  upload = function() return {count = 0} end,
+  release = function() end
+})
+parallelManager:update(parallelWorld, {}, {}, 0, 0)
+assert(parallelWorld.jobs == 3 and #parallelManager.active == 3,
+  "far generation fills the worker pool while reserving one slot for near chunks")
+parallelManager:clear()
+
 -- A 128 setting represents the exact square radius, but scheduling itself must
 -- stay lazy: allocating and sorting all 66,049 coordinates would freeze the
 -- frame before generation had even begun.
@@ -122,6 +187,16 @@ assert(wideStats.radius == 128 and wideStats.total == 66040,
   "128 selects the full 257x257 square minus the 3x3 full-detail center")
 assert(wideStats.scheduledThrough < 128 and #manager.queue < 2048,
   "large square ranges are scheduled progressively by ring")
+
+local releasesBeforeShrink = releases
+manager.records["10,0"] = {
+  chunkX = 10, chunkZ = 0, mesh = {count = 1}, source = "generated_chunk"
+}
+assert(manager:setRadius(4) == true, "changing the radius is reported immediately")
+local narrowStats = manager:update(fakeWorld, {}, {}, 0, 0)
+assert(narrowStats.radius == 4 and manager.records["10,0"] == nil,
+  "shrinking the slider immediately removes LOD records beyond the new horizon")
+assert(releases > releasesBeforeShrink, "shrinking the horizon releases its GPU meshes")
 manager:clear()
 
 print("distant terrain passed: generated-chunk provenance, adaptive LOD, and no fake under-mesh")

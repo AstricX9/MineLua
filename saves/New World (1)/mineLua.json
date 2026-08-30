@@ -1,12 +1,12 @@
 {
   "allowCheats": false,
   "bonusChest": false,
-  "gameMode": "survival",
+  "gameMode": "creative",
   "generateStructures": true,
   "generatorType": "default",
-  "lastPlayed": 1787631024000,
+  "lastPlayed": 1787826733000,
   "saveFormat": "minecraft-like",
-  "seed": 846840320,
+  "seed": 1299299840,
   "worldId": "mars",
   "worldName": "New World"
 }

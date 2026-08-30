@@ -8,6 +8,8 @@ local Inventory = {}
 Inventory.__index = Inventory
 Inventory.HOTBAR_SIZE = 9
 Inventory.SLOT_COUNT = 36
+Inventory.CREATIVE_COLUMNS = 9
+Inventory.CREATIVE_ROWS = 5
 
 local STACK_LIMIT = 64
 local DEFAULT_RECIPE_DATA_ROOT = "data"
@@ -43,10 +45,30 @@ local function usableBlock(definition)
   return definition.key ~= "water" and definition.key ~= "lava"
 end
 
-function Inventory.catalog()
+local function creativeCategory(definition, isItem)
+  local properties = definition.properties or {}
+  if definition.creativeTab then return definition.creativeTab end
+  if properties.creativeTab then return properties.creativeTab end
+  if isItem then return "materials" end
+
+  local key = definition.key or ""
+  if key:find("redstone", 1, true) or key:find("repeater", 1, true) or
+      key:find("comparator", 1, true) then return "redstone" end
+  if properties.plant or properties.leaves or properties.flower or
+      key:find("grass", 1, true) or key:find("leaves", 1, true) or
+      key:find("log", 1, true) or key:find("ore", 1, true) or
+      key:find("sand", 1, true) or key:find("clay", 1, true) or
+      key:find("snow", 1, true) or key:find("ice", 1, true) then return "nature" end
+  return "building"
+end
+
+function Inventory.catalog(tab)
+  tab = tab or "search"
   local result = {}
   for id, definition in pairs(blocks.list) do
-    if type(id) == "number" and usableBlock(definition) then
+    local category = creativeCategory(definition, false)
+    if type(id) == "number" and usableBlock(definition) and
+        (tab == "search" or tab == category) then
       result[#result + 1] = definition.key
     end
   end
@@ -54,8 +76,25 @@ function Inventory.catalog()
     local da, db = blocks.mapping[a], blocks.mapping[b]
     return (da and da.id or 0) < (db and db.id or 0)
   end)
-  for _, item in ipairs(items.catalog()) do result[#result + 1] = item end
+  if tab == "search" or tab == "materials" then
+    for _, item in ipairs(items.catalog()) do result[#result + 1] = item end
+  end
   return result
+end
+
+function Inventory.maxCreativeScroll(itemCount)
+  local rows = math.ceil(math.max(0, itemCount or 0) / Inventory.CREATIVE_COLUMNS)
+  return math.max(0, rows - Inventory.CREATIVE_ROWS)
+end
+
+function Inventory.clampCreativeScroll(scroll, itemCount)
+  return math.max(0, math.min(Inventory.maxCreativeScroll(itemCount),
+    math.floor(tonumber(scroll) or 0)))
+end
+
+function Inventory.creativeItemAt(catalog, scroll, visibleIndex)
+  local offset = Inventory.clampCreativeScroll(scroll, #catalog) * Inventory.CREATIVE_COLUMNS
+  return catalog[offset + visibleIndex]
 end
 
 function Inventory.new(gameMode, options)
@@ -73,10 +112,6 @@ function Inventory.new(gameMode, options)
     recipeHint = "Break gravel for flint, then gather sticks from leaves or wood."
   }, Inventory)
 
-  if self.gameMode == "creative" then
-    local starter = {"grass", "dirt", "stone", "sand", "gravel", "cobblestone", "oak_planks", "oak_log", "oak_leaves"}
-    for index, item in ipairs(starter) do self.slots[index] = {item = item, count = STACK_LIMIT} end
-  end
   return self
 end
 
@@ -179,7 +214,13 @@ function Inventory:pickBlock(item)
     self.slots[self.selected] = {item = item, count = STACK_LIMIT}
     return self.selected
   end
-  return found
+  -- A stack further back swaps into the held slot, so pick block reaches the
+  -- whole inventory instead of only what already happens to be on the hotbar.
+  if found then
+    self.slots[found], self.slots[self.selected] = self.slots[self.selected], self.slots[found]
+    return self.selected
+  end
+  return nil
 end
 
 function Inventory:swapOrMerge(index)
@@ -204,14 +245,40 @@ end
 function Inventory:collectToCursor()
   if not self.cursor or self.cursor.count >= STACK_LIMIT then return 0 end
   local moved = 0
-  for index = 1, Inventory.SLOT_COUNT do
-    local slot = self.slots[index]
+  local function collect(container, indices)
+    for _, index in ipairs(indices) do
+      local slot = container[index]
+      if slot and slot.item == self.cursor.item then
+        local amount = math.min(slot.count, STACK_LIMIT - self.cursor.count)
+        self.cursor.count = self.cursor.count + amount
+        slot.count = slot.count - amount
+        moved = moved + amount
+        if slot.count <= 0 then container[index] = nil end
+        if self.cursor.count >= STACK_LIMIT then return true end
+      end
+    end
+    return false
+  end
+
+  local slotIndices = {}
+  for index = 1, Inventory.SLOT_COUNT do slotIndices[#slotIndices + 1] = index end
+  if collect(self.slots, slotIndices) then return moved end
+
+  local craftIndices = {}
+  for index = 1, self.craftingGridSize * self.craftingGridSize do
+    craftIndices[#craftIndices + 1] = index
+  end
+  if collect(self.crafting, craftIndices) then return moved end
+
+  local furnace = self.furnace or {}
+  for _, name in ipairs({"input", "fuel", "output"}) do
+    local slot = furnace[name]
     if slot and slot.item == self.cursor.item then
       local amount = math.min(slot.count, STACK_LIMIT - self.cursor.count)
       self.cursor.count = self.cursor.count + amount
       slot.count = slot.count - amount
       moved = moved + amount
-      if slot.count <= 0 then self.slots[index] = nil end
+      if slot.count <= 0 then furnace[name] = nil end
       if self.cursor.count >= STACK_LIMIT then break end
     end
   end

@@ -1,5 +1,6 @@
 local flow = {}
 local worldProfiles = require("world_profiles")
+local renderDistance = require("render_distance")
 
 local function cycleValue(current, values)
   for index = 1, #values do
@@ -23,6 +24,10 @@ local CONTROL_CHOICES = {
   drop = {"Q", "R"},
   inventory = {"E", "R"}
 }
+
+function flow.inventoryScreenForGameMode(gameMode)
+  return gameMode == "creative" and "creative_inventory" or "inventory"
+end
 
 local function queueWorldStart(state, gameMode, generatorType, worldId, worldName, existingWorld)
   state.worldGameMode = gameMode or state.worldGameMode or "survival"
@@ -57,8 +62,11 @@ function flow.back(state)
     state.screen = nil
   elseif state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" or state.screen == "furnace" then
     state.screen = nil
-  elseif state.screen == "select_world" or state.screen == "multiplayer" or state.screen == "texture_packs" then
+  elseif state.screen == "select_world" or state.screen == "multiplayer" then
     state.screen = "main"
+  elseif state.screen == "texture_packs" then
+    state.screen = state.menuParentScreen or "main"
+    state.menuParentScreen = nil
   elseif state.screen == "options" then
     returnFromOptions(state)
   elseif state.screen == "create_world" then
@@ -84,6 +92,7 @@ function flow.applyAction(state, action)
   elseif action == "multiplayer" then
     state.screen = "multiplayer"
   elseif action == "texture_packs" then
+    state.menuParentScreen = state.screen
     state.screen = "texture_packs"
   elseif action == "start_survival" then
     queueWorldStart(state, "survival", "default", "earth", "Survival World")
@@ -108,7 +117,16 @@ function flow.applyAction(state, action)
   elseif action == "toggle_more_world_options" then
     state.moreWorldOptions = not state.moreWorldOptions
   elseif action == "toggle_generator" then
-    state.worldGeneratorType = state.worldGeneratorType == "superflat" and "default" or "superflat"
+    state.worldGeneratorType = cycleValue(state.worldGeneratorType or "default",
+      {"default", "superflat", "showcase"})
+    if state.worldGeneratorType == "showcase" then state.worldGameMode = "creative" end
+  elseif action == "create_texture_showcase" then
+    state.worldSeedText = ""
+    state.generateStructures = false
+    state.allowCheats = true
+    state.bonusChest = false
+    queueWorldStart(state, "creative", "showcase", "earth", "Texture Pack Showcase")
+    return "started_world"
   elseif action == "cycle_world" then
     state.worldId = worldProfiles.next(state.worldId)
   elseif action == "toggle_structures" then
@@ -120,6 +138,16 @@ function flow.applyAction(state, action)
   elseif action == "options" then
     state.menuParentScreen = state.screen == "pause" and "pause" or "main"
     state.screen = "options"
+  elseif action == "settings_general" then
+    state.screen = "options"
+  elseif action == "settings_video" then
+    state.screen = "video"
+  elseif action == "settings_controls" then
+    state.screen = "controls"
+  elseif action == "settings_resources" then
+    state.screen = "texture_packs"
+  elseif action == "settings_done" then
+    returnFromOptions(state)
   elseif action == "video" then
     state.screen = "video"
   elseif action == "controls" then
@@ -133,7 +161,8 @@ function flow.applyAction(state, action)
   elseif action == "done_child" then
     state.screen = "options"
   elseif action == "back_main" then
-    state.screen = "main"
+    state.screen = state.menuParentScreen or "main"
+    state.menuParentScreen = nil
   elseif action == "back_pause" then
     state.screen = "pause"
   elseif action == "back_select" then
@@ -235,7 +264,11 @@ end
 
 function flow.applySlider(state, slider, value)
   if slider == "render_distance" then
-    state.renderDistance = math.max(4, math.min(128, math.floor((tonumber(value) or 4) + 0.5)))
+    local previous = renderDistance.clamp(state.renderDistance, value)
+    state.renderDistance = renderDistance.clamp(value, previous)
+    if state.renderDistance ~= previous then
+      state.renderDistanceRevision = (state.renderDistanceRevision or 0) + 1
+    end
   end
 end
 

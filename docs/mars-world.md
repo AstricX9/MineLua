@@ -22,6 +22,17 @@ aureole is blue-grey, sunlight is scaled for Mars' average distance from the
 Sun, the sol is 24 h 39 m 35 s, and player gravity uses the Mars/Earth surface
 gravity ratio.
 
+The same atmosphere is audible as well as visible. 0.6 kPa of cold CO2 radiates
+far less than sea-level air, so Mars is markedly quieter; its vibrational
+relaxation swallows everything above a few hundred hertz within metres, so
+anything at a distance arrives late and dulled to a thud; and its caves barely
+ring. Its slower air favours the low end of every block it does carry. Walking
+is quieter again, because a third of Earth's gravity puts a third of the weight
+into each footfall — though the player still hears their own steps and tool
+swings through their body, which no atmosphere can take away. None of that is
+authored for Mars specifically: it is derived from the atmosphere and gravity
+already in the world profile. See [World acoustics](world-acoustics.md).
+
 Scientific references:
 
 - [NASA Mars facts](https://science.nasa.gov/mars/facts/)
@@ -29,3 +40,4 @@ Scientific references:
 - [NASA: why Mars is red](https://www.nasa.gov/solar-system/nasa-new-study-on-why-mars-is-red-supports-potentially-habitable-past/)
 - [USGS morphology of the Martian surface](https://www.usgs.gov/publications/morphology-martian-surface)
 - [USGS MOLA topographic map of Mars](https://pubs.usgs.gov/imap/i2782/)
+- [Maurice et al., in situ recording of the Mars soundscape](https://www.nature.com/articles/s41586-022-04679-0)

@@ -3,6 +3,8 @@ local blocks = require("blocks")
 local settings = require("graphics_settings").terrainGeneration or {}
 local texture = require("texture")
 local worldProfiles = require("world_profiles")
+local showcase = require("showcase")
+local voxelTrees = require("voxel_trees")
 
 local terrain = {}
 
@@ -74,9 +76,9 @@ local biomeProfiles = {
     maxHeight = 0.35,
     topBlock = "grass",
     fillerBlock = "dirt",
-    treeSpacing = 6,
-    treeChance = 0.48,
-    treeGenerators = {"big", "oak", "oak"}
+    treeSpacing = 7,
+    treeChance = 0.52,
+    treeGenerators = {"ceiba", "jungle", "jungle", "mangrove", "fig", "big"}
   },
   swampland = {
     name = "Swampland",
@@ -90,7 +92,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 10,
     treeChance = 0.10,
-    treeGenerators = {"oak"}
+    treeGenerators = {"willow", "mangrove", "fig", "jungle", "oak"}
   },
   seasonalForest = {
     name = "Seasonal Forest",
@@ -103,7 +105,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 8,
     treeChance = 0.28,
-    treeGenerators = {"oak", "oak", "big"}
+    treeGenerators = {"maple", "jungle", "acacia", "oak", "big"}
   },
   savanna = {
     name = "Savanna",
@@ -116,7 +118,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 13,
     treeChance = 0.05,
-    treeGenerators = {"oak"}
+    treeGenerators = {"acacia", "acacia", "baobab", "oak"}
   },
   shrubland = {
     name = "Shrubland",
@@ -129,7 +131,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 13,
     treeChance = 0.06,
-    treeGenerators = {"oak"}
+    treeGenerators = {"acacia", "birch", "oak"}
   },
   plains = {
     name = "Plains",
@@ -142,7 +144,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 18,
     treeChance = 0.015,
-    treeGenerators = {"oak"}
+    treeGenerators = {"oak", "birch"}
   },
   forest = {
     name = "Forest",
@@ -156,7 +158,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 7,
     treeChance = 0.38,
-    treeGenerators = {"forest", "oak", "oak", "big"}
+    treeGenerators = {"forest", "oak", "birch", "birch", "maple", "big"}
   },
   taiga = {
     name = "Taiga",
@@ -171,7 +173,7 @@ local biomeProfiles = {
     treeSpacing = 8,
     treeChance = 0.34,
     snow = true,
-    treeGenerators = {"taiga1", "taiga2", "taiga2"}
+    treeGenerators = {"spruce", "pine", "pine", "cypress"}
   },
   desert = {
     name = "Desert",
@@ -243,8 +245,9 @@ local biomeProfiles = {
     maxHeight = 0.1,
     topBlock = "sand",
     fillerBlock = "sand",
-    treeSpacing = 16,
-    treeChance = 0.0
+    treeSpacing = 12,
+    treeChance = 0.18,
+    treeGenerators = {"palm", "palm", "palm"}
   },
   rockyShore = {
     name = "Rocky Shore",
@@ -904,7 +907,8 @@ local function isTreeCenter(x, z, biome)
   end
 
   local macro = terrain.macroAt(x, z)
-  if macro.river > 0.32 or macro.lake > 0.28 or macro.land < 0.42 then
+  local minimumLand = biome == "beach" and 0.28 or 0.42
+  if macro.river > 0.32 or macro.lake > 0.28 or macro.land < minimumLand then
     return false
   end
 
@@ -932,6 +936,48 @@ local function isTreeCenter(x, z, biome)
   end
 
   return hash2(cellX, cellZ, 239) < profile.treeChance * (settings.treeDensity or 1.0) * densityScale
+end
+
+-- Trees are selected from one jittered point per biome-sized grid cell. Walking
+-- every block in the overlap margin and running the full worldgen pipeline just
+-- to reject almost all of them made vegetation more expensive than the terrain
+-- itself, especially with the wide overlap needed by authored tree crowns.
+-- Enumerate the possible jittered points for every spacing instead. The final
+-- biome check in isTreeCenter keeps this exactly equivalent to the old scan.
+local function treeCandidates(minX, minZ, maxX, maxZ)
+  local spacings = {}
+  for _, profile in pairs(biomeProfiles) do
+    local spacing = profile.treeSpacing
+    if profile.treeChance and profile.treeChance > 0.0 and spacing then
+      spacings[spacing] = true
+    end
+  end
+
+  local candidates, seen = {}, {}
+  for spacing in pairs(spacings) do
+    local minCellX, maxCellX = math.floor(minX / spacing), math.floor(maxX / spacing)
+    local minCellZ, maxCellZ = math.floor(minZ / spacing), math.floor(maxZ / spacing)
+    for cellX = minCellX, maxCellX do
+      for cellZ = minCellZ, maxCellZ do
+        local x = cellX * spacing + math.floor(hash2(cellX, cellZ, 211) * spacing)
+        local z = cellZ * spacing + math.floor(hash2(cellX, cellZ, 223) * spacing)
+        if x >= minX and x <= maxX and z >= minZ and z <= maxZ then
+          local key = x .. "," .. z
+          if not seen[key] then
+            seen[key] = true
+            candidates[#candidates + 1] = {x = x, z = z}
+          end
+        end
+      end
+    end
+  end
+
+  -- Preserve the old x-major/z-minor placement order. This matters when two
+  -- neighbouring canopies overlap inside the same chunk.
+  table.sort(candidates, function(a, b)
+    return a.x == b.x and a.z < b.z or a.x < b.x
+  end)
+  return candidates
 end
 
 local function setLocalBlock(chunk, lx, y, lz, id)
@@ -984,11 +1030,61 @@ local function chooseTreeGenerator(profile, x, z)
   return generators[index] or "oak"
 end
 
+function terrain.treeGeneratorForBiome(biome, x, z)
+  return chooseTreeGenerator(biomeProfiles[biome] or biomeProfiles.plains, x, z)
+end
+
+local TREE_MATERIALS = {
+  oak = {wood = "oak_log", leaves = "oak_leaves"},
+  forest = {wood = "oak_log", leaves = "oak_leaves"},
+  big = {wood = "oak_log", leaves = "oak_leaves"},
+  maple = {wood = "oak_log", leaves = "oak_leaves"},
+  willow = {wood = "oak_log", leaves = "oak_leaves"},
+  spruce = {wood = "spruce_log", leaves = "spruce_leaves"},
+  pine = {wood = "spruce_log", leaves = "spruce_leaves"},
+  cypress = {wood = "spruce_log", leaves = "spruce_leaves"},
+  taiga1 = {wood = "spruce_log", leaves = "spruce_leaves"},
+  taiga2 = {wood = "spruce_log", leaves = "spruce_leaves"},
+  birch = {wood = "birch_log", leaves = "birch_leaves"},
+  acacia = {wood = "acacia_log", leaves = "acacia_leaves"},
+  baobab = {wood = "acacia_log", leaves = "acacia_leaves"},
+  ceiba = {wood = "ceiba_log", leaves = "ceiba_leaves"},
+  jungle = {wood = "jungle_log", leaves = "jungle_leaves"},
+  fig = {wood = "jungle_log", leaves = "jungle_leaves"},
+  mangrove = {wood = "jungle_log", leaves = "jungle_leaves"}
+}
+
+local function addVoxelTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, species)
+  local names = TREE_MATERIALS[species] or TREE_MATERIALS.oak
+  local fallbackWood = blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local livingWood = blocks[names.wood .. "_alive"] or blocks[names.wood] or fallbackWood
+  local material = {
+    wood = livingWood,
+    -- Living trunks intentionally keep one connected block family so angled
+    -- branches are captured by whole-tree felling along with the main stem.
+    woodX = blocks[names.wood .. "_alive_x"] or livingWood,
+    woodZ = blocks[names.wood .. "_alive_z"] or livingWood,
+    leaves = blocks[names.leaves] or blocks.oak_leaves or blocks.grass
+  }
+  material.leaves2 = material.leaves
+
+  local seed = randomInt(treeX, treeZ, 397, 2147483000) + 1
+  local cloud = voxelTrees.generate(species, seed)
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or material.wood)
+  voxelTrees.emit(cloud, localX, groundY + 1, localZ, material,
+    function(x, y, z, id) setIfNotOpaque(chunk, x, y, z, id) end)
+end
+
 local function addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
   local trunkHeight = generator == "forest" and (randomInt(treeX, treeZ, 257, 3) + 5) or (randomInt(treeX, treeZ, 257, 3) + 4)
 
-  local logId = blocks.oak_log or blocks.oak_planks or blocks.dirt
-  local leavesId = blocks.oak_leaves or blocks.grass
+  local logId = generator == "birch" and
+    (blocks.birch_log_alive or blocks.birch_log) or
+    (blocks.oak_log_alive or blocks.oak_log)
+  local leavesId = generator == "birch" and blocks.birch_leaves or blocks.oak_leaves
+  logId = logId or blocks.oak_planks or blocks.dirt
+  leavesId = leavesId or blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
 
@@ -1020,6 +1116,166 @@ local function addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY,
   end
 end
 
+
+local function addTropicalCanopy(chunk, centerX, centerY, centerZ, leavesId, radius, layers)
+  layers = layers or 3
+  for dy = 0, layers - 1 do
+    local taper = math.abs(dy - (layers - 1) * 0.5) / math.max(1, layers * 0.5)
+    local layerRadius = math.max(1, radius - math.floor(taper * 1.5))
+    local radiusSq = (layerRadius + 0.35) * (layerRadius + 0.35)
+    for dx = -layerRadius, layerRadius do
+      for dz = -layerRadius, layerRadius do
+        if dx * dx + dz * dz <= radiusSq then
+          setIfNotOpaque(chunk, centerX + dx, centerY + dy, centerZ + dz, leavesId)
+        end
+      end
+    end
+  end
+end
+
+local TREE_DIRECTIONS = {
+  {1,0}, {1,1}, {0,1}, {-1,1}, {-1,0}, {-1,-1}, {0,-1}, {1,-1}
+}
+
+local function addCeibaTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  local logId = blocks.ceiba_log_alive or blocks.ceiba_log or
+    blocks.jungle_log_alive or blocks.jungle_log or blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.ceiba_leaves or blocks.jungle_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = 17 + randomInt(treeX, treeZ, 331, 7)
+  local crownY = groundY + height - 3
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or logId)
+
+  -- Ceibas are defined by a towering, broad trunk and plank-like buttress
+  -- roots. A 2x2 column keeps that mass visible even beneath the canopy.
+  for y = groundY + 1, groundY + height - 1 do
+    for dx = 0, 1 do for dz = 0, 1 do
+      setIfNotOpaque(chunk, localX + dx, y, localZ + dz, logId)
+    end end
+  end
+  for direction = 1, 8, 2 do
+    local dx, dz = TREE_DIRECTIONS[direction][1], TREE_DIRECTIONS[direction][2]
+    for reach = 1, 4 do
+      local buttressHeight = math.max(1, 5 - reach)
+      for rise = 0, buttressHeight - 1 do
+        setIfNotOpaque(chunk, localX + dx * reach, groundY + 1 + rise,
+          localZ + dz * reach, logId)
+      end
+    end
+  end
+
+  addTropicalCanopy(chunk, localX, crownY, localZ, leavesId, 5, 4)
+  for direction = 1, #TREE_DIRECTIONS do
+    local dx, dz = TREE_DIRECTIONS[direction][1], TREE_DIRECTIONS[direction][2]
+    local reach = 3 + randomInt(treeX + direction, treeZ - direction, 337, 2)
+    local branchY = crownY + (direction % 2)
+    for step = 1, reach do
+      local by = branchY + math.floor(step / 3)
+      if step > 1 and by > branchY + math.floor((step - 1) / 3) then
+        setIfNotOpaque(chunk, localX + dx * (step - 1), by,
+          localZ + dz * (step - 1), logId)
+      end
+      if dx ~= 0 and dz ~= 0 then
+        setIfNotOpaque(chunk, localX + dx * step, by,
+          localZ + dz * (step - 1), logId)
+      end
+      setIfNotOpaque(chunk, localX + dx * step, by, localZ + dz * step, logId)
+    end
+    addTropicalCanopy(chunk, localX + dx * reach, branchY, localZ + dz * reach,
+      leavesId, 2, 3)
+  end
+end
+
+local function addJungleTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, fig)
+  local logId = blocks.jungle_log_alive or blocks.jungle_log or
+    blocks.ceiba_log_alive or blocks.ceiba_log or blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.jungle_leaves or blocks.ceiba_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = (fig and 8 or 11) + randomInt(treeX, treeZ, fig and 347 or 349, fig and 5 or 6)
+  local crownY = groundY + height - 3
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or logId)
+  for y = groundY + 1, groundY + height - 1 do
+    setIfNotOpaque(chunk, localX, y, localZ, logId)
+  end
+  if fig then
+    -- Strangler-fig-like secondary stems make a low, irregular tropical form.
+    for direction = 1, 4 do
+      local d = TREE_DIRECTIONS[direction * 2 - 1]
+      for y = groundY + 1, crownY - 1 do
+        if y < groundY + 3 or (y + direction) % 3 == 0 then
+          setIfNotOpaque(chunk, localX + d[1], y, localZ + d[2], logId)
+        end
+      end
+    end
+  end
+  addTropicalCanopy(chunk, localX, crownY, localZ, leavesId, fig and 4 or 3, fig and 4 or 5)
+  local branchCount = fig and 6 or 3
+  for branch = 1, branchCount do
+    local d = TREE_DIRECTIONS[1 + randomInt(treeX + branch, treeZ, 353, 8)]
+    local reach = 2 + randomInt(treeX, treeZ + branch, 359, 2)
+    for step = 1, reach do
+      setIfNotOpaque(chunk, localX + d[1] * step, crownY + math.floor(step / 2),
+        localZ + d[2] * step, logId)
+    end
+    addTropicalCanopy(chunk, localX + d[1] * reach, crownY,
+      localZ + d[2] * reach, leavesId, 2, 3)
+  end
+end
+
+local function addAcaciaTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  local logId = blocks.acacia_log_alive or blocks.acacia_log or
+    blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.acacia_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = 6 + randomInt(treeX, treeZ, 367, 4)
+  local direction = TREE_DIRECTIONS[1 + randomInt(treeX, treeZ, 369, 8)]
+  local tx, tz = localX, localZ
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or logId)
+  for rise = 1, height do
+    if rise == height - 2 then
+      setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+      tx, tz = tx + direction[1], tz + direction[2]
+    end
+    setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+  end
+  addTropicalCanopy(chunk, tx, groundY + height, tz, leavesId, 3, 2)
+  local side = TREE_DIRECTIONS[(1 + randomInt(treeX, treeZ, 373, 8))]
+  for step = 1, 3 do
+    setIfNotOpaque(chunk, tx + side[1] * step, groundY + height - 1,
+      tz + side[2] * step, logId)
+  end
+  addTropicalCanopy(chunk, tx + side[1] * 3, groundY + height,
+    tz + side[2] * 3, leavesId, 2, 2)
+end
+
+local function addPalmTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  local logId = blocks.palm_log_alive or blocks.palm_log or
+    blocks.jungle_log_alive or blocks.jungle_log or blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.palm_leaves or blocks.jungle_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = 8 + randomInt(treeX, treeZ, 379, 5)
+  local lean = TREE_DIRECTIONS[1 + randomInt(treeX, treeZ, 383, 8)]
+  local tx, tz = localX, localZ
+  for rise = 1, height do
+    if rise == math.floor(height * 0.55) or rise == height - 1 then
+      setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+      tx, tz = tx + lean[1], tz + lean[2]
+    end
+    setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+  end
+
+  setIfNotOpaque(chunk, tx, groundY + height + 1, tz, leavesId)
+  for direction = 1, #TREE_DIRECTIONS do
+    local dx, dz = TREE_DIRECTIONS[direction][1], TREE_DIRECTIONS[direction][2]
+    local reach = direction % 2 == 0 and 3 or 4
+    for step = 1, reach do
+      local drop = step == reach and 1 or 0
+      setIfNotOpaque(chunk, tx + dx * step, groundY + height + 1 - drop,
+        tz + dz * step, leavesId)
+    end
+  end
+end
+
 local function addBigTreeCluster(chunk, centerX, centerY, centerZ, leavesId)
   for layer = 0, 3 do
     local y = centerY + layer
@@ -1045,7 +1301,7 @@ local function addBigTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
     trunkHeight = heightLimit - 1
   end
 
-  local logId = blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local logId = blocks.oak_log_alive or blocks.oak_log or blocks.oak_planks or blocks.dirt
   local leavesId = blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
@@ -1087,19 +1343,22 @@ local function addBigTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
 end
 
 local function addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  local height = randomInt(treeX, treeZ, 281, 5) + 7
-  local trunkBareHeight = height - randomInt(treeX, treeZ, 283, 2) - 3
-  local leafHeight = height - trunkBareHeight
-  local maxRadius = 1 + randomInt(treeX, treeZ, 287, leafHeight + 1)
-  local logId = blocks.spruce_log or blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local height = randomInt(treeX, treeZ, 281, 6) + 13
+  local leafHeight = 7 + randomInt(treeX, treeZ, 283, 4)
+  local trunkBareHeight = height - leafHeight
+  local maxRadius = 3 + randomInt(treeX, treeZ, 287, 2)
+  local logId = blocks.spruce_log_alive or blocks.spruce_log or
+    blocks.oak_log_alive or blocks.oak_log or blocks.oak_planks or blocks.dirt
   local leavesId = blocks.spruce_leaves or blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
 
   setLocalBlock(chunk, localTreeX, groundY, localTreeZ, blocks.dirt or logId)
 
-  local radius = 0
   for y = groundY + height, groundY + trunkBareHeight, -1 do
+    local layer=groundY+height-y
+    local radius=math.min(maxRadius,
+      math.floor((layer/math.max(1,leafHeight))*maxRadius+0.35))
     for lx = localTreeX - radius, localTreeX + radius do
       local dx = lx - localTreeX
       for lz = localTreeZ - radius, localTreeZ + radius do
@@ -1110,11 +1369,6 @@ local function addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
       end
     end
 
-    if radius >= 1 and y == groundY + trunkBareHeight + 1 then
-      radius = radius - 1
-    elseif radius < maxRadius then
-      radius = radius + 1
-    end
   end
 
   for y = 0, height - 2 do
@@ -1127,11 +1381,12 @@ local function addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
 end
 
 local function addTaiga2Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  local height = randomInt(treeX, treeZ, 293, 4) + 6
-  local leafStart = 1 + randomInt(treeX, treeZ, 307, 2)
+  local height = randomInt(treeX, treeZ, 293, 5) + 11
+  local leafStart = 2 + randomInt(treeX, treeZ, 307, 2)
   local leafLayers = height - leafStart
-  local maxRadius = 2 + randomInt(treeX, treeZ, 311, 2)
-  local logId = blocks.spruce_log or blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local maxRadius = 3 + randomInt(treeX, treeZ, 311, 2)
+  local logId = blocks.spruce_log_alive or blocks.spruce_log or
+    blocks.oak_log_alive or blocks.oak_log or blocks.oak_planks or blocks.dirt
   local leavesId = blocks.spruce_leaves or blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
@@ -1176,16 +1431,17 @@ end
 local function addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, biome)
   local profile = biomeProfiles[biome] or biomeProfiles.plains
   local generator = chooseTreeGenerator(profile, treeX, treeZ)
-  if generator == "taiga1" then
-    addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  elseif generator == "taiga2" then
-    addTaiga2Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  elseif generator == "big" then
-    addBigTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  if generator == "palm" then
+    addPalmTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
   else
-    addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
+    addVoxelTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
   end
 end
+
+-- Shared by world decoration now and sapling growth later; keeping the same
+-- deterministic selector means a planted/debug-generated tree has the biome's
+-- real silhouette instead of a separate miniature implementation.
+terrain.addTree = addTree
 
 local foliageProfiles = {
   rainforest = {
@@ -1470,12 +1726,16 @@ end
 function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, options)
   options = options or {}
   local step = options.yieldStep
-  if options.generatorType == "superflat" then
+  if options.generatorType == "superflat" or options.generatorType == "showcase" then
     local profileLayers = terrain.activeProfile.generation and terrain.activeProfile.generation.superflatLayers
     fillSuperflatChunk(chunk, width, depth, maxHeight, options.superflatLayers or profileLayers, step)
+    if options.generatorType == "showcase" then
+      showcase.decorateChunk(chunk, offsetX, offsetZ, width, depth, maxHeight)
+    end
     chunk.environment = {
       world = terrain.activeWorldId,
-      biome = terrain.activeWorldId == "mars" and "mars_lowlands" or "superflat",
+      biome = options.generatorType == "showcase" and "showcase" or
+        (terrain.activeWorldId == "mars" and "mars_lowlands" or "superflat"),
       landform = "plain",
       averageElevation = 3
     }
@@ -1552,33 +1812,34 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
   if step then step() end
 
   if generation.vegetation ~= false then
-    for x = -3, width + 2 do
-      for z = -3, depth + 2 do
-        local treeX = offsetX + x
-        local treeZ = offsetZ + z
-        local column = terrain.columnAt(treeX, treeZ, maxHeight)
-        local lx = treeX - offsetX
-        local lz = treeZ - offsetZ
-        local groundY = nil
+    -- The authored ceiba and jungle crowns can reach eighteen blocks from the
+    -- trunk. Include that overlap so a tree remains whole across chunk edges.
+    local candidates = treeCandidates(
+      offsetX - 18, offsetZ - 18, offsetX + width + 17, offsetZ + depth + 17)
+    for i = 1, #candidates do
+      local treeX, treeZ = candidates[i].x, candidates[i].z
+      local column = terrain.columnAt(treeX, treeZ, maxHeight)
+      local lx = treeX - offsetX
+      local lz = treeZ - offsetZ
+      local groundY = nil
 
-        if lx >= 0 and lx < 16 and lz >= 0 and lz < 16 then
-          for y = maxHeight, terrain.SEA_LEVEL + 1, -1 do
-            local id = chunk:getBlock(lx, y, lz)
-            if id and id ~= blocks.air and id ~= blocks.water and id ~= blocks.lava and not isLeafBlock(id) then
-              groundY = y
-              break
-            end
+      if lx >= 0 and lx < 16 and lz >= 0 and lz < 16 then
+        for y = maxHeight, terrain.SEA_LEVEL + 1, -1 do
+          local id = chunk:getBlock(lx, y, lz)
+          if id and id ~= blocks.air and id ~= blocks.water and id ~= blocks.lava and not isLeafBlock(id) then
+            groundY = y
+            break
           end
-        else
-          groundY = column.height
         end
-
-        if groundY and not column.waterLevel and groundY > terrain.SEA_LEVEL + 1 and
-            isTreeCenter(treeX, treeZ, column.biome) then
-          addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, column.biome, maxHeight)
-        end
+      else
+        groundY = column.height
       end
-      if step then step() end
+
+      if groundY and not column.waterLevel and groundY >= terrain.SEA_LEVEL + 1 and
+          isTreeCenter(treeX, treeZ, column.biome) then
+        addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, column.biome, maxHeight)
+      end
+      if step and i % 8 == 0 then step() end
     end
     populateGrassFoliage(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
   end

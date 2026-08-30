@@ -1,17 +1,62 @@
 local math3d = require("math3d")
 local worldProfiles = require("world_profiles")
+local ephemeris = require("sky_ephemeris")
 
 local atmosphere = {}
 
-function atmosphere.sunDirection(time, cycleSpeed)
-  return {
-    -0.28,
-    math.sin(time * cycleSpeed) * 0.85,
-    math.cos(time * cycleSpeed) * 0.85
-  }
+local TWO_PI = math.pi * 2.0
+
+-- The clock, read as a date.
+--
+-- One turn of the cycle is one day on whichever world the player is standing
+-- on, and phase zero is dawn -- the convention `timeOfDayForSimulationTime`
+-- already uses. Counting those turns gives a day number, and scaling it by the
+-- length of the world's day gives the Earth days that every ephemeris in
+-- `sky_ephemeris` is written in: a hundred Martian sols is a hundred and three
+-- days of planetary motion, not a hundred.
+--
+-- The zero point is J2000, so a new world opens at dawn on 1 January 2000 with
+-- the solar system arranged as it actually was.
+function atmosphere.dateFor(time, cycleSpeed, worldProfile)
+  worldProfile = worldProfile or worldProfiles.get("earth")
+  local phase = (time or 0.0) * (cycleSpeed or 0.0)
+  local dayNumber = phase / TWO_PI
+  local hour = (dayNumber * 24.0 + 6.0) % 24.0
+  -- Noon of day zero is the epoch itself, and phase zero is six hours before.
+  local julianDay = ephemeris.J2000_JULIAN_DAY +
+    (dayNumber - 0.25) * (worldProfile.dayLengthScale or 1.0)
+  return julianDay, (hour - 12.0) * (math.pi / 12.0), hour
 end
 
-function atmosphere.forSun(sunDir, fogStart, fogEnd, observerUp, worldProfile)
+-- Where every body in the sky is, at the moment the clock says.
+function atmosphere.skyState(time, cycleSpeed, worldProfile)
+  worldProfile = worldProfile or worldProfiles.get("earth")
+  local julianDay, solarHourAngle, hour = atmosphere.dateFor(time, cycleSpeed, worldProfile)
+  local observed = ephemeris.observe(worldProfile.id, julianDay, solarHourAngle)
+  observed.hour = hour
+  observed.sunDirection = ephemeris.direction(
+    observed.sun.rightAscension, observed.sun.declination, observed.siderealTime)
+  local moon = observed.moons[1]
+  if moon then
+    moon.direction = ephemeris.direction(
+      moon.rightAscension, moon.declination, observed.siderealTime)
+  end
+  for _, planet in ipairs(observed.planets) do
+    planet.direction = ephemeris.direction(
+      planet.rightAscension, planet.declination, observed.siderealTime)
+  end
+  return observed
+end
+
+-- The sun alone, for callers that only need to light the world. Its azimuth is
+-- exactly what the old fixed sweep gave -- the hour angle is still the time of
+-- day -- but its declination now comes from the season instead of being pinned,
+-- so noon climbs and falls across the year the way it does.
+function atmosphere.sunDirection(time, cycleSpeed, worldProfile)
+  return atmosphere.skyState(time, cycleSpeed, worldProfile).sunDirection
+end
+
+function atmosphere.forSun(sunDir, fogStart, fogEnd, observerUp, worldProfile, skyState)
   -- observerUp is optional for the current flat runtime, but keeping lighting
   -- relative to local up also makes this profile interface usable by the
   -- spherical-grid runtime. Accepting a profile in its place is convenient for
@@ -26,6 +71,18 @@ function atmosphere.forSun(sunDir, fogStart, fogEnd, observerUp, worldProfile)
   local daylight = math3d.smoothstep(-0.18, 0.08, sunElevation)
   local day = daylight
   local moonAmount = math3d.smoothstep(-0.05, 0.18, -sunElevation) * (authored.moonAmount or 0.0)
+  -- When the renderer supplies the ephemeris, moonlight exists only while the
+  -- moon is above the horizon and in proportion to its illuminated phase. The
+  -- old sun-only fallback remains for callers that do not ask for a full sky.
+  if skyState then
+    local moon=skyState.moons and skyState.moons[1]
+    if moon and moon.direction then
+      local altitude=math3d.smoothstep(-0.05,0.12,moon.direction[2])
+      moonAmount=moonAmount*altitude*math.sqrt(math.max(0,moon.illuminatedFraction or 0))
+    else
+      moonAmount=0.0
+    end
+  end
   local night = 1.0 - math3d.smoothstep(-0.26, 0.04, sunElevation)
   local horizon = math3d.smoothstep(0.38, -0.02, math.abs(sunElevation))
   local lowSun = horizon * (1.0 - night)

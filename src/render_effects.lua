@@ -14,6 +14,7 @@ local GL_TEXTURE1 = 0x84C1
 local GL_TEXTURE2 = 0x84C2
 local GL_TEXTURE3 = 0x84C3
 local GL_TEXTURE4 = 0x84C4
+local GL_TEXTURE5 = 0x84C5
 local GL_TEXTURE_2D = 0x0DE1
 local GL_TEXTURE_3D = 0x806F
 local GL_TEXTURE_MIN_FILTER = 0x2801
@@ -1071,10 +1072,14 @@ uniform vec3 cameraProjection;
 uniform vec3 depthParams;
 uniform vec3 volumeParams; // near, far, maximum opacity
 uniform float blurAmount;
+uniform float underwaterAmount;
 uniform float time;
 uniform sampler2D bloomTexture;
+uniform sampler2D godRaysTexture;
+uniform sampler2D eyeExposure;
 uniform vec4 gradeParams;   // exposure, bloomStrength, saturation, contrast
 uniform vec3 tonemapParams; // mode, knee, white
+uniform float godRaysStrength;
 
 // Exactly identity below `knee`, then compresses smoothly toward `white`.
 // This is the operator that suits a retrofit: the scene was authored to look
@@ -1099,8 +1104,10 @@ vec3 acesFilmic(vec3 x) {
   return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
-vec3 gradeScene(vec3 color, vec3 bloom) {
-  color = max(color, vec3(0.0)) * gradeParams.x;
+vec3 gradeScene(vec3 color, vec3 bloom, vec3 godRays) {
+  float adaptedExposure = texture(eyeExposure, vec2(0.5)).r;
+  color = max(color + max(godRays, vec3(0.0)) * godRaysStrength, vec3(0.0)) *
+    gradeParams.x * adaptedExposure;
   color += max(bloom, vec3(0.0)) * gradeParams.y;
 
   float mode = tonemapParams.x;
@@ -1154,15 +1161,12 @@ void main() {
   }
   float rawDepth = texture(sceneDepth, vUv).r;
   vec3 bloom = texture(bloomTexture, vUv).rgb;
-  float waterLevel = depthParams.z;
-
+  vec3 godRays = texture(godRaysTexture, vUv).rgb;
   if (rawDepth >= 0.9999) {
     vec4 volume = sampleIntegratedVolume(volumeParams.y);
     vec3 skyColor = scene * volume.a + volume.rgb;
-    if (cameraPosition.y < waterLevel) {
-      skyColor = mix(skyColor, vec3(0.035, 0.180, 0.330), 0.72);
-    }
-    FragColor = vec4(gradeScene(skyColor, bloom), 1.0);
+    skyColor = mix(skyColor, vec3(0.035, 0.180, 0.330), 0.72 * underwaterAmount);
+    FragColor = vec4(gradeScene(skyColor, bloom, godRays), 1.0);
     return;
   }
 
@@ -1179,20 +1183,166 @@ void main() {
   vec4 volume = sampleIntegratedVolume(distance);
   vec3 color = scene * volume.a + volume.rgb;
 
-  if (cameraPosition.y < waterLevel) {
+  if (underwaterAmount > 0.001) {
     vec2 overlayUv = fract(vUv * vec2(2.0, 1.35) + vec2(time * 0.012, -time * 0.007));
     vec4 overlay = texture(underwaterOverlay, overlayUv);
     float waterDistance = smoothstep(1.5, max(8.0, volumeParams.y * 0.45), distance);
     vec3 underwaterColor = vec3(0.035, 0.180, 0.330);
-    color = mix(color, underwaterColor, 0.22 + waterDistance * 0.50);
-    color += (overlay.rgb - 0.5) * overlay.a * 0.18;
+    color = mix(color, underwaterColor, (0.22 + waterDistance * 0.50) * underwaterAmount);
+    color += (overlay.rgb - 0.5) * overlay.a * 0.18 * underwaterAmount;
   }
 
-  FragColor = vec4(gradeScene(color, bloom), 1.0);
+  FragColor = vec4(gradeScene(color, bloom, godRays), 1.0);
 }
 ]]
 
   return shaderModule.fromSource(vertSource, fragSource)
+end
+
+-- Average metering for the eye-adaptation pass.
+--
+-- A flat average of the whole frame is only stable when the sky and the ground
+-- are within a factor of two of each other, which is true of Earth and not of
+-- Mars: a forward-scattering dust atmosphere runs from a clipped white aureole
+-- around the sun to nearly black at the anti-solar horizon within one frame.
+-- Averaged flat, that swings by more than an order of magnitude as the player
+-- turns around, and the exposure slams between its two clamps.
+--
+-- Three things keep the metering stable:
+--   * the sky is metered at a reduced weight, because it is a light source in
+--     the frame rather than the subject of it;
+--   * samples are centre-weighted, so what the player is looking at decides the
+--     exposure and what is at the edge of vision only nudges it;
+--   * each sample is clamped before it is averaged, so the sun disc -- which is
+--     several times white on its own -- cannot carry the average by itself.
+--
+-- The response curve is a power law rather than a straight reciprocal. A pure
+-- key/average law fully cancels the scene's own brightness, which is what makes
+-- night look like an underexposed day; an exponent below one leaves dark scenes
+-- dark and bright scenes bright while still tracking them.
+function effects.createEyeAdaptationShader()
+  local vertex = [[
+#version 460 core
+layout (location = 0) in vec3 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos.xy * 0.5 + 0.5;
+  gl_Position = vec4(aPos.xy, 0.0, 1.0);
+}
+]]
+  local fragment = [[
+#version 460 core
+in vec2 vUv;
+out vec4 FragColor;
+uniform sampler2D sceneColor;
+uniform sampler2D sceneDepth;
+uniform sampler2D previousExposure;
+uniform vec4 adaptationParams;  // key, minimum, maximum, delta time
+uniform vec2 adaptationSpeeds;  // brighten, darken
+uniform vec4 meterParams;       // sky weight, centre bias, sample clamp, response exponent
+
+const int SAMPLE_X = 24;
+const int SAMPLE_Y = 14;
+
+void main() {
+  float logLuminance = 0.0;
+  float totalWeight = 0.0;
+  float sampleClamp = max(meterParams.z, 0.01);
+  for (int y = 0; y < SAMPLE_Y; ++y) {
+    for (int x = 0; x < SAMPLE_X; ++x) {
+      vec2 uv = (vec2(x, y) + 0.5) / vec2(SAMPLE_X, SAMPLE_Y);
+      vec3 color = max(textureLod(sceneColor, uv, 0.0).rgb, vec3(0.0));
+      float luminance = min(dot(color, vec3(0.2126, 0.7152, 0.0722)), sampleClamp);
+
+      // Radial falloff normalised so the frame corners sit at 1.0.
+      vec2 offset = (uv - 0.5) * vec2(2.0, 2.0);
+      float radius = min(length(offset) * 0.7071, 1.0);
+      float weight = mix(1.0, max(meterParams.y, 0.0), radius * radius);
+
+      // The far plane is sky. It still counts -- a bright sky should stop the
+      // ground from being lifted to daylight -- but at a fraction of its area.
+      float depth = textureLod(sceneDepth, uv, 0.0).r;
+      weight *= depth >= 0.9999 ? clamp(meterParams.x, 0.0, 1.0) : 1.0;
+
+      logLuminance += log(max(luminance, 1.0e-4)) * weight;
+      totalWeight += weight;
+    }
+  }
+
+  float average = exp(logLuminance / max(totalWeight, 1.0e-4));
+  float key = max(adaptationParams.x, 1.0e-4);
+  // Identity at average == key, and meterParams.w controls how much of the
+  // remaining difference is compensated for.
+  float target = clamp(pow(key / max(average, 1.0e-4), max(meterParams.w, 0.0)),
+    adaptationParams.y, adaptationParams.z);
+  float previous = texture(previousExposure, vec2(0.5)).r;
+  if (!(previous > 0.0)) previous = target;
+  float speed = target > previous ? adaptationSpeeds.x : adaptationSpeeds.y;
+  float blend = 1.0 - exp(-max(adaptationParams.w, 0.0) * speed);
+  float exposure = mix(previous, target, blend);
+  FragColor = vec4(exposure, exposure, exposure, 1.0);
+}
+]]
+  return shaderModule.fromSource(vertex, fragment)
+end
+
+function effects.createEyeAdaptation()
+  local textures, framebuffers = ffi.new("GLuint[2]"), ffi.new("GLuint[2]")
+  gl.glGenTextures(2, textures)
+  gl.glGenFramebuffers(2, framebuffers)
+  local initial = ffi.new("float[4]", {1.0, 1.0, 1.0, 1.0})
+  for index = 0, 1 do
+    gl.glBindTexture(GL_TEXTURE_2D, textures[index])
+    gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 1, 1, 0, GL_RGBA, GL_FLOAT, initial)
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffers[index])
+    gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textures[index], 0)
+    if gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ~= GL_FRAMEBUFFER_COMPLETE then
+      error("Failed to create eye-adaptation framebuffer")
+    end
+  end
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+  return {textures = textures, framebuffers = framebuffers, current = 0}
+end
+
+function effects.updateEyeAdaptation(program, locations, state, sceneTexture,
+    sceneDepthTexture, screenMesh, deltaTime, settings, viewportWidth, viewportHeight)
+  settings = settings or {}
+  if settings.eyeAdaptation == false then return state.textures[state.current] end
+  local nextIndex = state.current == 0 and 1 or 0
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, state.framebuffers[nextIndex])
+  gl.glViewport(0, 0, 1, 1)
+  gl.glUseProgram(program)
+  gl.glUniform1i(locations.sceneColor, 0)
+  gl.glUniform1i(locations.previousExposure, 1)
+  gl.glUniform1i(locations.sceneDepth, 2)
+  gl.glUniform4f(locations.adaptationParams,
+    settings.eyeKey or 0.34, settings.eyeMinExposure or 0.55,
+    settings.eyeMaxExposure or 2.35, math.min(deltaTime or 0.0, 0.1))
+  gl.glUniform2f(locations.adaptationSpeeds,
+    settings.eyeBrightenSpeed or 1.35, settings.eyeDarkenSpeed or 3.25)
+  gl.glUniform4f(locations.meterParams,
+    settings.eyeSkyWeight or 0.25, settings.eyeEdgeWeight or 0.35,
+    settings.eyeSampleClamp or 2.0, settings.eyeResponse or 0.85)
+  gl.glActiveTexture(GL_TEXTURE0)
+  gl.glBindTexture(GL_TEXTURE_2D, sceneTexture)
+  gl.glActiveTexture(GL_TEXTURE1)
+  gl.glBindTexture(GL_TEXTURE_2D, state.textures[state.current])
+  gl.glActiveTexture(GL_TEXTURE2)
+  gl.glBindTexture(GL_TEXTURE_2D, sceneDepthTexture)
+  gl.glActiveTexture(GL_TEXTURE0)
+  rendering.draw(screenMesh)
+  state.current = nextIndex
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+  gl.glViewport(0, 0, viewportWidth, viewportHeight)
+  return state.textures[state.current]
+end
+
+function effects.releaseEyeAdaptation(state)
+  if not state then return end
+  gl.glDeleteFramebuffers(2, state.framebuffers)
+  gl.glDeleteTextures(2, state.textures)
 end
 
 function effects.createSceneTarget(width, height)
@@ -1300,6 +1450,140 @@ function effects.ensureBloomChain(chain, width, height, levels)
   end
   effects.releaseBloomChain(chain)
   return effects.createBloomChain(width, height, levels)
+end
+
+-- Low-resolution HDR target for radial sunlight scattering. Unlike bloom this
+-- is a single pass: its source mask is reconstructed from the scene depth while
+-- the shader walks from each pixel toward the projected sun.
+function effects.createGodRaysTarget(width, height, scale)
+  scale = math.max(0.125, math.min(1.0, scale or 0.25))
+  local targetWidth = math.max(2, math.floor(width * scale + 0.5))
+  local targetHeight = math.max(2, math.floor(height * scale + 0.5))
+  local texture = ffi.new("GLuint[1]")
+  local framebuffer = ffi.new("GLuint[1]")
+
+  gl.glGenTextures(1, texture)
+  gl.glBindTexture(GL_TEXTURE_2D, texture[0])
+  gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, targetWidth, targetHeight, 0,
+    GL_RGBA, GL_FLOAT, nil)
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+  gl.glGenFramebuffers(1, framebuffer)
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, framebuffer[0])
+  gl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+    GL_TEXTURE_2D, texture[0], 0)
+  gl.glDrawBuffer(GL_COLOR_ATTACHMENT0)
+  if gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) ~= GL_FRAMEBUFFER_COMPLETE then
+    error("Failed to create god-rays framebuffer")
+  end
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+  return {
+    texture = texture,
+    framebuffer = framebuffer,
+    width = targetWidth,
+    height = targetHeight,
+    sourceWidth = width,
+    sourceHeight = height,
+    scale = scale
+  }
+end
+
+function effects.releaseGodRaysTarget(target)
+  if not target then return end
+  if target.framebuffer then gl.glDeleteFramebuffers(1, target.framebuffer) end
+  if target.texture then gl.glDeleteTextures(1, target.texture) end
+end
+
+function effects.ensureGodRaysTarget(target, width, height, scale)
+  scale = math.max(0.125, math.min(1.0, scale or 0.25))
+  if target and target.sourceWidth == width and target.sourceHeight == height and
+      math.abs((target.scale or 0.25) - scale) < 0.0001 then
+    return target
+  end
+  effects.releaseGodRaysTarget(target)
+  return effects.createGodRaysTarget(width, height, scale)
+end
+
+function effects.createGodRaysShader()
+  local vertSource = [[
+#version 460 core
+layout (location = 0) in vec3 aPos;
+out vec2 vUv;
+void main() {
+  vUv = aPos.xy * 0.5 + 0.5;
+  gl_Position = vec4(aPos.xy, 0.0, 1.0);
+}
+]]
+
+  local fragSource = [[
+#version 460 core
+in vec2 vUv;
+out vec4 FragColor;
+uniform sampler2D sceneDepth;
+uniform vec2 lightPosition;
+uniform vec3 lightColor;
+uniform vec4 rayParams;    // density, decay, weight, exposure
+uniform vec3 sourceParams; // outer radius, inner-radius ratio, visibility
+uniform float aspectRatio;
+uniform int sampleCount;
+
+const int MAX_SAMPLES = 96;
+
+float sourceMask(vec2 uv) {
+  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+    return 0.0;
+  }
+
+  // Sky was drawn first and the depth buffer cleared before world geometry.
+  // Consequently untouched far depth is the occlusion map's white value and
+  // every rendered surface, including clouds, is black.
+  float skyVisibility = smoothstep(0.9995, 0.99998, texture(sceneDepth, uv).r);
+  float radius = max(sourceParams.x, 1.0e-4);
+  float innerRadius = radius * clamp(sourceParams.y, 0.0, 0.98);
+  vec2 sourceDelta = uv - lightPosition;
+  sourceDelta.x *= aspectRatio;
+  float disc = 1.0 - smoothstep(innerRadius, radius, length(sourceDelta));
+  return skyVisibility * disc * sourceParams.z;
+}
+
+void main() {
+  int count = clamp(sampleCount, 1, MAX_SAMPLES);
+  vec2 delta = (vUv - lightPosition) * rayParams.x / float(count);
+
+  // If even the final radial sample cannot enter the light envelope, every
+  // depth lookup below would be guaranteed to contribute zero. This rejects
+  // most fragments when the sun is near an edge and virtually the whole pass
+  // when it has just left the screen.
+  vec2 nearestDelta = (vUv - lightPosition) * max(1.0 - rayParams.x, 0.0);
+  nearestDelta.x *= aspectRatio;
+  if (length(nearestDelta) > sourceParams.x) {
+    FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
+  vec2 uv = vUv;
+  float illuminationDecay = 1.0;
+  // The sun disc and its immediate halo already exist in the HDR scene and in
+  // bloom. Only integrate displaced samples here, otherwise the post effect
+  // merely makes the source whiter instead of revealing shafts.
+  float scattering = 0.0;
+
+  for (int index = 0; index < MAX_SAMPLES; ++index) {
+    if (index >= count) break;
+    uv -= delta;
+    scattering += sourceMask(uv) * illuminationDecay * rayParams.z;
+    illuminationDecay *= rayParams.y;
+  }
+
+  FragColor = vec4(lightColor * scattering * rayParams.w, 1.0);
+}
+]]
+
+  return shaderModule.fromSource(vertSource, fragSource)
 end
 
 function effects.createBloomDownShader()
@@ -1635,9 +1919,8 @@ function effects.waterChunkVertices(chunk, offsetX, offsetZ, waterLevel, waterId
   return vertices
 end
 
-function effects.createShadowMap(size)
-  local depthTexture = ffi.new("GLuint[1]")
-  local framebuffer = ffi.new("GLuint[1]")
+local function createShadowCascade(size)
+  local depthTexture, framebuffer = ffi.new("GLuint[1]"), ffi.new("GLuint[1]")
 
   gl.glGenTextures(1, depthTexture)
   gl.glBindTexture(GL_TEXTURE_2D, depthTexture[0])
@@ -1661,8 +1944,21 @@ function effects.createShadowMap(size)
 
   return {
     framebuffer = framebuffer,
-    depthTexture = depthTexture
+    depthTexture = depthTexture,
+    size = size
   }
+end
+
+function effects.createShadowMap(sizeOrSizes)
+  local sizes = type(sizeOrSizes) == "table" and sizeOrSizes or {sizeOrSizes}
+  local result = {cascades = {}}
+  for index = 1, #sizes do
+    result.cascades[index] = createShadowCascade(sizes[index])
+  end
+  -- Legacy aliases keep the fog and any diagnostic code useful with one map.
+  result.framebuffer = result.cascades[1].framebuffer
+  result.depthTexture = result.cascades[1].depthTexture
+  return result
 end
 
 function effects.lightSpaceMatrix(playerPosition, sunDir, terrainMaxHeight, distance, near, far)
@@ -1680,12 +1976,27 @@ function effects.lightSpaceMatrix(playerPosition, sunDir, terrainMaxHeight, dist
   return math3d.multiplyMat4(lightProjection, lightView)
 end
 
-function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMeshes, characterMesh, lightSpaceMatrix, model, mapSize, viewportWidth, viewportHeight, atlasTex)
-  gl.glViewport(0, 0, mapSize, mapSize)
-  gl.glBindFramebuffer(GL_FRAMEBUFFER, shadowMap.framebuffer[0])
-  gl.glClear(GL_DEPTH_BUFFER_BIT)
+function effects.cascadeShadowMatrices(playerPosition, sunDir, terrainMaxHeight,
+    splits, mapSizes, near, far)
+  local matrices = {}
+  for index = 1, #splits do
+    local radius = splits[index]
+    local resolution = mapSizes[index] or mapSizes[#mapSizes]
+    local texelWorld = radius * 2.0 / resolution
+    local snapped = {
+      math.floor(playerPosition[1] / texelWorld + 0.5) * texelWorld,
+      playerPosition[2],
+      math.floor(playerPosition[3] / texelWorld + 0.5) * texelWorld
+    }
+    matrices[index] = effects.lightSpaceMatrix(snapped, sunDir, terrainMaxHeight,
+      radius, near, math.max(far, terrainMaxHeight * 2.0 + radius * 2.0))
+  end
+  return matrices
+end
+
+function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMeshes,
+    characterMesh, lightSpaceMatrices, model, viewportWidth, viewportHeight, atlasTex)
   gl.glUseProgram(shadowShader)
-  gl.glUniformMatrix4fv(locations.lightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
   gl.glUniformMatrix4fv(locations.model, 1, 0, ffi.new("float[16]", model))
   gl.glUniform1i(locations.tex0, 0)
   if atlasTex then
@@ -1695,11 +2006,14 @@ function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMes
   gl.glEnable(GL_POLYGON_OFFSET_FILL)
   gl.glPolygonOffset(2.0, 4.0)
 
-  for _, mesh in pairs(terrainMeshes) do
-    rendering.draw(mesh)
-  end
-  if characterMesh then
-    rendering.draw(characterMesh)
+  for index, cascade in ipairs(shadowMap.cascades) do
+    gl.glViewport(0, 0, cascade.size, cascade.size)
+    gl.glBindFramebuffer(GL_FRAMEBUFFER, cascade.framebuffer[0])
+    gl.glClear(GL_DEPTH_BUFFER_BIT)
+    gl.glUniformMatrix4fv(locations.lightSpaceMatrix, 1, 0,
+      ffi.new("float[16]", lightSpaceMatrices[index]))
+    for _, mesh in pairs(terrainMeshes) do rendering.draw(mesh) end
+    if characterMesh then rendering.draw(characterMesh) end
   end
 
   gl.glDisable(GL_POLYGON_OFFSET_FILL)
@@ -1764,12 +2078,94 @@ function effects.drawWater(waterShader, waterMeshes, locations, playerCamera, vi
   gl.glActiveTexture(GL_TEXTURE0)
 end
 
+local function cameraViewFront(camera)
+  return camera.getViewFront and camera:getViewFront() or camera:getFront()
+end
+
+-- Projects an infinitely distant directional light into texture coordinates.
+-- The returned visibility also fades a source just outside the viewport, which
+-- prevents a hard pop as the sun crosses an edge of the screen.
+function effects.directionToScreen(playerCamera, direction, fov, viewportWidth, viewportHeight)
+  local forward = math3d.normalize(cameraViewFront(playerCamera))
+  local cameraUp = playerCamera.getViewUp and playerCamera:getViewUp() or {0.0, 1.0, 0.0}
+  local right = math3d.normalize(math3d.cross(forward, cameraUp))
+  local up = math3d.normalize(math3d.cross(right, forward))
+  local forwardAmount = math3d.dot(direction, forward)
+  if forwardAmount <= 0.001 then
+    return {0.5, 0.5}, 0.0
+  end
+
+  local projectionY = math.tan(fov / 2)
+  local projectionX = viewportWidth / math.max(1, viewportHeight) * projectionY
+  local ndcX = math3d.dot(direction, right) / math.max(forwardAmount * projectionX, 1.0e-5)
+  local ndcY = math3d.dot(direction, up) / math.max(forwardAmount * projectionY, 1.0e-5)
+  local uv = {ndcX * 0.5 + 0.5, ndcY * 0.5 + 0.5}
+  local outside = math.max(0.0, -uv[1], uv[1] - 1.0, -uv[2], uv[2] - 1.0)
+  return uv, 1.0 - math3d.smoothstep(0.0, 0.30, outside)
+end
+
+function effects.renderGodRays(shader, target, locations, sceneDepth, screenMesh,
+    playerCamera, sunDir, lightColor, fov, viewportWidth, viewportHeight, settings, visibility)
+  settings = settings or {}
+  local lightPosition, screenVisibility = effects.directionToScreen(
+    playerCamera, sunDir, fov, viewportWidth, viewportHeight)
+  local finalVisibility = screenVisibility * math.max(0.0, math.min(1.0, visibility or 1.0))
+  local sourceRadius = settings.godRaysSourceRadius or 0.065
+  local aspectRatio = viewportWidth / math.max(1, viewportHeight)
+  local outsideX = math.max(0.0, -lightPosition[1], lightPosition[1] - 1.0) * aspectRatio
+  local outsideY = math.max(0.0, -lightPosition[2], lightPosition[2] - 1.0)
+  -- Below this the additive result is imperceptible, but the radial shader
+  -- would still pay for a full-screen pass. In particular, this catches a sun
+  -- that is in front of the camera but has moved just beyond a viewport edge.
+  -- The second test is exact for the circular source mask: once its whole disc
+  -- is offscreen there are no source pixels for radial integration to sample.
+  if finalVisibility <= 0.035 or
+      outsideX * outsideX + outsideY * outsideY > sourceRadius * sourceRadius then
+    return nil
+  end
+
+  local brightest = math.max(lightColor[1], lightColor[2], lightColor[3], 1.0e-4)
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, target.framebuffer[0])
+  gl.glViewport(0, 0, target.width, target.height)
+  gl.glDisable(GL_DEPTH_TEST)
+  gl.glDisable(GL_BLEND)
+  gl.glUseProgram(shader)
+  gl.glUniform1i(locations.sceneDepth, 0)
+  gl.glUniform2f(locations.lightPosition, lightPosition[1], lightPosition[2])
+  gl.glUniform3f(locations.lightColor,
+    lightColor[1] / brightest, lightColor[2] / brightest, lightColor[3] / brightest)
+  gl.glUniform4f(locations.rayParams,
+    settings.godRaysDensity or 0.92,
+    settings.godRaysDecay or 0.96,
+    settings.godRaysWeight or 0.080,
+    settings.godRaysExposure or 0.65)
+  gl.glUniform3f(locations.sourceParams,
+    sourceRadius, 0.18, finalVisibility)
+  gl.glUniform1f(locations.aspectRatio, aspectRatio)
+  gl.glUniform1i(locations.sampleCount,
+    math.max(1, math.min(96, math.floor(settings.godRaysSamples or 16))))
+  gl.glActiveTexture(GL_TEXTURE0)
+  gl.glBindTexture(GL_TEXTURE_2D, sceneDepth)
+  rendering.draw(screenMesh)
+  gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+  gl.glViewport(0, 0, viewportWidth, viewportHeight)
+  gl.glEnable(GL_DEPTH_TEST)
+  return target.texture[0]
+end
+
+function effects.releaseGodRays(runtime)
+  if not runtime then return end
+  effects.releaseGodRaysTarget(runtime.target)
+  if runtime.shader then gl.glDeleteProgram(runtime.shader) end
+end
+
 function effects.renderVolumetricFog(volume, shaders, playerCamera, sunDir, atmosphereState, fov, viewportWidth, viewportHeight, waterLevel, settings, shadowMap, lightSpaceMatrix)
   settings = settings or {}
-  local forward = playerCamera:getFront()
-  local worldUp = {0.0, 1.0, 0.0}
-  local right = math3d.normalize(math3d.cross(forward, worldUp))
+  local forward = cameraViewFront(playerCamera)
+  local cameraUp = playerCamera.getViewUp and playerCamera:getViewUp() or {0.0, 1.0, 0.0}
+  local right = math3d.normalize(math3d.cross(forward, cameraUp))
   local up = math3d.normalize(math3d.cross(right, forward))
+  local cameraPosition = playerCamera.getViewPosition and playerCamera:getViewPosition() or playerCamera.position
   local projectionY = math.tan(fov / 2)
   local projectionX = viewportWidth / viewportHeight * projectionY
   local volumeNear = settings.volumetricNear or 0.5
@@ -1780,7 +2176,7 @@ function effects.renderVolumetricFog(volume, shaders, playerCamera, sunDir, atmo
   local injectionLocations = shaders.injectionLocations
   gl.glUseProgram(shaders.injection)
   gl.glUniform1i(injectionLocations.shadowMap, 0)
-  gl.glUniform3f(injectionLocations.cameraPosition, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
+  gl.glUniform3f(injectionLocations.cameraPosition, cameraPosition[1], cameraPosition[2], cameraPosition[3])
   gl.glUniform3f(injectionLocations.cameraForward, forward[1], forward[2], forward[3])
   gl.glUniform3f(injectionLocations.cameraRight, right[1], right[2], right[3])
   gl.glUniform3f(injectionLocations.cameraUp, up[1], up[2], up[3])
@@ -1795,7 +2191,8 @@ function effects.renderVolumetricFog(volume, shaders, playerCamera, sunDir, atmo
   gl.glUniform1f(injectionLocations.baseHeight, settings.fogBaseHeight or waterLevel)
   gl.glUniformMatrix4fv(injectionLocations.lightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
   gl.glActiveTexture(GL_TEXTURE0)
-  gl.glBindTexture(GL_TEXTURE_2D, shadowMap.depthTexture[0])
+  local fogShadow = shadowMap.cascades and shadowMap.cascades[#shadowMap.cascades] or shadowMap
+  gl.glBindTexture(GL_TEXTURE_2D, fogShadow.depthTexture[0])
   gl.glBindImageTexture(0, volume.injectionTexture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F)
   gl.glDispatchCompute(math.ceil(volume.width / 8), math.ceil(volume.height / 8), volume.depth)
   gl.glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT + GL_TEXTURE_FETCH_BARRIER_BIT)
@@ -1812,14 +2209,18 @@ function effects.renderVolumetricFog(volume, shaders, playerCamera, sunDir, atmo
   gl.glBindTexture(GL_TEXTURE_3D, 0)
 end
 
-function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarget, playerCamera, fov, viewportWidth, viewportHeight, nearPlane, farPlane, waterLevel, settings, blurAmount, underwaterOverlayTexture, time, bloomTexture, grade, volume)
+function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarget,
+    playerCamera, fov, viewportWidth, viewportHeight, nearPlane, farPlane,
+    underwaterAmount, settings, blurAmount, underwaterOverlayTexture, time, bloomTexture,
+    grade, volume, eyeExposureTexture, godRaysTexture)
   settings = settings or {}
   grade = grade or {}
 
-  local forward = playerCamera:getFront()
-  local worldUp = {0.0, 1.0, 0.0}
-  local right = math3d.normalize(math3d.cross(forward, worldUp))
+  local forward = cameraViewFront(playerCamera)
+  local cameraUp = playerCamera.getViewUp and playerCamera:getViewUp() or {0.0, 1.0, 0.0}
+  local right = math3d.normalize(math3d.cross(forward, cameraUp))
   local up = math3d.normalize(math3d.cross(right, forward))
+  local cameraPosition = playerCamera.getViewPosition and playerCamera:getViewPosition() or playerCamera.position
   local projectionY = math.tan(fov / 2)
   local projectionX = viewportWidth / viewportHeight * projectionY
 
@@ -1829,16 +2230,21 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   gl.glUniform1i(locations.sceneDepth, 1)
   gl.glUniform1i(locations.underwaterOverlay, 2)
   gl.glUniform1i(locations.fogVolume, 4)
-  gl.glUniform3f(locations.cameraPosition, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
+  gl.glUniform3f(locations.cameraPosition, cameraPosition[1], cameraPosition[2], cameraPosition[3])
   gl.glUniform3f(locations.cameraForward, forward[1], forward[2], forward[3])
   gl.glUniform3f(locations.cameraRight, right[1], right[2], right[3])
   gl.glUniform3f(locations.cameraUp, up[1], up[2], up[3])
   gl.glUniform3f(locations.cameraProjection, projectionX, projectionY, 0.0)
-  gl.glUniform3f(locations.depthParams, nearPlane, farPlane, waterLevel)
+  gl.glUniform3f(locations.depthParams, nearPlane, farPlane, 0.0)
   gl.glUniform3f(locations.volumeParams, volume.near, volume.far, settings.maxFogAmount or 0.72)
   gl.glUniform1f(locations.blurAmount, blurAmount or 0.0)
+  gl.glUniform1f(locations.underwaterAmount, underwaterAmount or 0.0)
   gl.glUniform1f(locations.time, time or 0.0)
   gl.glUniform1i(locations.bloomTexture, 3)
+  gl.glUniform1i(locations.godRaysTexture, 6)
+  gl.glUniform1i(locations.eyeExposure, 5)
+  gl.glUniform1f(locations.godRaysStrength,
+    godRaysTexture and (grade.godRaysStrength or 0.30) or 0.0)
   gl.glUniform4f(locations.gradeParams,
     grade.exposure or 1.0,
     bloomTexture and (grade.bloomStrength or 0.06) or 0.0,
@@ -1868,6 +2274,10 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   end
   gl.glActiveTexture(GL_TEXTURE4)
   gl.glBindTexture(GL_TEXTURE_3D, volume.integratedTexture)
+  gl.glActiveTexture(GL_TEXTURE5)
+  gl.glBindTexture(GL_TEXTURE_2D, eyeExposureTexture)
+  gl.glActiveTexture(GL_TEXTURE0 + 6)
+  gl.glBindTexture(GL_TEXTURE_2D, godRaysTexture or sceneTarget.colorTexture[0])
   rendering.draw(screenMesh)
   gl.glActiveTexture(GL_TEXTURE0)
   gl.glEnable(GL_DEPTH_TEST)

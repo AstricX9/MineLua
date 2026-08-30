@@ -17,17 +17,18 @@ graphics.player = {
   sprintSpeed = 7.2,
   crouchSpeed = 2.4,
   flySpeed = 9.5,
-  -- Acceleration changes speed only. Input direction is applied immediately so
-  -- mouse turns and key changes do not steer the player through a circular arc.
+  -- Velocity changes as a vector so starts, stops, strafes and reversals retain
+  -- a brief sense of momentum without becoming slippery.
   acceleration = 55.0,
   airAcceleration = 14.0,
   flyAcceleration = 24.0,
   groundFriction = 46.0,
   airFriction = 2.0,
   flyFriction = 18.0,
-  gravity = 19.5,
-  -- Clears a full voxel with margin after discrete gravity integration.
-  jumpSpeed = 7.4,
+  -- A slightly longer jump arc keeps take-off and landing from feeling abrupt.
+  -- Speed and gravity are paired to retain about 1.4 m of vertical clearance.
+  gravity = 15.5,
+  jumpSpeed = 6.6,
   stepHeight = 0.60,
   swimUpSpeed = 4.6,
   swimSinkSpeed = 0.65,
@@ -36,6 +37,9 @@ graphics.player = {
   coyoteTime = 0.10,
   jumpBufferTime = 0.12,
   mouseSensitivity = 0.085,
+  -- Exponential look response in 1/seconds. Higher is more immediate; zero
+  -- applies raw deltas without smoothing.
+  mouseSmoothing = 42.0,
   reach = 6.0,
   showDebugBody = false
 }
@@ -50,6 +54,9 @@ graphics.world = {
 }
 
 graphics.performance = {
+  -- 0 uses up to 16 worldgen processes, leaving one logical CPU for rendering.
+  -- Set an explicit value to cap generation on lower-memory systems.
+  chunkGenerationWorkers = 0,
   -- Safety cap only; terrainFrameBudgetMs is what actually limits the frame.
   -- Generation yields every 4 columns now, so this must be high enough that the
   -- step count never binds before the time budget does.
@@ -58,9 +65,16 @@ graphics.performance = {
   -- up needs ~340 ms/s walking and ~470 ms/s flying. 8 ms/frame covers both at
   -- 60 fps. Raise to stream faster, lower for steadier frames.
   terrainFrameBudgetMs = 8.0,
+  -- Semi-blocking frontier: nearby collision chunks may borrow a little more
+  -- frame time, while all farther generation remains asynchronous.
+  nearTerrainFrameBudgetMs = 12.0,
+  nearTerrainWorkBudget = 96,
   chunkQueueBudget = 4,
   chunkQueueBacklog = 16,
-  distantGenerationSteps = 8,
+  -- Worker polling is normally nearly free, so a small step cap prevented a
+  -- parallel far batch from being observed promptly. Wall time still enforces
+  -- the actual 3 ms frame allowance below.
+  distantGenerationSteps = 64,
   distantBuildBudget = 2,
   distantFrameBudgetMs = 3.0,
   distantQueueRingBudget = 4,
@@ -116,6 +130,26 @@ graphics.post = {
   bloomLevels = 6,         -- mip chain depth; more = wider glow
   bloomClamp = 12.0,       -- guards against fireflies from very bright pixels
 
+  -- Screen-space sunlight shafts. The pass runs at quarter resolution and uses
+  -- the scene depth texture as its occlusion map, so terrain and clouds break
+  -- the radial blur into rays without requiring a second geometry pass.
+  godRays = true,
+  -- Shafts are intentionally very low resolution: they contain no sharp
+  -- detail after radial integration, and linear upsampling hides the grid.
+  -- Quarter resolution with 16 taps costs one sixteenth of the original
+  -- half-resolution/64-tap pass at the same display size.
+  godRaysResolutionScale = 0.25,
+  godRaysSamples = 16,
+  godRaysDensity = 0.92,
+  godRaysDecay = 0.96,
+  -- Fewer taps need more energy per tap to retain a visible shaft. Direct sun
+  -- brightness still comes from the sky/bloom passes; this only controls the
+  -- scattered streak extending away from it.
+  godRaysWeight = 0.080,
+  godRaysExposure = 0.65,
+  godRaysStrength = 0.30,
+  godRaysSourceRadius = 0.065,
+
   -- "rolloff" = identity below the knee, compress above (recommended)
   -- "aces"    = filmic, scene-referred, adds its own contrast and saturation
   -- false     = no tone mapping at all
@@ -125,7 +159,28 @@ graphics.post = {
 
   exposure = 1.0,
   saturation = 1.0,
-  contrast = 1.0
+  contrast = 1.0,
+
+  eyeAdaptation = true,
+  eyeKey = 0.34,
+  eyeMinExposure = 0.55,
+  eyeMaxExposure = 2.35,
+  eyeBrightenSpeed = 1.35,
+  eyeDarkenSpeed = 3.25,
+
+  -- Metering. The sky is a light source inside the frame rather than the
+  -- subject of it, so it is averaged in at a fraction of the area it covers;
+  -- without that, looking up and looking down ask for different exposures.
+  eyeSkyWeight = 0.25,
+  -- Weight at the frame corners relative to the centre.
+  eyeEdgeWeight = 0.35,
+  -- Ceiling on a single sample before it is averaged. The sun disc is several
+  -- times white on its own and would otherwise carry the average by itself.
+  eyeSampleClamp = 2.0,
+  -- How much of the scene's own brightness the exposure cancels. 1.0 is the
+  -- textbook key/average law, which makes midnight look like an underexposed
+  -- noon; below 1.0 leaves night dark and day bright while still tracking.
+  eyeResponse = 0.85
 }
 
 -- Physical sky: Rayleigh + Mie single scattering, marched per pixel. Sample
@@ -149,7 +204,22 @@ graphics.sky = {
   -- Radiance of the disc, in the units the sky lands in after its own tone map.
   -- The scene target is half-float, so anything above 1.0 survives to be
   -- bloomed; this is what gives the sun its glow.
-  sunDiscBrightness = 9.0
+  sunDiscBrightness = 9.0,
+
+  -- Night sky. Catalogue stars and planets are rendered as true points and
+  -- rotated by sidereal time; the faint field fills out the real bright-star
+  -- catalogue toward naked-eye magnitude six.
+  proceduralStarCount = 2600,
+  faintestStarMagnitude = 6.2,
+  starBrightness = 3.2,
+  starTwinkle = 0.42,
+  starTwinkleSpeed = 5.0,
+  moonBrightness = 2.2,
+  moonAngularScale = 1.0,
+  earthshine = 0.035,
+  moonStarSuppression = 0.018,
+  milkyWayBrightness = 0.14,
+  milkyWayHalfWidth = 0.20
 }
 
 graphics.terrain = {
@@ -161,9 +231,14 @@ graphics.terrain = {
 
 graphics.shadows = {
   mapSize = 2048,
-  distance = 60.0,
+  -- Three stabilized cascades keep nearby voxel edges crisp while extending
+  -- sun shadows well into the LOD transition. Later cascades use smaller maps
+  -- and deliberately softer filtering.
+  cascadeSplits = {20.0, 56.0, 132.0},
+  cascadeMapSizes = {2048, 1536, 1024},
   near = 8.0,
-  far = 132.0
+  far = 420.0,
+  softness = 1.0
 }
 
 -- Real dielectric constants for transmissive voxel materials. The renderer
@@ -219,7 +294,7 @@ graphics.terrainGeneration = {
   continentSize = 1.0,
   biomeScale = 0.00092,
   regionScale = 0.00125,
-  mountainScale = 0.00078,
+  mountainScale = 0.00105,
   mountainFrequency = 1.0,
   riverScale = 0.00115,
   forestScale = 0.00165,
@@ -231,8 +306,8 @@ graphics.terrainGeneration = {
   continentalShelfWidth = 0.115,
   terrainVerticalScale = 1.0,
   oceanDepthScale = 42.0,
-  mountainHeight = 49.0,
-  foothillHeight = 9.0,
+  mountainHeight = 56.0,
+  foothillHeight = 13.0,
   plateauFrequency = 0.18,
   plateauHeight = 18.0,
   basinDepth = 9.0,
@@ -243,7 +318,7 @@ graphics.terrainGeneration = {
   erosionStrength = 0.28,
   riverCarveStrength = 0.86,
   lakeCarveStrength = 0.78,
-  mountainSharpness = 1.65,
+  mountainSharpness = 1.38,
   shorelineWidth = 7.0,
   rockyShoreThreshold = 0.46,
   biomeClimateInfluence = 0.34,

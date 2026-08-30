@@ -101,7 +101,7 @@ function Pipeline:baseElevationAt(x, z)
   local mountainSharpness = s.mountainSharpness or 1.65
   local mountainHeight = s.mountainHeight or 49.0
   local mountain = (fields.mountainPotential ^ mountainSharpness) *
-    (0.32 + fields.ridge * fields.ridge * 0.68) * mountainHeight *
+    (0.48 + (fields.ridge ^ 1.6) * 0.52) * mountainHeight *
     (1.0 - effectiveErosion * 0.42)
   local foothills = noise.edge(fields.mountainPotential, 0.06, 0.38) *
     fields.ridge * (s.foothillHeight or 9.0) * (1.0 - effectiveErosion * 0.28)
@@ -142,7 +142,9 @@ local function climateBiome(temperature, rainfall, elevation, sea, landform, geo
     -- River remains metadata-first so vegetation/material code can blend with
     -- the surrounding climate instead of making a hard 16-block ribbon.
   end
-  if elevation > sea + 34 and (landform == "mountainRange" or landform == "volcano") then
+  -- Keep the wooded climate biome across most slopes. Only the highest caps
+  -- switch to sparse alpine terrain, matching Minecraft's forested ranges.
+  if elevation > sea + 50 and (landform == "mountainRange" or landform == "volcano") then
     return "mountains", "alpine"
   end
   if temperature < 0.08 then

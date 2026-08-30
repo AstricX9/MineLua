@@ -14,6 +14,9 @@ function interaction.breakBlock(world, x, y, z)
   if not id or id == 0 then
     return changed
   end
+  if world.isProtectedBlock and world:isProtectedBlock(x, y, z) then
+    return changed
+  end
 
   world:setBlock(x, y, z, air())
   changed[#changed + 1] = {x = x, y = y, z = z}
@@ -44,6 +47,9 @@ function interaction.placeFromHit(world, hit, blockId)
   local hitProps = hitDef and hitDef.properties
   local target = hitProps and hitProps.replaceable and hit or hit.previous
   if not target or world:isSolidBlock(target.x, target.y, target.z) then
+    return nil
+  end
+  if world.isProtectedBlock and world:isProtectedBlock(target.x, target.y, target.z) then
     return nil
   end
 

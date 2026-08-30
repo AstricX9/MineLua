@@ -81,8 +81,8 @@ end
 -- Decorations sit on top of the ground, so the depth rules below do not apply
 -- to them.
 local decorationIds = {}
-for _, name in ipairs({"tall_grass", "oak_log", "oak_leaves", "spruce_log",
-    "spruce_leaves", "oak_log_x", "oak_log_z"}) do
+for _, name in ipairs({"tall_grass", "oak_log_alive", "oak_leaves",
+    "spruce_log_alive", "spruce_leaves"}) do
   if blocks[name] then decorationIds[blocks[name]] = true end
 end
 

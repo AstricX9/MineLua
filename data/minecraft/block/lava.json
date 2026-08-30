@@ -3,6 +3,8 @@
   "texture": "./textures/blocks/lava_still.png",
   "properties": {
     "solid": false,
-    "liquid": true
+    "liquid": true,
+    "emission": [15, 7, 2],
+    "soundMaterial": "stone"
   }
 }

@@ -1,11 +1,11 @@
 {
   "Data": {
     "DayTime": 0,
-    "GameType": 0,
-    "LastPlayed": 1787573727000,
+    "GameType": 1,
+    "LastPlayed": 1787822241000,
     "LevelName": "New World",
     "MapFeatures": true,
-    "RandomSeed": 750792704,
+    "RandomSeed": 732218880,
     "SpawnX": 0,
     "SpawnY": 64,
     "SpawnZ": 0,

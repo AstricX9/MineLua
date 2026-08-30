@@ -1,7 +1,12 @@
+local json = require("json")
+local filesystem = require("filesystem")
+
 local Items = {
   mapping = {},
   list = {}
 }
+
+local ITEM_DATA_ROOT = "data/minecraft/item/"
 
 local definitions = {
   {key="stick", name="Stick", texture="./textures/items/stick.png"},
@@ -20,12 +25,41 @@ local definitions = {
   {key="stone_shovel", name="Stone Shovel", texture="./textures/items/stone_shovel.png", toolType="shovel", tier=2, speed=4.0}
 }
 
-for index, definition in ipairs(definitions) do
-  definition.id = index
+function Items.register(key, definition)
+  if type(key) == "table" then
+    definition = key
+    key = definition.key
+  end
+  assert(type(key) == "string" and key ~= "", "Item keys must be non-empty strings")
+  assert(not Items.mapping[key], "Item already registered: " .. key)
+  definition = definition or {}
+  definition.key = key
+  definition.id = #Items.list + 1
   definition.itemSprite = true
-  definition.color = {1.0, 1.0, 1.0}
-  Items.mapping[definition.key] = definition
-  Items.list[index] = definition
+  definition.color = definition.color or {1.0, 1.0, 1.0}
+  definition.name = definition.name or key:gsub("_", " "):gsub("^%l", string.upper)
+  Items.mapping[key] = definition
+  Items.list[definition.id] = definition
+  return definition.id
+end
+
+for _, definition in ipairs(definitions) do
+  Items.register(definition)
+end
+
+-- Like blocks, standalone item definitions are discovered automatically. A
+-- future item can be added as data/minecraft/item/<key>.json without touching
+-- this module or maintaining a second index list.
+for _, entry in ipairs(filesystem.entries(ITEM_DATA_ROOT)) do
+  local key = not entry.isDirectory and entry.name:match("^(.*)%.json$") or nil
+  if key and key ~= "index" and not Items.mapping[key] then
+    local file = io.open(ITEM_DATA_ROOT .. entry.name, "r")
+    if file then
+      local definition = json.decode(file:read("*a"))
+      file:close()
+      if type(definition) == "table" then Items.register(key, definition) end
+    end
+  end
 end
 
 function Items.catalog()

@@ -12,11 +12,12 @@
 -- mesher produces and goes through the existing terrain program unchanged.
 
 local blocks = require("blocks")
+local foliageVariation = require("foliage_variation")
 
 local GridMesher = {}
 
 local CHUNK_SIZE = 16
-GridMesher.STRIDE_FLOATS = 14
+GridMesher.STRIDE_FLOATS = 18
 
 local MATERIAL_SOLID = 0.0
 local MATERIAL_LEAVES = 1.0
@@ -221,22 +222,33 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
               red, green, blue = red * tr, green * tg, blue * tb
             end
             local light = lightCurve(SKY_LIGHT_MAX)
-            local halfVoxel = half
+            local props = definition.properties or {}
+            local seedLayer = props.half == "upper" and gridLayer - 1 or gridLayer
+            local variation = props.randomTransform and
+              foliageVariation.at(gridColumn, seedLayer, gridRow, gridFace * 17) or nil
+            local offsetX = variation and variation.offsetX or 0.0
+            local offsetZ = variation and variation.offsetZ or 0.0
+            local widthScale = variation and variation.widthScale or 1.0
+            local heightScale = variation and variation.heightScale or 1.0
+            if props.doublePlant then heightScale = 1.0 end
+            local angle = variation and variation.rotation or math.pi * 0.25
+            cx = cx + rx * offsetX * half * 2.0 + fx * offsetZ * half * 2.0
+            cy = cy + ry * offsetX * half * 2.0 + fy * offsetZ * half * 2.0
+            cz = cz + rz * offsetX * half * 2.0 + fz * offsetZ * half * 2.0
             for blade = 1, 2 do
-              -- The two diagonals of the column/row plane.
-              local ax = (blade == 1 and rx + fx or rx - fx) * 0.7071
-              local ay = (blade == 1 and ry + fy or ry - fy) * 0.7071
-              local az = (blade == 1 and rz + fz or rz - fz) * 0.7071
-              local nx = (blade == 1 and rx - fx or rx + fx) * 0.7071
-              local ny = (blade == 1 and ry - fy or ry + fy) * 0.7071
-              local nz = (blade == 1 and rz - fz or rz + fz) * 0.7071
+              local bladeAngle = angle + (blade - 1) * math.pi * 0.5
+              local cosine, sine = math.cos(bladeAngle), math.sin(bladeAngle)
+              local ax, ay, az = rx * cosine + fx * sine,
+                ry * cosine + fy * sine, rz * cosine + fz * sine
+              local nx, ny, nz = -rx * sine + fx * cosine,
+                -ry * sine + fy * cosine, -rz * sine + fz * cosine
               for index = 1, 6 do
                 local corner = CORNER_ORDER[index]
                 local sideways = CORNER_HIGH_U[corner] and 1.0 or -1.0
-                local upward = CORNER_HIGH_V[corner] and -1.0 or 1.0
-                vertices[n + 1] = cx + ax * sideways * halfVoxel + ux * upward * halfVoxel
-                vertices[n + 2] = cy + ay * sideways * halfVoxel + uy * upward * halfVoxel
-                vertices[n + 3] = cz + az * sideways * halfVoxel + uz * upward * halfVoxel
+                local anchoredHeight = CORNER_HIGH_V[corner] and 0.0 or heightScale
+                vertices[n + 1] = cx + ax * sideways * half * widthScale + ux * (anchoredHeight - 0.5) * half * 2.0
+                vertices[n + 2] = cy + ay * sideways * half * widthScale + uy * (anchoredHeight - 0.5) * half * 2.0
+                vertices[n + 3] = cz + az * sideways * half * widthScale + uz * (anchoredHeight - 0.5) * half * 2.0
                 vertices[n + 4], vertices[n + 5], vertices[n + 6] = nx, ny, nz
                 vertices[n + 7], vertices[n + 8], vertices[n + 9] = red, green, blue
                 vertices[n + 10] = CORNER_HIGH_U[corner] and uv.u1 or uv.u0
@@ -246,7 +258,9 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
                 -- bends the top of a blade and leaves the root still.
                 vertices[n + 13] = CORNER_HIGH_V[corner] and 0.0 or 1.0
                 vertices[n + 14] = light
-                n = n + 14
+                vertices[n + 15], vertices[n + 16], vertices[n + 17] = 0.0, 0.0, 0.0
+                vertices[n + 18] = light
+                n = n + 18
               end
             end
           elseif definition and definition.uvs then
@@ -330,7 +344,11 @@ function GridMesher.meshChunk(grid, gridFace, chunkColumn, chunkRow, chunkLayer,
                   -- definition instead of flattening to one ambient value.
                   target[targetIndex + 13] = ao
                   target[targetIndex + 14] = light * ao
-                  targetIndex = targetIndex + 14
+                  target[targetIndex + 15] = 0.0
+                  target[targetIndex + 16] = 0.0
+                  target[targetIndex + 17] = 0.0
+                  target[targetIndex + 18] = light * ao
+                  targetIndex = targetIndex + 18
                 end
                 if material == MATERIAL_LEAVES then leafN = targetIndex else n = targetIndex end
               end

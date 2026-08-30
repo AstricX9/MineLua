@@ -73,7 +73,7 @@ struct MineLuaDevUiState {
     float held_item_roll;
     float held_item_yaw;
     float held_item_pitch;
-    float held_item_thickness;
+    float held_item_depth;
     float held_item_perspective;
 };
 
@@ -126,13 +126,13 @@ static void ResetGeneration(MineLuaDevUiState* state) {
 }
 
 static void ResetHeldItem(MineLuaDevUiState* state) {
-    state->held_item_x_inset = 161.5f;
-    state->held_item_y_inset = 254.7f;
-    state->held_item_size = 526.8f;
-    state->held_item_roll = 35.8f;
-    state->held_item_yaw = -46.1f;
-    state->held_item_pitch = -7.2f;
-    state->held_item_thickness = 1.0f / 16.0f;
+    state->held_item_x_inset = (1.0f - 0.56f) * 1280.0f * 0.5f;
+    state->held_item_y_inset = (1.0f - 0.52f) * 720.0f * 0.5f;
+    state->held_item_size = 720.0f;
+    state->held_item_roll = 0.0f;
+    state->held_item_yaw = -45.0f;
+    state->held_item_pitch = 0.0f;
+    state->held_item_depth = -0.72f;
     state->held_item_perspective = 3.2f;
 }
 
@@ -343,16 +343,22 @@ MINELUA_EXPORT void ml_imgui_draw(MineLuaDevUiState* state) {
             ImGui::SetNextWindowPos(ImVec2(444.0f, 64.0f), ImGuiCond_FirstUseEver);
             ImGui::SetNextWindowSize(ImVec2(410.0f, 0.0f), ImGuiCond_FirstUseEver);
             if (ImGui::Begin("Held Item Transform", &held_item_open, ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::TextWrapped("Adjusts the equipped item immediately. Position and size use a 720p reference and scale with the viewport.");
+                ImGui::TextWrapped("Adjusts the equipped item immediately using Minecraft's standard right-hand transform.");
                 ImGui::Separator();
 
                 if (ImGui::CollapsingHeader("Placement", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    float x_position = 1.0f - state->held_item_x_inset / 640.0f;
                     ImGui::SetNextItemWidth(250.0f);
-                    ImGui::SliderFloat("X inset from right", &state->held_item_x_inset, -300.0f, 900.0f, "%.1f px");
+                    if (ImGui::SliderFloat("X position", &x_position, -1.0f, 1.0f, "%.2f"))
+                        state->held_item_x_inset = (1.0f - x_position) * 640.0f;
+                    float y_position = state->held_item_y_inset / 360.0f - 1.0f;
                     ImGui::SetNextItemWidth(250.0f);
-                    ImGui::SliderFloat("Y inset from bottom", &state->held_item_y_inset, -300.0f, 720.0f, "%.1f px");
+                    if (ImGui::SliderFloat("Y position", &y_position, -1.0f, 1.0f, "%.2f"))
+                        state->held_item_y_inset = (1.0f + y_position) * 360.0f;
+                    float size_scale = state->held_item_size / 720.0f;
                     ImGui::SetNextItemWidth(250.0f);
-                    ImGui::SliderFloat("Size", &state->held_item_size, 80.0f, 1000.0f, "%.1f px");
+                    if (ImGui::SliderFloat("Size", &size_scale, 0.20f, 2.0f, "%.2fx"))
+                        state->held_item_size = size_scale * 720.0f;
                 }
 
                 if (ImGui::CollapsingHeader("Orientation", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -366,10 +372,10 @@ MINELUA_EXPORT void ml_imgui_draw(MineLuaDevUiState* state) {
 
                 if (ImGui::CollapsingHeader("Projection", ImGuiTreeNodeFlags_DefaultOpen)) {
                     ImGui::SetNextItemWidth(250.0f);
-                    ImGui::SliderFloat("Model depth", &state->held_item_thickness, 0.002f, 0.20f, "%.4f");
+                    ImGui::SliderFloat("Model depth", &state->held_item_depth, -2.0f, 1.0f, "%.2f");
                     ImGui::SetNextItemWidth(250.0f);
                     ImGui::SliderFloat("Perspective distance", &state->held_item_perspective, 1.20f, 6.0f, "%.2f");
-                    ImGui::TextDisabled("1/16 depth matches one model pixel; lower distance strengthens perspective.");
+                    ImGui::TextDisabled("Readouts include Minecraft's standard right-hand item transform.");
                 }
 
                 ImGui::Separator();

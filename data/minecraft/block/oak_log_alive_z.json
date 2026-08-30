@@ -1,0 +1,8 @@
+{
+  "name": "Living Oak Log (Z Axis)",
+  "texture": {"top": "./textures/blocks/log_oak_top.png", "bottom": "./textures/blocks/log_oak_top.png", "side": "./textures/blocks/log_oak.png"},
+  "hardness": 2.0,
+  "preferredTool": "axe",
+  "requiredToolTier": 1,
+  "properties": {"solid": true, "aliveTree": true, "logAxis": "z", "hidden": true, "drop": "oak_log", "soundMaterial": "wood"}
+}

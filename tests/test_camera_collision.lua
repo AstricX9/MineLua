@@ -38,6 +38,20 @@ camera:moveHorizontally(0.1, world)
 assert(math.abs(camera.position[1] - 0.5) < 1e-9,
   "horizontal body collision blocks a jump through the wall")
 
+-- Stumps occupy only their visible lower slice. They support the player at
+-- that exact height and remain a small automatic step rather than an invisible
+-- full-block wall.
+function world:collisionHeightAt(x,y,z)
+  if y==0 then return 1.0 end
+  if self.stump and x==0 and y==1 and z==0 then return 0.32 end
+  return self:isSolidBlock(x,y,z) and 1.0 or 0.0
+end
+world.stump=true
+local stumpGround=camera:getGroundYAt(world,0.5,0.5)
+assert(math.abs(stumpGround-(1.32+camera.eyeHeight))<1e-9,
+  "partial-height stump collision should match the rendered stump top")
+world.stump=false
+
 world.ceiling = true
 camera.velocityY = 6.4
 camera:applyVerticalMovement(0.05, nil, world)
@@ -63,7 +77,39 @@ camera.jumpBuffer = 0.0
 camera:applyVerticalMovement(1.0 / 60.0, nil, world)
 assert(camera.velocityY <= 0.0, "holding space does not auto-jump after landing")
 
+-- Ground-following tolerance must not shorten an airborne fall. The old check
+-- treated anything within groundSnap as landed and teleported the camera over
+-- the entire remaining gap in one frame.
+keys[glfw.GLFW_KEY_SPACE] = false
+camera.position[2] = 2.62 + camera.groundSnap * 0.8
+camera.velocityY = -1.0
+camera.velocity[2] = camera.velocityY
+camera.grounded = false
+local beforeFall = camera.position[2]
+camera:applyVerticalMovement(1.0 / 60.0, nil, world)
+assert(not camera.grounded, "an airborne player remains airborne above the contact surface")
+assert(camera.position[2] < beforeFall and camera.position[2] > 2.62,
+  "the end of a fall advances under gravity instead of snapping to the ground")
+
 print("camera collision tests passed")
+
+-- Unloaded terrain is semi-blocking: low flight waits for collision data, but
+-- high creative flight above the generator envelope can keep travelling while
+-- the renderer catches up.
+local frontier = {maxHeight = 127}
+function frontier:hasCollisionAtBlock() return false end
+function frontier:containsBlock() return false end
+function frontier:isSolidBlock() return false end
+local lowFlight = Camera.new({position = {0.5, 80.0, 0.5}})
+lowFlight.flying = true
+lowFlight.velocity[1] = 4.0
+lowFlight:moveHorizontally(0.1, frontier)
+assert(lowFlight.position[1] == 0.5, "unloaded terrain blocks flight inside the terrain envelope")
+local highFlight = Camera.new({position = {0.5, 150.0, 0.5}})
+highFlight.flying = true
+highFlight.velocity[1] = 4.0
+highFlight:moveHorizontally(0.1, frontier)
+assert(highFlight.position[1] > 0.5, "flight above terrain remains non-blocking")
 
 -- A manual jump needs enough discrete-time clearance to get the player's feet
 -- above a full voxel before horizontal wall collision can release.
@@ -76,11 +122,15 @@ keys[glfw.GLFW_KEY_SPACE] = true
 camera:applyVerticalMovement(1.0 / 60.0, nil, world)
 keys[glfw.GLFW_KEY_SPACE] = false
 local peak = camera.position[2]
+local airborneFrames = 0
 for _ = 1, 90 do
   camera:applyVerticalMovement(1.0 / 60.0, nil, world)
   peak = math.max(peak, camera.position[2])
+  if not camera.grounded then airborneFrames = airborneFrames + 1 end
 end
 assert(peak - 2.62 > 1.20, "manual jump clears a full voxel with margin")
+assert(airborneFrames >= 45,
+  string.format("manual jump keeps a relaxed, non-snappy arc (saw %d frames)", airborneFrames))
 
 -- Holding jump in water must provide sustained buoyancy rather than leaving the
 -- player pinned to the bed.

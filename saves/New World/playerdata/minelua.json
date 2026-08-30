@@ -1,17 +1,19 @@
 {
   "format": "minelua-player",
-  "savedAt": 1787649488000,
+  "savedAt": 1787903804000,
   "state": {
     "camera": {
       "acceleration": 55,
       "airAcceleration": 14,
       "airFriction": 2,
-      "allowFlight": false,
+      "allowFlight": true,
+      "bobPhase": 209.34811388438,
       "bodyRadius": 0.3,
       "coyoteTime": 0.1,
       "coyoteTimer": 0,
       "crouchEyeHeight": 1.24,
       "crouchSpeed": 2.4,
+      "crouching": false,
       "eyeHeight": 1.62,
       "firstMouse": false,
       "flightToggleWasDown": false,
@@ -19,38 +21,54 @@
       "flyFriction": 18,
       "flySpeed": 9.5,
       "flying": false,
-      "gravity": 19.5,
+      "fovOffset": 1.324225903219e-129,
+      "gravity": 15.5,
       "groundFriction": 46,
       "groundSnap": 0.36,
       "grounded": false,
+      "invertMouse": false,
       "jumpBuffer": 0,
       "jumpBufferTime": 0.12,
-      "jumpSpeed": 7.4,
+      "jumpSpeed": 6.6,
       "jumpWasDown": false,
-      "lastX": 1631,
-      "lastY": 718,
+      "landingViewOffset": 0,
+      "lastX": 2416,
+      "lastY": 1181,
       "mouseSensitivity": 0.085,
-      "pitch": -19.32,
+      "mouseSmoothing": 42,
+      "mouseTurnVelocity": -9.2552923513207e-14,
+      "moveInputX": 0,
+      "moveInputZ": 0,
+      "pitch": -52.045115286889,
       "position": [
-        22.334620390763,
-        82.523865650033,
-        334.33166570157
+        -365.78282457532,
+        64.235910991773,
+        -250.97185377859
       ],
-      "reach": 6,
+      "reach": 8,
       "sprintSpeed": 7.2,
+      "sprinting": false,
       "standEyeHeight": 1.62,
       "stepHeight": 0.6,
+      "stepViewOffset": 0,
       "swimAcceleration": 18,
       "swimSinkSpeed": 0.65,
       "swimUpSpeed": 4.6,
+      "targetPitch": -52.045115286889,
+      "targetYaw": -984.00716118064,
       "velocity": [
-        3.5322572234692,
-        -7.0684423,
-        5.6451168634226
+        0.17568668119258,
+        -41.66753195,
+        0.017980295961313
       ],
-      "velocityY": -7.3749199,
+      "velocityY": -41.66753195,
+      "viewBobPitch": 0,
+      "viewBobX": 0,
+      "viewBobY": 0,
+      "viewBobbingEnabled": true,
+      "viewRoll": 0.027692333620599,
       "walkSpeed": 5.1,
-      "yaw": -2104.67
+      "yaw": -984.00716118064
     },
     "inventory": {
       "crafting": {
@@ -62,136 +80,44 @@
         "cookTime": 0,
         "cookTotal": 10
       },
-      "gameMode": "survival",
-      "recipeHint": "Recipe crafted!",
-      "search": "",
-      "selected": 1,
-      "slots": {
-        "1": {
-          "count": 1,
-          "item": "stone_pickaxe"
+      "gameMode": "creative",
+      "recipeHint": "Break gravel for flint, then gather sticks from leaves or wood.",
+      "search": "eee",
+      "selected": 9,
+      "slots": [
+        {
+          "count": 64,
+          "item": "grass"
         },
-        "10": {
-          "count": 12,
-          "item": "clay"
+        {
+          "count": 64,
+          "item": "dirt"
         },
-        "11": {
-          "count": 25,
-          "item": "sand"
-        },
-        "12": {
-          "count": 17,
+        {
+          "count": 64,
           "item": "stone"
         },
-        "13": {
-          "count": 22,
-          "item": "stick"
+        {
+          "count": 64,
+          "item": "sand"
         },
-        "14": {
-          "count": 1,
+        {
+          "count": 64,
+          "item": "gravel"
+        },
+        {
+          "count": 64,
+          "item": "cobblestone"
+        },
+        {
+          "count": 64,
           "item": "oak_planks"
         },
-        "15": {
+        {
           "count": 64,
-          "item": "tall_grass"
-        },
-        "16": {
-          "count": 36,
           "item": "oak_log"
-        },
-        "17": {
-          "count": 44,
-          "item": "flint"
-        },
-        "18": {
-          "count": 2,
-          "item": "double_grass_upper"
-        },
-        "19": {
-          "count": 11,
-          "item": "grass"
-        },
-        "2": {
-          "count": 1,
-          "item": "flint_hatchet"
-        },
-        "20": {
-          "count": 2,
-          "item": "allium"
-        },
-        "21": {
-          "count": 1,
-          "item": "dirt"
-        },
-        "22": {
-          "count": 64,
-          "item": "cobblestone"
-        },
-        "23": {
-          "count": 9,
-          "item": "coal_ore"
-        },
-        "24": {
-          "count": 2,
-          "item": "poppy"
-        },
-        "25": {
-          "count": 29,
-          "item": "tall_grass"
-        },
-        "26": {
-          "count": 64,
-          "item": "tall_grass"
-        },
-        "29": {
-          "count": 1,
-          "item": "wood_pickaxe"
-        },
-        "3": {
-          "count": 1,
-          "item": "wood_axe"
-        },
-        "30": {
-          "count": 9,
-          "item": "double_grass_lower"
-        },
-        "31": {
-          "count": 64,
-          "item": "tall_grass"
-        },
-        "32": {
-          "count": 4,
-          "item": "dandelion"
-        },
-        "33": {
-          "count": 64,
-          "item": "tall_grass"
-        },
-        "34": {
-          "count": 1,
-          "item": "oxeye_daisy"
-        },
-        "4": {
-          "count": 1,
-          "item": "wood_shovel"
-        },
-        "6": {
-          "count": 24,
-          "item": "cobblestone"
-        },
-        "7": {
-          "count": 64,
-          "item": "dirt"
-        },
-        "8": {
-          "count": 13,
-          "item": "coal"
-        },
-        "9": {
-          "count": 64,
-          "item": "grass"
         }
-      }
+      ]
     }
   },
   "version": 1

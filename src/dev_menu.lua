@@ -62,7 +62,7 @@ typedef struct MineLuaDevUiState {
   float held_item_roll;
   float held_item_yaw;
   float held_item_pitch;
-  float held_item_thickness;
+  float held_item_depth;
   float held_item_perspective;
 } MineLuaDevUiState;
 
@@ -75,7 +75,7 @@ void ml_imgui_draw(MineLuaDevUiState* state);
 void ml_imgui_render(void);
 ]]
 
-local native = ffi.load("lib/minelua_imgui_tools_v4.dll")
+local native = ffi.load("lib/minelua_imgui_tools_v5.dll")
 
 local DevMenu = {}
 DevMenu.__index = DevMenu
@@ -151,7 +151,7 @@ function DevMenu.new()
   state[0].held_item_roll = heldItem.DEFAULTS.roll
   state[0].held_item_yaw = heldItem.DEFAULTS.yaw
   state[0].held_item_pitch = heldItem.DEFAULTS.pitch
-  state[0].held_item_thickness = heldItem.DEFAULTS.thickness
+  state[0].held_item_depth = heldItem.DEFAULTS.depth
   state[0].held_item_perspective = heldItem.DEFAULTS.perspective
 
   return setmetatable({state = state}, DevMenu)
@@ -316,7 +316,7 @@ function DevMenu:heldItemTransform()
     roll=tonumber(state.held_item_roll),
     yaw=tonumber(state.held_item_yaw),
     pitch=tonumber(state.held_item_pitch),
-    thickness=tonumber(state.held_item_thickness),
+    depth=tonumber(state.held_item_depth),
     perspective=tonumber(state.held_item_perspective)
   }
 end

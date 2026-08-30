@@ -21,7 +21,7 @@ function profiles.register(definition)
   local fallback = profiles.byId.earth
   if fallback then
     for _, key in ipairs({"gravityScale", "dayLengthScale", "hasClouds", "hasSurfaceWater",
-        "surfaceMinTopY", "generation", "atmosphere", "sky"}) do
+        "surfaceMinTopY", "generation", "atmosphere", "sky", "post"}) do
       if definition[key] == nil then definition[key] = fallback[key] end
     end
     if definition.description == nil then definition.description = definition.name end
@@ -76,6 +76,12 @@ profiles.register({
   },
   atmosphere = {
     solarIrradiance = 1.0,
+    -- Standard sea-level air. Pressure, temperature and composition are the
+    -- inputs `src/audio_atmosphere.lua` derives this world's acoustics from,
+    -- and Earth is that model's calibration point.
+    surfacePressurePa = 101325.0,
+    surfaceTemperatureK = 288.15,
+    composition = {nitrogen = 0.78, oxygen = 0.21, argon = 0.01},
     fogDensityScale = 1.0,
     fogDistanceScale = 1.0,
     dayFog = {0.72, 0.84, 1.00},
@@ -102,6 +108,9 @@ profiles.register({
     rayleighBeta = {5.802e-6, 13.558e-6, 33.100e-6},
     dustBeta = {21.0e-6, 21.0e-6, 21.0e-6},
     dustAnisotropy = 0.758,
+    -- Earth's optical depth is low enough, and its haze lobe broad enough, that
+    -- single scattering already fills the sky evenly. Nothing to redistribute.
+    multipleScatter = 0.0,
     sunAngularScale = 1.0,
     sunDiscScale = 1.0,
     scatterStrengthScale = 1.0,
@@ -139,9 +148,11 @@ profiles.register({
     -- Mean sunlight at 1.524 AU is about 43% of Earth's.
     solarIrradiance = 0.43,
     -- Approximate global mean; real pressure changes strongly with elevation
-    -- and season. Composition fractions are retained for future survival and
-    -- weather systems even though rendering currently consumes the optics.
+    -- and season. Pressure, temperature and composition drive the optics here
+    -- and the acoustics in `src/audio_atmosphere.lua`: 0.6 kPa of cold CO2 is
+    -- what makes Mars quiet, muffled and free of reverb.
     surfacePressurePa = 610.0,
+    surfaceTemperatureK = 210.0,
     composition = {carbonDioxide = 0.953, nitrogen = 0.027, argon = 0.016},
     fogDensityScale = 0.62,
     fogDistanceScale = 1.18,
@@ -171,7 +182,15 @@ profiles.register({
     -- dust dominates and is spectrally warmer away from the solar aureole.
     rayleighBeta = {0.32e-6, 0.67e-6, 1.38e-6},
     dustBeta = {28.0e-6, 18.0e-6, 7.0e-6},
-    dustAnisotropy = 0.86,
+    -- Asymmetry parameter measured for Martian dust in visible light, which is
+    -- forward-peaked but nowhere near a specular lobe.
+    dustAnisotropy = 0.65,
+    -- Dust optical depth of a few tenths at a single-scattering albedo near
+    -- 0.9: a large share of the daytime sky is light that has bounced more than
+    -- once, which is why the sky away from the sun is butterscotch rather than
+    -- black. Without this the frame spans a hundred to one between the aureole
+    -- and the anti-solar horizon and no exposure setting can hold both.
+    multipleScatter = 0.45,
     sunAngularScale = 0.656,
     sunDiscScale = 0.72,
     scatterStrengthScale = 1.35,
@@ -179,6 +198,15 @@ profiles.register({
     aureoleColor = {0.28, 0.46, 1.0},
     aureoleStrength = 0.30,
     aureoleFocus = 260.0
+  },
+  -- Mars carries 43% of Earth's sunlight onto bright ochre ground under a sky
+  -- that is itself a large part of the frame's light. Metered on Earth's key it
+  -- reads as an underexposed Earth and the adaptation sits on its ceiling, so
+  -- the key is lowered and the ceiling brought in: Mars is meant to look dimmer
+  -- than Earth, not to be lifted until it does not.
+  post = {
+    eyeKey = 0.27,
+    eyeMaxExposure = 2.00
   }
 })
 

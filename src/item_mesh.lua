@@ -1,11 +1,17 @@
 local texture = require("texture")
 
 local ItemMesh = {}
+ItemMesh.STRIDE_FLOATS = 18
 local ORDER = {1,2,3,3,4,1}
 local ATLAS_HALF_TEXEL = 0.5 / 256
 
 local function vertex(vertices, x,y,z, nx,ny,nz, color, u,v)
-  local values = {x,y,z,nx,ny,nz,color[1],color[2],color[3],u,v,0,0,1}
+  local values = {
+    x,y,z,nx,ny,nz,color[1],color[2],color[3],u,v,
+    0,0,1,       -- material, shape height, skylight
+    0,0,0,       -- RGB block light
+    1            -- legacy scalar skylight tail
+  }
   for i=1,#values do vertices[#vertices+1]=values[i] end
 end
 

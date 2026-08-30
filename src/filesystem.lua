@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local vfs = require("vfs")
 
 local filesystem = {}
 
@@ -39,7 +40,7 @@ else
   ]]
 end
 
-function filesystem.entries(path)
+local function diskEntries(path)
   local entries = {}
 
   if ffi.os == "Windows" then
@@ -75,6 +76,24 @@ function filesystem.entries(path)
       end
     end
     ffi.C.closedir(directory)
+  end
+
+  return entries
+end
+
+-- Container entries fill in whatever the working tree does not have, so a
+-- packed release walks data/ and assets/ exactly the way a checkout does, and
+-- a loose file dropped next to the executable still shadows the packed one.
+function filesystem.entries(path)
+  local entries = diskEntries(path)
+
+  local seen = {}
+  for index = 1, #entries do seen[entries[index].name:lower()] = true end
+  for _, entry in ipairs(vfs.entries(path)) do
+    if not seen[entry.name:lower()] then
+      seen[entry.name:lower()] = true
+      entries[#entries + 1] = entry
+    end
   end
 
   table.sort(entries, function(a, b) return a.name:lower() < b.name:lower() end)

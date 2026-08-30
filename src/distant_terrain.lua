@@ -5,7 +5,7 @@ local DistantTerrain = {}
 DistantTerrain.__index = DistantTerrain
 
 local CHUNK_SIZE = 16
-local TERRAIN_STRIDE = 14
+local TERRAIN_STRIDE = 18
 local WATER_STRIDE = 11
 local QUAD_ORDER = {1, 2, 3, 3, 4, 1}
 local WHITE = {1.0, 1.0, 1.0}
@@ -49,6 +49,10 @@ local function pushTerrainVertex(vertices, p, normal, color, u, v, light)
   vertices[n + 12] = 0.0
   vertices[n + 13] = 0.0
   vertices[n + 14] = light
+  vertices[n + 15] = 0.0
+  vertices[n + 16] = 0.0
+  vertices[n + 17] = 0.0
+  vertices[n + 18] = light
 end
 
 local function appendTerrainQuad(vertices, corners, normal, def, face, worldX, worldZ, light)
@@ -108,34 +112,51 @@ function DistantTerrain.capture(entry, maxHeight, waterId, stillWaterId)
     source = "generated_chunk"
   }
   local chunk = entry.chunk
+  local rawBlocks = chunk.blocks
+  local rawSkyLight = chunk.skyLight
 
   local function isWater(id)
     return id == waterId or (stillWaterId and id == stillWaterId)
   end
 
   for z = 0, CHUNK_SIZE - 1 do
+    local zOffset = z * CHUNK_SIZE * 256
     for x = 0, CHUNK_SIZE - 1 do
       local index = x + z * CHUNK_SIZE + 1
       local topY, topId
       local waterY = chunk.waterSurface and chunk.waterSurface[index] or nil
+      local blockIndex = x + maxHeight * CHUNK_SIZE + zOffset + 1
       for y = maxHeight, 0, -1 do
-        local id = chunk:getBlock(x, y, z)
+        -- Capture runs for every generated far chunk. Reading the chunk's flat
+        -- arrays directly avoids tens of thousands of Lua method calls here.
+        local id = rawBlocks[blockIndex] or 0
         if id ~= 0 then
           local def = blocks.list[id]
           local props = def and def.properties
           if not waterY and isWater(id) then
             waterY = y - 0.35
           end
-          if not topY and props and props.solid and not props.cross then
+          -- A distant chunk is a terrain height field, not a coarse voxel
+          -- remesh. Folding a leaf or living log into it stretches one tree
+          -- across an entire 2/4/8-block LOD cell.
+          if props and props.solid and not props.cross and not props.leaves and
+              not props.aliveTree then
             topY, topId = y, id
+            -- Any visible water was encountered above this surface while
+            -- scanning downward. Continuing through the whole stone column
+            -- cannot change the result and dominated LOD capture time.
+            break
           end
-          if topY and waterY then break end
         end
+        blockIndex = blockIndex - CHUNK_SIZE
       end
       if topY then
         record.heights[index] = topY + 1.0
         record.blockIds[index] = topId
-        record.skyLight[index] = chunk:getSkyLight(x, math.min(maxHeight, topY + 1), z)
+        local lightY = math.min(maxHeight, topY + 1)
+        local lightIndex = x + lightY * CHUNK_SIZE + zOffset + 1
+        record.skyLight[index] = entry.hasInitialLight == false and 15 or
+          (rawSkyLight[lightIndex] or 0)
       end
       if waterY then record.waterSurface[index] = waterY end
     end
@@ -185,19 +206,30 @@ local function aggregate(record, originX, originZ, step)
   }
 end
 
+local function aggregateGrid(record, step)
+  record.aggregateCache = record.aggregateCache or {}
+  local cached = record.aggregateCache[step]
+  if cached then return cached end
+
+  local gridSize = CHUNK_SIZE / step
+  local cells = {}
+  for gz = 0, gridSize - 1 do
+    for gx = 0, gridSize - 1 do
+      cells[gx + gz * gridSize + 1] = aggregate(record, gx * step, gz * step, step)
+    end
+  end
+  record.aggregateCache[step] = cells
+  return cells
+end
+
 function DistantTerrain.build(record, step, options)
   assert(record and record.source == "generated_chunk", "LOD mesh requires captured chunk data")
   step = math.max(1, math.min(CHUNK_SIZE, math.floor(step or 4)))
   while CHUNK_SIZE % step ~= 0 do step = step - 1 end
   options = options or {}
 
-  local cells = {}
   local gridSize = CHUNK_SIZE / step
-  for gz = 0, gridSize - 1 do
-    for gx = 0, gridSize - 1 do
-      cells[gx + gz * gridSize + 1] = aggregate(record, gx * step, gz * step, step)
-    end
-  end
+  local cells = aggregateGrid(record, step)
 
   local function cellAt(gx, gz)
     if gx < 0 or gx >= gridSize or gz < 0 or gz >= gridSize then
@@ -209,7 +241,7 @@ function DistantTerrain.build(record, step, options)
       if gz >= gridSize then chunkDz, gz = 1, gz - gridSize end
       local neighbourRecord = options.recordAt(chunkDx, chunkDz)
       if not neighbourRecord then return nil end
-      return aggregate(neighbourRecord, gx * step, gz * step, step)
+      return aggregateGrid(neighbourRecord, step)[gx + gz * gridSize + 1]
     end
     return cells[gx + gz * gridSize + 1]
   end
@@ -234,24 +266,48 @@ function DistantTerrain.build(record, step, options)
             appendTerrainQuad(terrainVertices,
               {{x1,neighbour.height,z1},{x1,neighbour.height,z0},{x1,y,z0},{x1,y,z1}},
               {1,0,0}, def, "side", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
+          elseif neighbour and neighbour.height and neighbour.height > y and
+              gx == gridSize - 1 and options.transitionAt and options.transitionAt(1, 0) then
+            local neighbourDef = blocks.list[neighbour.blockId] or def
+            appendTerrainQuad(terrainVertices,
+              {{x1,y,z0},{x1,y,z1},{x1,neighbour.height,z1},{x1,neighbour.height,z0}},
+              {-1,0,0}, neighbourDef, "side", (x0+x1)*0.5, (z0+z1)*0.5, neighbour.light)
           end
           neighbour = cellAt(gx - 1, gz)
           if neighbour and neighbour.height and neighbour.height < y then
             appendTerrainQuad(terrainVertices,
               {{x0,neighbour.height,z0},{x0,neighbour.height,z1},{x0,y,z1},{x0,y,z0}},
               {-1,0,0}, def, "side", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
+          elseif neighbour and neighbour.height and neighbour.height > y and gx == 0 and
+              options.transitionAt and options.transitionAt(-1, 0) then
+            local neighbourDef = blocks.list[neighbour.blockId] or def
+            appendTerrainQuad(terrainVertices,
+              {{x0,y,z1},{x0,y,z0},{x0,neighbour.height,z0},{x0,neighbour.height,z1}},
+              {1,0,0}, neighbourDef, "side", (x0+x1)*0.5, (z0+z1)*0.5, neighbour.light)
           end
           neighbour = cellAt(gx, gz + 1)
           if neighbour and neighbour.height and neighbour.height < y then
             appendTerrainQuad(terrainVertices,
               {{x0,neighbour.height,z1},{x1,neighbour.height,z1},{x1,y,z1},{x0,y,z1}},
               {0,0,1}, def, "front", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
+          elseif neighbour and neighbour.height and neighbour.height > y and
+              gz == gridSize - 1 and options.transitionAt and options.transitionAt(0, 1) then
+            local neighbourDef = blocks.list[neighbour.blockId] or def
+            appendTerrainQuad(terrainVertices,
+              {{x1,y,z1},{x0,y,z1},{x0,neighbour.height,z1},{x1,neighbour.height,z1}},
+              {0,0,-1}, neighbourDef, "back", (x0+x1)*0.5, (z0+z1)*0.5, neighbour.light)
           end
           neighbour = cellAt(gx, gz - 1)
           if neighbour and neighbour.height and neighbour.height < y then
             appendTerrainQuad(terrainVertices,
               {{x1,neighbour.height,z0},{x0,neighbour.height,z0},{x0,y,z0},{x1,y,z0}},
               {0,0,-1}, def, "back", (x0+x1)*0.5, (z0+z1)*0.5, cell.light)
+          elseif neighbour and neighbour.height and neighbour.height > y and gz == 0 and
+              options.transitionAt and options.transitionAt(0, -1) then
+            local neighbourDef = blocks.list[neighbour.blockId] or def
+            appendTerrainQuad(terrainVertices,
+              {{x0,y,z0},{x1,y,z0},{x1,neighbour.height,z0},{x0,neighbour.height,z0}},
+              {0,0,1}, neighbourDef, "front", (x0+x1)*0.5, (z0+z1)*0.5, neighbour.light)
           end
           -- Missing neighbouring records are left open. Filling that void with
           -- a skirt or floor would reintroduce the fake under-mesh this renderer
@@ -294,7 +350,8 @@ function DistantTerrain.new(options)
   self.queue = {}
   self.queueHead = 1
   self.queued = {}
-  self.active = nil
+  self.active = {}
+  self.activeIndex = 1
   return self
 end
 
@@ -304,12 +361,18 @@ function DistantTerrain:clear()
   end
   self.records, self.queue, self.queued = {}, {}, {}
   self.queueHead = 1
-  self.active = nil
+  self.active = {}
+  self.activeIndex = 1
+  self.radiusDirty = false
   self.centerChunkX, self.centerChunkZ, self.innerRadius = nil, nil, nil
 end
 
 function DistantTerrain:setRadius(radius)
-  self.radius = math.max(1, math.floor(tonumber(radius) or self.radius))
+  local replacement = math.max(1, math.floor(tonumber(radius) or self.radius))
+  if replacement == self.radius then return false end
+  self.radius = replacement
+  self.radiusDirty = true
+  return true
 end
 
 function DistantTerrain:isPending(chunkX, chunkZ)
@@ -322,13 +385,35 @@ local function lodStep(distance, innerRadius)
   return 8
 end
 
-function DistantTerrain:_replaceMesh(record, step)
+function DistantTerrain:_replaceMesh(record, step, world)
   if record.mesh and record.meshStep == step and not record.meshDirty then return false end
   local vertices, waterVertices, bounds = DistantTerrain.build(record, step, {
     maxHeight = self.maxHeight,
     waveDataAt = self.waveDataAt,
     recordAt = function(dx, dz)
-      return self.records[chunkKey(record.chunkX + dx, record.chunkZ + dz)]
+      local key = chunkKey(record.chunkX + dx, record.chunkZ + dz)
+      local neighbour = self.records[key]
+      if neighbour or not world then return neighbour end
+
+      -- The inner LOD boundary touches a real chunk which is intentionally not
+      -- rendered by this manager. Capture its exact generated columns on
+      -- demand so the far side wall meets the real surface instead of being
+      -- left open. The compact record is reusable if that chunk later moves
+      -- into the far ring.
+      local entry = world.chunks and world.chunks[key]
+      if entry and entry.chunk then neighbour = self:_capture(entry) end
+      return neighbour
+    end,
+    transitionAt = function(dx, dz)
+      if not world or not world.chunks then return false end
+      local chunkX, chunkZ = record.chunkX + dx, record.chunkZ + dz
+      local entry = world.chunks[chunkKey(chunkX, chunkZ)]
+      if not entry then return false end
+      if self.centerChunkX and self.centerChunkZ and self.innerRadius then
+        return math.max(math.abs(chunkX - self.centerChunkX),
+          math.abs(chunkZ - self.centerChunkZ)) <= self.innerRadius
+      end
+      return entry.hasMesh == true
     end
   })
   local replacement = self.upload(record, vertices, waterVertices, bounds, step)
@@ -363,8 +448,9 @@ end
 function DistantTerrain:_refreshQueue(centerChunkX, centerChunkZ, innerRadius)
   self.queue, self.queued = {}, {}
   self.queueHead = 1
-  if self.active then
-    self.queued[chunkKey(self.active.chunkX, self.active.chunkZ)] = true
+  for i = 1, #self.active do
+    local item = self.active[i]
+    self.queued[chunkKey(item.chunkX, item.chunkZ)] = true
   end
   self.nextRing = innerRadius + 1
   self.centerChunkX, self.centerChunkZ, self.innerRadius = centerChunkX, centerChunkZ, innerRadius
@@ -433,15 +519,19 @@ function DistantTerrain:_fillQueue(nearEntries)
   end
 end
 
-function DistantTerrain:_prune(centerChunkX, centerChunkZ, innerRadius)
-  local outerRadius = math.max(self.radius, innerRadius) + 2
-  if self.active and (math.abs(self.active.chunkX - centerChunkX) > outerRadius or
-      math.abs(self.active.chunkZ - centerChunkZ) > outerRadius) then
-    self.queued[chunkKey(self.active.chunkX, self.active.chunkZ)] = nil
-    -- A not-yet-completed chunk job has not installed an entry in the world;
-    -- abandoning its coroutine is therefore safe when it leaves the horizon.
-    self.active = nil
+function DistantTerrain:_prune(centerChunkX, centerChunkZ, innerRadius, exactHorizon)
+  local outerRadius = math.max(self.radius, innerRadius) + (exactHorizon and 0 or 2)
+  for i = #self.active, 1, -1 do
+    local item = self.active[i]
+    if math.abs(item.chunkX - centerChunkX) > outerRadius or
+        math.abs(item.chunkZ - centerChunkZ) > outerRadius then
+      self.queued[chunkKey(item.chunkX, item.chunkZ)] = nil
+      -- A not-yet-completed chunk job has not installed an entry in the world;
+      -- abandoning its coroutine is therefore safe when it leaves the horizon.
+      table.remove(self.active, i)
+    end
   end
+  if self.activeIndex > #self.active then self.activeIndex = 1 end
   for key, record in pairs(self.records) do
     if math.abs(record.chunkX - centerChunkX) > outerRadius or
         math.abs(record.chunkZ - centerChunkZ) > outerRadius then
@@ -458,8 +548,9 @@ function DistantTerrain:update(world, terrainMeshes, nearEntries, x, z)
   local changedCenter = centerChunkX ~= self.centerChunkX or centerChunkZ ~= self.centerChunkZ or
     innerRadius ~= self.innerRadius or self.queuedRadius ~= self.radius
   if changedCenter then
-    self:_prune(centerChunkX, centerChunkZ, innerRadius)
+    self:_prune(centerChunkX, centerChunkZ, innerRadius, self.radiusDirty)
     self:_refreshQueue(centerChunkX, centerChunkZ, innerRadius)
+    self.radiusDirty = false
   end
   self:_fillQueue(nearEntries)
 
@@ -476,7 +567,7 @@ function DistantTerrain:update(world, terrainMeshes, nearEntries, x, z)
       if captured then record.meshDirty = true end
       if built < self.buildBudget and (not record.mesh or record.meshDirty or
           record.meshStep ~= lodStep(distance, innerRadius)) then
-        if self:_replaceMesh(record, lodStep(distance, innerRadius)) then built = built + 1 end
+        if self:_replaceMesh(record, lodStep(distance, innerRadius), world) then built = built + 1 end
       end
       if built >= self.buildBudget or self.now() >= deadline then break end
     end
@@ -490,7 +581,7 @@ function DistantTerrain:update(world, terrainMeshes, nearEntries, x, z)
       if distance > innerRadius and distance <= math.max(self.radius, innerRadius) then
         local step = lodStep(distance, innerRadius)
         if (not record.mesh or record.meshStep ~= step or record.meshDirty) and
-            self:_replaceMesh(record, step) then
+            self:_replaceMesh(record, step, world) then
           built = built + 1
           if built >= self.buildBudget or self.now() >= deadline then break end
         end
@@ -501,18 +592,32 @@ function DistantTerrain:update(world, terrainMeshes, nearEntries, x, z)
   -- If a far-generation job becomes a near chunk while the player moves, hand
   -- that exact job to the normal streamer. It will finish as a full chunk and
   -- cannot race a duplicate generation request.
-  if self.active then
-    local distance = math.max(math.abs(self.active.chunkX - centerChunkX), math.abs(self.active.chunkZ - centerChunkZ))
+  for i = #self.active, 1, -1 do
+    local item = self.active[i]
+    local distance = math.max(math.abs(item.chunkX - centerChunkX), math.abs(item.chunkZ - centerChunkZ))
     if distance <= innerRadius then
-      nearEntries[#nearEntries + 1] = self.active
-      self.queued[chunkKey(self.active.chunkX, self.active.chunkZ)] = nil
-      self.active = nil
+      if world.requireChunkLighting then item = world:requireChunkLighting(item) end
+      nearEntries[#nearEntries + 1] = item
+      self.queued[chunkKey(item.chunkX, item.chunkZ)] = nil
+      table.remove(self.active, i)
     end
   end
+  if self.activeIndex > #self.active then self.activeIndex = 1 end
 
   local steps = 0
-  while steps < self.generationSteps and self.now() < deadline do
-    if not self.active then
+  local generationWidth = 1
+  if world.chunkWorkerCount then
+    local workers = math.max(1, world:chunkWorkerCount())
+    -- Leave a process slot available for a newly requested collision chunk;
+    -- active far jobs cannot be pre-empted once Windows has launched them.
+    generationWidth = math.max(1, workers - 1)
+  end
+
+  -- Far terrain used to keep only one generation job alive, leaving every
+  -- other worker idle. Fill the same pool that near chunks use, then poll it
+  -- round-robin under the existing frame/step budget.
+  local function fillActive()
+    while #self.active < generationWidth do
       local coord = self.queue[self.queueHead]
       if coord then self.queue[self.queueHead] = false; self.queueHead = self.queueHead + 1 end
       while coord and self.records[chunkKey(coord.chunkX, coord.chunkZ)] do
@@ -523,18 +628,29 @@ function DistantTerrain:update(world, terrainMeshes, nearEntries, x, z)
       if not coord then break end
       local key = chunkKey(coord.chunkX, coord.chunkZ)
       local existing = world.chunks[key]
-      self.active = existing or world:createChunkJob(coord.chunkX, coord.chunkZ)
-      self.active.chunkX, self.active.chunkZ = coord.chunkX, coord.chunkZ
+      local item = existing or world:createChunkJob(coord.chunkX, coord.chunkZ, {
+        deferLighting = true
+      })
+      item.chunkX, item.chunkZ = coord.chunkX, coord.chunkZ
+      self.active[#self.active + 1] = item
     end
+  end
 
-    local item = self.active
+  fillActive()
+  while steps < self.generationSteps and self.now() < deadline do
+    if #self.active == 0 then break end
+    if self.activeIndex > #self.active then self.activeIndex = 1 end
+    local index = self.activeIndex
+    local item = self.active[index]
     if item.thread and not item.entry then
       local ok, err = coroutine.resume(item.thread)
       if not ok then error(err) end
       steps = steps + 1
       if coroutine.status(item.thread) == "dead" and not item.entry then
         self.queued[chunkKey(item.chunkX, item.chunkZ)] = nil
-        self.active = nil
+        table.remove(self.active, index)
+      else
+        self.activeIndex = index + 1
       end
     else
       local entry = item.entry or item
@@ -545,7 +661,7 @@ function DistantTerrain:update(world, terrainMeshes, nearEntries, x, z)
       else
         local record = self:_capture(entry)
         if built < self.buildBudget then
-          self:_replaceMesh(record, lodStep(distance, innerRadius))
+          self:_replaceMesh(record, lodStep(distance, innerRadius), world)
           built = built + 1
         end
         -- The compact LOD record is now authoritative for far rendering. Keep
@@ -559,17 +675,20 @@ function DistantTerrain:update(world, terrainMeshes, nearEntries, x, z)
         end
       end
       self.queued[key] = nil
-      self.active = nil
+      table.remove(self.active, index)
       steps = steps + 1
     end
+    if self.activeIndex > #self.active then self.activeIndex = 1 end
+    fillActive()
   end
 
-  local queued = math.max(0, #self.queue - self.queueHead + 1) + (self.active and 1 or 0)
+  local queued = math.max(0, #self.queue - self.queueHead + 1) + #self.active
   local total = math.max(0, (self.radius * 2 + 1) ^ 2 - (innerRadius * 2 + 1) ^ 2)
   return {
     built = built,
     generationSteps = steps,
     queued = queued,
+    active = #self.active,
     total = total,
     scheduledThrough = math.min(self.radius, (self.nextRing or innerRadius + 1) - 1),
     radius = self.radius

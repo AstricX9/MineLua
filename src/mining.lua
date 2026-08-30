@@ -72,13 +72,13 @@ end
 -- Chopping is not mining. A real axe lands a few heavy blows spaced about a
 -- swing apart rather than sanding the log away, so wood costs a whole number of
 -- swings and the crack overlay jumps a step per blow.
--- One blow per swing, so the cadence is the swing itself. Reading it from the
--- animation keeps the crack overlay and the arm in step; two constants would
--- drift apart the first time either is tuned.
-Mining.CHOP_INTERVAL = heldItem.CHOP_SECONDS
+-- One input now connects on both the outward and return takes. Treat half of
+-- the paired animation as one blow's progress quantum so the crack overlay and
+-- required-hit bookkeeping stay in step with those two impact frames.
+Mining.CHOP_INTERVAL = heldItem.CHOP_SECONDS * 0.5
 
 -- Hardness removed per blow. Tiers buy efficiency, not speed: the swing takes
--- the same two seconds whatever you are holding, but a better head bites deeper,
+-- the same authored time whatever you are holding, but a better head bites deeper,
 -- and a top-tier axe fells anything wooden in a single stroke.
 local CHOP_POWER = {0.7, 1.1, 2.2, 4.0}
 

@@ -223,7 +223,8 @@ function saves.createWorld(options)
       LevelName = worldName,
       GameType = gameTypeForMode(options.gameMode),
       MapFeatures = true,
-      generatorName = options.generatorType == "superflat" and "flat" or "default",
+      generatorName = (options.generatorType == "superflat" or options.generatorType == "showcase") and
+        "flat" or "default",
       generatorVersion = 1,
       LastPlayed = now * 1000,
       RandomSeed = options.seed or 1,
@@ -385,4 +386,10 @@ function saves.folderForWorldName(worldName)
   return SAVE_ROOT .. "/" .. sanitizeFolderName(worldName)
 end
 
-return saves
+-- Exposed so other systems (screenshots, exports) can drop files beside the
+-- saves without each one redeclaring the platform mkdir.
+function saves.ensureDirectory(path)
+  return ensureDir(path)
+end
+
+return saves

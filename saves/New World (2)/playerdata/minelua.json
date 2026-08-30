@@ -1,0 +1,144 @@
+{
+  "format": "minelua-player",
+  "savedAt": 1788069873000,
+  "state": {
+    "camera": {
+      "acceleration": 55,
+      "airAcceleration": 14,
+      "airFriction": 2,
+      "allowFlight": false,
+      "bobPhase": 1238.5426662179,
+      "bodyRadius": 0.3,
+      "coyoteTime": 0.1,
+      "coyoteTimer": 0.1,
+      "crouchEyeHeight": 1.24,
+      "crouchSpeed": 2.4,
+      "crouching": false,
+      "eyeHeight": 1.62,
+      "firstMouse": false,
+      "flightToggleWasDown": false,
+      "flyAcceleration": 24,
+      "flyFriction": 18,
+      "flySpeed": 9.5,
+      "flying": false,
+      "fovOffset": 7.9503345061374e-120,
+      "gravity": 15.5,
+      "groundFriction": 46,
+      "groundSnap": 0.36,
+      "grounded": true,
+      "invertMouse": false,
+      "jumpBuffer": 0,
+      "jumpBufferTime": 0.12,
+      "jumpSpeed": 6.6,
+      "jumpWasDown": false,
+      "landingViewOffset": -1.1431733066214e-13,
+      "lastX": -646,
+      "lastY": 486,
+      "mouseSensitivity": 0.085,
+      "mouseSmoothing": 42,
+      "mouseTurnVelocity": -0.21993726494204,
+      "moveInputX": 0,
+      "moveInputZ": 0,
+      "pitch": -13.883298912379,
+      "position": [
+        64.080221176471,
+        72.62,
+        6.1154422241827
+      ],
+      "reach": 6,
+      "sprintSpeed": 7.2,
+      "sprinting": false,
+      "standEyeHeight": 1.62,
+      "stepHeight": 0.6,
+      "stepViewOffset": 0,
+      "swimAcceleration": 18,
+      "swimSinkSpeed": 0.65,
+      "swimUpSpeed": 4.6,
+      "targetPitch": -13.883303458975,
+      "targetYaw": -1852.7596165339,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "velocityY": 0,
+      "viewBobPitch": 1.1291910948254e-11,
+      "viewBobX": 1.7637232908706e-14,
+      "viewBobY": -2.9160213052534e-15,
+      "viewBobbingEnabled": true,
+      "viewRoll": 0.011527593436826,
+      "walkSpeed": 5.1,
+      "yaw": -1852.759615132
+    },
+    "inventory": {
+      "crafting": {
+      },
+      "craftingGridSize": 2,
+      "furnace": {
+        "burnTime": 0,
+        "burnTotal": 0,
+        "cookTime": 0,
+        "cookTotal": 10
+      },
+      "gameMode": "survival",
+      "recipeHint": "Recipe crafted!",
+      "search": "",
+      "selected": 3,
+      "slots": {
+        "1": {
+          "count": 2,
+          "item": "flint_hatchet"
+        },
+        "10": {
+          "count": 1,
+          "item": "double_grass_upper"
+        },
+        "13": {
+          "count": 3,
+          "item": "stick"
+        },
+        "15": {
+          "count": 1,
+          "item": "oak_planks"
+        },
+        "16": {
+          "count": 45,
+          "item": "oak_log"
+        },
+        "2": {
+          "count": 9,
+          "item": "birch_log"
+        },
+        "3": {
+          "count": 1,
+          "item": "wood_pickaxe"
+        },
+        "4": {
+          "count": 14,
+          "item": "tall_grass"
+        },
+        "5": {
+          "count": 3,
+          "item": "oxeye_daisy"
+        },
+        "6": {
+          "count": 2,
+          "item": "dirt"
+        },
+        "7": {
+          "count": 30,
+          "item": "cobblestone"
+        },
+        "8": {
+          "count": 1,
+          "item": "flint"
+        },
+        "9": {
+          "count": 33,
+          "item": "birch_leaves"
+        }
+      }
+    }
+  },
+  "version": 1
+}

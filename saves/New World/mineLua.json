@@ -1,11 +1,12 @@
 {
   "allowCheats": false,
   "bonusChest": false,
-  "gameMode": "survival",
+  "gameMode": "creative",
   "generateStructures": true,
   "generatorType": "default",
-  "lastPlayed": 1787573727000,
+  "lastPlayed": 1787822241000,
   "saveFormat": "minecraft-like",
-  "seed": 750792704,
+  "seed": 732218880,
+  "worldId": "earth",
   "worldName": "New World"
 }

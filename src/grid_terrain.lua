@@ -140,7 +140,8 @@ end
 -- this chunk, so one never gets sliced in half at a boundary.
 local function decorateChunk(chunk, grid, face, chunkColumn, chunkRow, chunkLayer, planet, samples)
   local grassId = blocks.tall_grass
-  local logId = blocks.oak_log or blocks.spruce_log
+  local logId = blocks.oak_log_alive or blocks.oak_log or
+    blocks.spruce_log_alive or blocks.spruce_log
   local leavesId = blocks.oak_leaves or blocks.spruce_leaves
   if not grassId and not (logId and leavesId) then return end
   local airId = blocks.air or 0

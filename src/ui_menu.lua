@@ -1,8 +1,9 @@
 local menu = {}
 local worldProfiles = require("world_profiles")
+local renderDistance = require("render_distance")
 
-menu.RENDER_DISTANCE_MIN = 4
-menu.RENDER_DISTANCE_MAX = 128
+menu.RENDER_DISTANCE_MIN = renderDistance.MIN_CHUNKS
+menu.RENDER_DISTANCE_MAX = renderDistance.MAX_CHUNKS
 
 local function onOff(value)
   return value == false and "OFF" or "ON"
@@ -17,27 +18,74 @@ local function bindingLabel(menuState, name, fallback)
   return bindings[name] or fallback
 end
 
+function menu.settingsLayout(logicalWidth, logicalHeight)
+  local navX = math.max(16, math.floor(logicalWidth * 0.05))
+  local navW = math.min(104, math.max(82, math.floor(logicalWidth * 0.24)))
+  local contentX = navX + navW + 12
+  return {
+    navX = navX,
+    navW = navW,
+    contentX = contentX,
+    contentW = logicalWidth - contentX - 20,
+    doneY = logicalHeight - 40
+  }
+end
+
+local SETTINGS_PAGES = {
+  {key = "general", id = "settings_general", label = "General"},
+  {key = "visuals", id = "settings_video", label = "Visuals"},
+  {key = "controls", id = "settings_controls", label = "Controls"},
+  {key = "resources", id = "settings_resources", label = "Resources"}
+}
+
+local function settingsButtons(logicalWidth, logicalHeight, active)
+  local layout = menu.settingsLayout(logicalWidth, logicalHeight)
+  local buttons = {}
+  for index = 1, #SETTINGS_PAGES do
+    local page = SETTINGS_PAGES[index]
+    local selected = page.key == active
+    buttons[#buttons + 1] = {
+      id = selected and "noop" or page.id,
+      label = page.label,
+      x = layout.navX,
+      y = 52 + (index - 1) * 26,
+      w = layout.navW,
+      h = 22,
+      style = selected and "nav_active" or "nav"
+    }
+  end
+  buttons[#buttons + 1] = {
+    id = "settings_done", label = "Done", x = layout.navX, y = layout.doneY,
+    w = layout.navW, h = 22, style = "primary"
+  }
+  return buttons, layout
+end
+
 function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
   menuState = menuState or {}
   local cx = math.floor(logicalWidth * 0.5)
 
   if screen == "main" then
-    local y = math.floor(logicalHeight / 4 + 48)
+    local panelWidth = math.min(144, math.max(128, math.floor(logicalWidth * 0.36)))
+    local x = logicalWidth - panelWidth - 16
+    local y = math.max(72, math.floor(logicalHeight * 0.32))
     return {
-      {id = "singleplayer", label = "Singleplayer", x = cx - 100, y = y, w = 200, h = 20},
-      {id = "multiplayer", label = "Multiplayer", x = cx - 100, y = y + 24, w = 200, h = 20},
-      {id = "texture_packs", label = "Texture Packs", x = cx - 100, y = y + 48, w = 200, h = 20},
-      {id = "options", label = "Options...", x = cx - 100, y = y + 84, w = 98, h = 20},
-      {id = "quit", label = "Quit Game", x = cx + 2, y = y + 84, w = 98, h = 20}
+      {id = "singleplayer", label = "Explore Worlds", x = x, y = y, w = panelWidth, h = 22, style = "primary"},
+      {id = "create_world", label = "Create a World", x = x, y = y + 27, w = panelWidth, h = 22},
+      {id = "multiplayer", label = "Online Play", x = x, y = y + 54, w = panelWidth, h = 22},
+      {id = "texture_packs", label = "Resource Library", x = x, y = y + 81, w = panelWidth, h = 22},
+      {id = "options", label = "Settings", x = x, y = y + 116, w = math.floor((panelWidth - 5) * 0.5), h = 20},
+      {id = "quit", label = "Exit", x = x + math.ceil((panelWidth + 5) * 0.5), y = y + 116,
+        w = math.floor((panelWidth - 5) * 0.5), h = 20, style = "quiet"}
     }
   elseif screen == "pause" then
     local y = math.floor(logicalHeight / 4 + 24)
     return {
-      {id = "back_to_game", label = "Back to game", x = cx - 100, y = y, w = 200, h = 20},
-      {id = "achievements", label = "Achievements", x = cx - 100, y = y + 24, w = 98, h = 20},
-      {id = "stats", label = "Stats", x = cx + 2, y = y + 24, w = 98, h = 20},
-      {id = "options", label = "Options...", x = cx - 100, y = y + 72, w = 200, h = 20},
-      {id = "quit_to_title", label = "Quit to title", x = cx - 100, y = y + 96, w = 200, h = 20}
+      {id = "back_to_game", label = "Return to World", x = cx - 100, y = y, w = 200, h = 22, style = "primary"},
+      {id = "achievements", label = "Milestones", x = cx - 100, y = y + 28, w = 98, h = 20},
+      {id = "stats", label = "Field Record", x = cx + 2, y = y + 28, w = 98, h = 20},
+      {id = "options", label = "Settings", x = cx - 100, y = y + 76, w = 200, h = 20},
+      {id = "quit_to_title", label = "Leave World", x = cx - 100, y = y + 102, w = 200, h = 20, style = "quiet"}
     }
   elseif screen == "select_world" then
     local worlds = menuState.savedWorlds or {}
@@ -60,30 +108,31 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
       buttons[#buttons + 1] = {id = "previous_world_page", label = "<", x = cx - 184, y = listTop, w = 20, h = 20, enabled = page > 1}
       buttons[#buttons + 1] = {id = "next_world_page", label = ">", x = cx + 164, y = listTop, w = 20, h = 20, enabled = page < pageCount}
     end
-    buttons[#buttons + 1] = {id = "play_selected_world", label = "Play Selected World", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil}
-    buttons[#buttons + 1] = {id = "create_world", label = "Create New World", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
+    buttons[#buttons + 1] = {id = "play_selected_world", label = "Enter Selected World", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil, style = "primary"}
+    buttons[#buttons + 1] = {id = "create_world", label = "Create a World", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
     buttons[#buttons + 1] = {id = "delete_selected_world", label = "Delete", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil}
     buttons[#buttons + 1] = {id = "back_main", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20}
     return buttons
   elseif screen == "confirm_delete_world" then
     return {
-      {id = "confirm_delete_world", label = "Delete", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20},
+      {id = "confirm_delete_world", label = "Delete Forever", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20, style = "danger"},
       {id = "cancel_delete_world", label = "Cancel", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
     }
   elseif screen == "create_world" then
     local mode = menuState.worldGameMode or "survival"
     local generator = menuState.worldGeneratorType or "default"
-    local modeLabel = mode == "creative" and "Game Mode: Creative" or "Game Mode: Survival"
-    local generatorLabel = generator == "superflat" and "Terrain: Superflat" or "Terrain: Default"
+    local modeLabel = mode == "creative" and "Play Style: Creative" or "Play Style: Survival"
+    local generatorNames = {default = "Natural", superflat = "Superflat", showcase = "Texture Showcase"}
+    local generatorLabel = "Terrain Form: " .. (generatorNames[generator] or "Natural")
     local profile = worldProfiles.get(menuState.worldId)
     local worldLabel = "World: " .. profile.name
     local buttons = {
-      {id = "start_world", label = "Create New World", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20},
+      {id = "start_world", label = "Begin This World", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20, style = "primary"},
       {id = "back_select", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20}
     }
 
     if menuState.moreWorldOptions then
-      buttons[#buttons + 1] = {id = "toggle_structures", label = "Generate Structures: " .. onOff(menuState.generateStructures), x = cx - 155, y = 100, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_structures", label = "Settlements: " .. onOff(menuState.generateStructures), x = cx - 155, y = 100, w = 150, h = 20}
       buttons[#buttons + 1] = {id = "toggle_generator", label = generatorLabel, x = cx + 5, y = 100, w = 150, h = 20}
       buttons[#buttons + 1] = {id = "cycle_world", label = worldLabel, x = cx - 100, y = 124, w = 200, h = 20}
       buttons[#buttons + 1] = {id = "toggle_cheats", label = "Allow Cheats: " .. onOff(menuState.allowCheats), x = cx - 155, y = 148, w = 150, h = 20}
@@ -92,64 +141,64 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
     else
       buttons[#buttons + 1] = {id = mode == "creative" and "mode_survival" or "mode_creative", label = modeLabel, x = cx - 100, y = 100, w = 200, h = 20}
       buttons[#buttons + 1] = {id = "cycle_world", label = worldLabel, x = cx - 100, y = 128, w = 200, h = 20}
-      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "More World Options...", x = cx - 100, y = 164, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "World Details", x = cx - 100, y = 164, w = 200, h = 20}
     end
 
     return buttons
   elseif screen == "options" then
-    local y0 = math.floor(logicalHeight / 6)
-    return {
-      {id = "cycle_music", label = "Music: " .. percent(menuState.musicVolume), x = cx - 155, y = y0, w = 150, h = 20},
-      {id = "cycle_sound", label = "Sound: " .. percent(menuState.soundVolume), x = cx + 5, y = y0, w = 150, h = 20},
-      {id = "toggle_invert_mouse", label = "Invert Mouse: " .. onOff(menuState.invertMouse), x = cx - 155, y = y0 + 24, w = 150, h = 20},
-      {id = "cycle_sensitivity", label = "Sensitivity: " .. percent(menuState.sensitivity), x = cx + 5, y = y0 + 24, w = 150, h = 20},
-      {id = "cycle_fov", label = "FOV: " .. tostring(menuState.fovDegrees or 70), x = cx - 155, y = y0 + 48, w = 150, h = 20},
-      {id = "cycle_difficulty", label = "Difficulty: " .. (menuState.difficulty or "Normal"), x = cx + 5, y = y0 + 48, w = 150, h = 20},
-      {id = "video", label = "Video Settings...", x = cx - 100, y = y0 + 108, w = 200, h = 20},
-      {id = "controls", label = "Controls...", x = cx - 100, y = y0 + 132, w = 200, h = 20},
-      {id = "done_options", label = "Done", x = cx - 100, y = y0 + 168, w = 200, h = 20}
-    }
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "general")
+    buttons[#buttons + 1] = {id = "cycle_music", kind = "setting", label = "Music", valueLabel = percent(menuState.musicVolume), x = layout.contentX, y = 56, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_sound", kind = "setting", label = "World Sound", valueLabel = percent(menuState.soundVolume), x = layout.contentX, y = 82, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_sensitivity", kind = "setting", label = "Look Speed", valueLabel = percent(menuState.sensitivity), x = layout.contentX, y = 122, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_difficulty", kind = "setting", label = "World Threat", valueLabel = menuState.difficulty or "Normal", x = layout.contentX, y = 148, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_invert_mouse", kind = "setting", label = "Invert Look", valueLabel = onOff(menuState.invertMouse), x = layout.contentX, y = 174, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_fov", kind = "setting", label = "View Angle", valueLabel = tostring(menuState.fovDegrees or 70), x = layout.contentX, y = 200, w = layout.contentW, h = 22}
+    return buttons
   elseif screen == "video" then
-    local y0 = math.floor(logicalHeight / 6)
     local guiScale = menuState.guiScale == 0 and "Auto" or tostring(menuState.guiScale or "Auto")
-    local renderDistance = math.max(menu.RENDER_DISTANCE_MIN,
-      math.min(menu.RENDER_DISTANCE_MAX, math.floor(tonumber(menuState.renderDistance) or 8)))
-    return {
-      {id = "toggle_graphics", label = "Graphics: " .. (menuState.graphicsMode or "Fancy"), x = cx - 155, y = y0, w = 150, h = 20},
-      {id = "render_distance", kind = "slider", label = "Render Distance: " .. tostring(renderDistance),
-        value = renderDistance, minValue = menu.RENDER_DISTANCE_MIN, maxValue = menu.RENDER_DISTANCE_MAX,
-        x = cx + 5, y = y0, w = 150, h = 20},
-      {id = "toggle_smooth_lighting", label = "Smooth Lighting: " .. onOff(menuState.smoothLighting), x = cx - 155, y = y0 + 24, w = 150, h = 20},
-      {id = "toggle_vsync", label = "VSync: " .. onOff(menuState.vsync), x = cx + 5, y = y0 + 24, w = 150, h = 20},
-      {id = "toggle_anaglyph", label = "3D Anaglyph: " .. onOff(menuState.anaglyph), x = cx - 155, y = y0 + 48, w = 150, h = 20},
-      {id = "toggle_view_bobbing", label = "View Bobbing: " .. onOff(menuState.viewBobbing), x = cx + 5, y = y0 + 48, w = 150, h = 20},
-      {id = "cycle_gui_scale", label = "GUI Scale: " .. guiScale, x = cx - 155, y = y0 + 72, w = 150, h = 20},
-      {id = "toggle_fullscreen", label = "Fullscreen: " .. onOff(menuState.fullscreen), x = cx + 5, y = y0 + 72, w = 150, h = 20},
-      {id = "cycle_brightness", label = "Brightness: " .. percent(menuState.brightness), x = cx - 155, y = y0 + 96, w = 150, h = 20},
-      {id = "toggle_clouds", label = "Clouds: " .. onOff(menuState.clouds), x = cx + 5, y = y0 + 96, w = 150, h = 20},
-      {id = "toggle_bloom", label = "Bloom: " .. onOff(menuState.bloom), x = cx - 155, y = y0 + 120, w = 150, h = 20},
-      {id = "cycle_particles", label = "Particles: " .. (menuState.particles or "All"), x = cx + 5, y = y0 + 120, w = 150, h = 20},
-      {id = "done_child", label = "Done", x = cx - 100, y = y0 + 168, w = 200, h = 20}
-    }
+    local selectedRenderDistance = renderDistance.clamp(menuState.renderDistance, 8)
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "visuals")
+    local gap = 6
+    local columnW = math.floor((layout.contentW - gap) * 0.5)
+    local left, right = layout.contentX, layout.contentX + columnW + gap
+    buttons[#buttons + 1] = {id = "toggle_graphics", kind = "setting", label = "Detail", valueLabel = menuState.graphicsMode or "Fancy", x = left, y = 56, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "render_distance", kind = "slider", presentation = "setting", label = "Horizon", valueLabel = tostring(selectedRenderDistance) .. " ch", value = selectedRenderDistance, minValue = menu.RENDER_DISTANCE_MIN, maxValue = menu.RENDER_DISTANCE_MAX, x = right, y = 56, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_smooth_lighting", kind = "setting", label = "Smooth Light", valueLabel = onOff(menuState.smoothLighting), x = left, y = 96, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_vsync", kind = "setting", label = "VSync", valueLabel = onOff(menuState.vsync), x = right, y = 96, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_brightness", kind = "setting", label = "Brightness", valueLabel = percent(menuState.brightness), x = left, y = 122, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_clouds", kind = "setting", label = "Clouds", valueLabel = onOff(menuState.clouds), x = right, y = 122, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_bloom", kind = "setting", label = "Sky Bloom", valueLabel = onOff(menuState.bloom), x = left, y = 148, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_particles", kind = "setting", label = "Particles", valueLabel = menuState.particles or "All", x = right, y = 148, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_anaglyph", kind = "setting", label = "3D Anaglyph", valueLabel = onOff(menuState.anaglyph), x = left, y = 180, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_view_bobbing", kind = "setting", label = "View Motion", valueLabel = onOff(menuState.viewBobbing), x = right, y = 180, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_gui_scale", kind = "setting", label = "UI Scale", valueLabel = guiScale, x = left, y = 204, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_fullscreen", kind = "setting", label = "Fullscreen", valueLabel = onOff(menuState.fullscreen), x = right, y = 204, w = columnW, h = 22}
+    return buttons
   elseif screen == "controls" then
-    local y0 = math.floor(logicalHeight / 6)
-    return {
-      {id = "bind_attack", label = bindingLabel(menuState, "attack", "MOUSE1"), x = cx - 155, y = y0, w = 70, h = 20},
-      {id = "bind_forward", label = bindingLabel(menuState, "forward", "W"), x = cx - 155, y = y0 + 24, w = 70, h = 20},
-      {id = "bind_back", label = bindingLabel(menuState, "back", "S"), x = cx - 155, y = y0 + 48, w = 70, h = 20},
-      {id = "bind_jump", label = bindingLabel(menuState, "jump", "SPACE"), x = cx - 155, y = y0 + 72, w = 70, h = 20},
-      {id = "bind_drop", label = bindingLabel(menuState, "drop", "Q"), x = cx - 155, y = y0 + 96, w = 70, h = 20},
-      {id = "unavailable_chat", label = "N/A", x = cx - 155, y = y0 + 120, w = 70, h = 20, enabled = false},
-      {id = "bind_pick", label = bindingLabel(menuState, "pick", "MOUSE3"), x = cx - 155, y = y0 + 144, w = 70, h = 20},
-      {id = "bind_use", label = bindingLabel(menuState, "use", "MOUSE2"), x = cx + 5, y = y0, w = 70, h = 20},
-      {id = "bind_left", label = bindingLabel(menuState, "left", "A"), x = cx + 5, y = y0 + 24, w = 70, h = 20},
-      {id = "bind_right", label = bindingLabel(menuState, "right", "D"), x = cx + 5, y = y0 + 48, w = 70, h = 20},
-      {id = "bind_sneak", label = bindingLabel(menuState, "sneak", "CTRL"), x = cx + 5, y = y0 + 72, w = 70, h = 20},
-      {id = "bind_inventory", label = bindingLabel(menuState, "inventory", "E"), x = cx + 5, y = y0 + 96, w = 70, h = 20},
-      {id = "unavailable_players", label = "N/A", x = cx + 5, y = y0 + 120, w = 70, h = 20, enabled = false},
-      {id = "done_child", label = "Done", x = cx - 100, y = y0 + 168, w = 200, h = 20}
-    }
-  elseif screen == "multiplayer" or screen == "texture_packs" then
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "controls")
+    local gap = 6
+    local columnW = math.floor((layout.contentW - gap) * 0.5)
+    local left, right = layout.contentX, layout.contentX + columnW + gap
+    local movement = {{"forward", "Forward", "W"}, {"back", "Back", "S"}, {"left", "Left", "A"}, {"right", "Right", "D"}, {"jump", "Jump", "SPACE"}, {"sneak", "Sneak", "CTRL"}, {"inventory", "Field Pack", "E"}}
+    local actions = {{"attack", "Primary", "MOUSE1"}, {"use", "Use / Place", "MOUSE2"}, {"pick", "Sample", "MOUSE3"}, {"drop", "Drop Item", "Q"}}
+    for index = 1, #movement do
+      local entry = movement[index]
+      buttons[#buttons + 1] = {id = "bind_" .. entry[1], kind = "setting", label = entry[2], valueLabel = bindingLabel(menuState, entry[1], entry[3]), x = left, y = 52 + (index - 1) * 24, w = columnW, h = 20}
+    end
+    for index = 1, #actions do
+      local entry = actions[index]
+      buttons[#buttons + 1] = {id = "bind_" .. entry[1], kind = "setting", label = entry[2], valueLabel = bindingLabel(menuState, entry[1], entry[3]), x = right, y = 52 + (index - 1) * 24, w = columnW, h = 20}
+    end
+    buttons[#buttons + 1] = {id = "unavailable_chat", kind = "setting", label = "Chat", valueLabel = "PLANNED", x = right, y = 148, w = columnW, h = 20, enabled = false}
+    buttons[#buttons + 1] = {id = "unavailable_players", kind = "setting", label = "Player List", valueLabel = "PLANNED", x = right, y = 172, w = columnW, h = 20, enabled = false}
+    return buttons
+  elseif screen == "texture_packs" then
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "resources")
+    buttons[#buttons + 1] = {id = "noop", kind = "setting", label = "Tamarton Base Set", valueLabel = "ACTIVE", x = layout.contentX, y = 56, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "noop", kind = "setting", label = "Custom Resource Sets", valueLabel = "PLANNED", x = layout.contentX, y = 96, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "create_texture_showcase", label = "Create Texture Preview World", x = layout.contentX, y = 136, w = layout.contentW, h = 22, style = "primary"}
+    return buttons
+  elseif screen == "multiplayer" then
     return {{id = "back_main", label = "Done", x = cx - 100, y = logicalHeight - 28, w = 200, h = 20}}
   elseif screen == "achievements" or screen == "stats" then
     return {{id = "back_pause", label = "Done", x = cx - 100, y = logicalHeight - 28, w = 200, h = 20}}

@@ -74,6 +74,30 @@ terrain.fillChunk(chunk, 0, 0, 16, 16, 127)
 assert(chunk.environment and chunk.environment.biome and chunk.environment.geology and
   chunk.environment.landform, "chunk stores its environment record")
 
+-- Orogenic uplift forms ranges rather than isolated needles, and most high
+-- slopes retain their climate biome so forests can climb them.
+local mountainSamples, connectedMountainSamples, woodedHighSlopes = 0, 0, 0
+for z = -2048, 2048, 32 do
+  local previousMountain = false
+  for x = -2048, 2048, 32 do
+    local sample = terrain.columnAt(x, z, 127)
+    local mountain = sample.mountain > 0.34
+    if mountain then
+      mountainSamples = mountainSamples + 1
+      if previousMountain then connectedMountainSamples = connectedMountainSamples + 1 end
+    end
+    if sample.height >= terrain.SEA_LEVEL + 28 and sample.height < terrain.SEA_LEVEL + 50 and
+        (sample.biome == "forest" or sample.biome == "taiga" or sample.biome == "seasonalForest" or
+         sample.biome == "rainforest") then
+      woodedHighSlopes = woodedHighSlopes + 1
+    end
+    previousMountain = mountain
+  end
+end
+assert(mountainSamples > 1000 and connectedMountainSamples > mountainSamples * 0.55,
+  "mountains form broad connected ranges")
+assert(woodedHighSlopes > 0, "climate forests can occupy high mountain slopes")
+
 print(string.format(
   "worldgen pipeline passed: %d drainage edges, %d ocean, %d river, %d lake samples",
   flows, oceanCount, riverCount, lakeCount))

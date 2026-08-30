@@ -6,6 +6,7 @@ local texture = require("texture")
 local uiMenu = require("ui_menu")
 local blocks = require("blocks")
 local items = require("items")
+local Inventory = require("inventory")
 local itemMesh = require("item_mesh")
 local heldItem = require("held_item")
 
@@ -41,6 +42,11 @@ local STRIDE_FLOATS = 11
 
 -- How long a newly selected item takes to rise into frame.
 local HELD_EQUIP_SECONDS = 0.24
+
+-- A one-line message above the hotbar: what you just equipped, or what the game
+-- just did for you. Held solid, then faded, so it never sits in the way.
+local NOTICE_HOLD_SECONDS = 1.6
+local NOTICE_FADE_SECONDS = 0.7
 
 local COLORS = {
   white = {1.0, 1.0, 1.0, 1.0},
@@ -277,12 +283,31 @@ local function colorFromRgb(value, alpha)
   return {r / 255.0, g / 255.0, b / 255.0, alpha or 1.0}
 end
 
-local TEXT_WHITE = colorFromRgb(0xFFFFFF)
-local TEXT_NORMAL = colorFromRgb(0xE0E0E0)
-local TEXT_HOVER = colorFromRgb(0xFFFFA0)
-local TEXT_DISABLED = colorFromRgb(0xA0A0A0)
-local TEXT_MUTED = colorFromRgb(0xA0A0A0)
-local TEXT_YELLOW = colorFromRgb(0xFFFF00)
+local TEXT_WHITE = colorFromRgb(0xE3E6EC)
+local TEXT_NORMAL = colorFromRgb(0xC9CED8)
+local TEXT_HOVER = colorFromRgb(0xE1B28B)
+local TEXT_DISABLED = colorFromRgb(0x626B7C)
+local TEXT_MUTED = colorFromRgb(0x7E8798)
+local TEXT_YELLOW = colorFromRgb(0xCFA06E)
+
+-- Tamarton uses the same dusk palette in-game and on its project site. Keeping
+-- the menu in flat colour also stops the old Minecraft widget sheet from
+-- defining the game's identity.
+local TAMARTON = {
+  night = colorFromRgb(0x050811),
+  dusk = colorFromRgb(0x101629),
+  horizon = colorFromRgb(0x211B2A),
+  panel = colorFromRgb(0x0B101D, 0.97),
+  panelLight = colorFromRgb(0x141B2B, 0.98),
+  hover = colorFromRgb(0x202A3D),
+  line = colorFromRgb(0x070B13),
+  ember = colorFromRgb(0xB96742),
+  gold = colorFromRgb(0xC79A68),
+  paper = colorFromRgb(0xD7DBE4),
+  muted = colorFromRgb(0x7B8598),
+  danger = colorFromRgb(0x6F2E3A),
+  silhouette = colorFromRgb(0x05070D)
+}
 
 local glyphMetrics = nil
 
@@ -379,8 +404,27 @@ local function appendText(vertices, width, height, scale, text, x, y, color, sha
   appendTextRaw(vertices, width, height, scale, text, x, y, color or TEXT_WHITE)
 end
 
+-- Inventory art is drawn at 2x its native GUI size, so stack counts need the
+-- same scale. Position in framebuffer pixels while leaving room for the 2px
+-- shadow keeps one- and two-digit counts anchored to the slot's lower-right.
+local function appendStackCount(vertices, width, height, stack, x, y, size)
+  if not stack or (stack.count or 0) <= 1 then return end
+  local label = tostring(stack.count)
+  local scale = 2
+  local pixelWidth = textWidth(label) * scale
+  appendText(vertices, width, height, scale, label,
+    (x + size - pixelWidth - 2) / scale,
+    (y + size - 8 * scale - 2) / scale,
+    TEXT_WHITE)
+end
+
 local function appendCenteredText(vertices, width, height, scale, text, cx, y, color)
   appendText(vertices, width, height, scale, text, math.floor(cx - textWidth(text) * 0.5 + 0.5), y, color or TEXT_WHITE)
+end
+
+local function appendDisplayText(vertices, width, height, scale, text, x, y, color, size)
+  size = size or 1
+  appendText(vertices, width, height, scale * size, text, x / size, y / size, color or TEXT_WHITE)
 end
 
 local function appendScaledSprite(vertices, width, height, scale, x, y, w, h, sx, sy, sw, sh, tw, th, color)
@@ -393,6 +437,45 @@ end
 
 local function appendDirtBackground(vertices, width, height, scale, logicalWidth, logicalHeight)
   appendSpriteUv(vertices, width, height, 0, 0, logicalWidth * scale, logicalHeight * scale, 0, 0, logicalWidth / 32.0, logicalHeight / 32.0, {0.25, 0.25, 0.25, 1.0})
+end
+
+local function appendTamartonBackdrop(vertices, width, height, scale, logicalWidth, logicalHeight, detailed)
+  local bandHeight = math.ceil(logicalHeight / 6)
+  local bands = {
+    TAMARTON.night,
+    colorFromRgb(0x080C17),
+    colorFromRgb(0x0C1120),
+    TAMARTON.dusk,
+    colorFromRgb(0x151625),
+    TAMARTON.horizon
+  }
+  for index = 1, #bands do
+    appendScaledRect(vertices, width, height, scale, 0, (index - 1) * bandHeight,
+      logicalWidth, math.min(bandHeight + 1, logicalHeight - (index - 1) * bandHeight), bands[index])
+  end
+
+  local stars = {
+    {18, 21}, {43, 38}, {74, 16}, {105, 48}, {139, 25}, {181, 14},
+    {217, 42}, {254, 20}, {291, 51}, {337, 27}, {376, 12}, {411, 44}
+  }
+  for index = 1, #stars do
+    local star = stars[index]
+    if star[1] < logicalWidth - 4 then
+      local size = index % 4 == 0 and 2 or 1
+      appendScaledRect(vertices, width, height, scale, star[1], star[2], size, size,
+        index % 3 == 0 and TAMARTON.gold or TAMARTON.muted)
+    end
+  end
+
+  if detailed then
+    local horizonY = logicalHeight - 46
+    appendScaledRect(vertices, width, height, scale, 0, horizonY, logicalWidth, 46, TAMARTON.silhouette)
+    for x = 0, logicalWidth, 24 do
+      local rise = 4 + ((x / 24) % 4) * 3
+      appendScaledRect(vertices, width, height, scale, x, horizonY - rise, 24, rise + 1, TAMARTON.silhouette)
+    end
+    appendScaledRect(vertices, width, height, scale, 0, logicalHeight - 9, logicalWidth, 3, TAMARTON.ember)
+  end
 end
 
 local function rotatePoint(x, y, z, yaw, pitch)
@@ -504,12 +587,66 @@ end
 local function appendButton(meshes, width, height, scale, button, mouseX, mouseY)
   local enabled = button.enabled ~= false
   local hover = enabled and isHovered(button, mouseX, mouseY)
-  local row = enabled and (hover and 86 or 66) or 46
-  local half = math.floor(button.w / 2)
-  appendScaledSprite(meshes.widgets, width, height, scale, button.x, button.y, half, button.h, 0, row, half, 20, 256, 256, COLORS.white)
-  appendScaledSprite(meshes.widgets, width, height, scale, button.x + half, button.y, button.w - half, button.h, 200 - (button.w - half), row, button.w - half, 20, 256, 256, COLORS.white)
-  local textColor = enabled and (hover and TEXT_HOVER or TEXT_NORMAL) or TEXT_DISABLED
-  appendCenteredText(meshes.font, width, height, scale, button.label, button.x + button.w * 0.5, button.y + 6, textColor)
+  local fill = TAMARTON.panelLight
+  local border = TAMARTON.line
+  local textColor = TAMARTON.paper
+  if button.style == "primary" then
+    fill = hover and colorFromRgb(0x293249) or colorFromRgb(0x1A2233)
+    border = TAMARTON.ember
+    textColor = hover and colorFromRgb(0xE5E8EE) or TAMARTON.paper
+  elseif button.style == "nav_active" then
+    fill = colorFromRgb(0x1B2234)
+    border = TAMARTON.ember
+    textColor = TAMARTON.paper
+  elseif button.style == "nav" then
+    fill = hover and TAMARTON.hover or colorFromRgb(0x0E1422)
+    border = hover and colorFromRgb(0x8E5B43) or colorFromRgb(0x20283A)
+    textColor = hover and TAMARTON.paper or TAMARTON.muted
+  elseif button.style == "danger" then
+    fill = hover and colorFromRgb(0x833747) or TAMARTON.danger
+  elseif button.style == "quiet" then
+    fill = hover and colorFromRgb(0x1A2130) or colorFromRgb(0x0C111D)
+    textColor = hover and TAMARTON.paper or TAMARTON.muted
+  elseif hover then
+    fill = TAMARTON.hover
+    border = TAMARTON.ember
+  end
+  if not enabled then
+    fill = colorFromRgb(0x0B101A)
+    border = colorFromRgb(0x171E2B)
+    textColor = colorFromRgb(0x535D6E)
+  end
+
+  appendScaledRect(meshes.color, width, height, scale, button.x + 2, button.y + 3,
+    button.w, button.h, TAMARTON.line)
+  appendScaledRect(meshes.color, width, height, scale, button.x, button.y,
+    button.w, button.h, border)
+  appendScaledRect(meshes.color, width, height, scale, button.x + 1, button.y + 1,
+    button.w - 2, button.h - 2, fill)
+  if button.style == "primary" and enabled then
+    appendScaledRect(meshes.color, width, height, scale, button.x + 1, button.y + 1,
+      3, button.h - 2, TAMARTON.ember)
+  elseif button.style == "nav_active" then
+    appendScaledRect(meshes.color, width, height, scale, button.x + 1, button.y + 1,
+      4, button.h - 2, TAMARTON.ember)
+  end
+  local textY = button.y + math.floor((button.h - 8) * 0.5)
+  if button.kind == "setting" or button.presentation == "setting" then
+    local valueLabel = tostring(button.valueLabel or "")
+    local valueW = textWidth(valueLabel)
+    local pillW = valueW + 14
+    local pillX = button.x + button.w - pillW - 4
+    appendScaledRect(meshes.color, width, height, scale, pillX, button.y + 4,
+      pillW, button.h - 8, colorFromRgb(0x080C16))
+    appendText(meshes.font, width, height, scale, button.label, button.x + 8, textY, textColor)
+    appendText(meshes.font, width, height, scale, valueLabel,
+      button.x + button.w - valueW - 11, textY, hover and TAMARTON.gold or TAMARTON.muted)
+  elseif button.style == "nav" or button.style == "nav_active" then
+    appendText(meshes.font, width, height, scale, button.label, button.x + 10, textY, textColor)
+  else
+    appendCenteredText(meshes.font, width, height, scale, button.label,
+      button.x + button.w * 0.5, textY, textColor)
+  end
 end
 
 local function appendSlider(meshes, width, height, scale, button, mouseX, mouseY)
@@ -518,22 +655,22 @@ local function appendSlider(meshes, width, height, scale, button, mouseX, mouseY
   local maximum = button.maxValue or 1
   local value = math.max(minimum, math.min(maximum, button.value or minimum))
   local amount = (value - minimum) / math.max(1, maximum - minimum)
-  local knobX = button.x + math.floor((button.w - 8) * amount)
-  appendScaledSprite(meshes.widgets, width, height, scale, knobX, button.y, 4, 20, 0, 66, 4, 20, 256, 256, COLORS.white)
-  appendScaledSprite(meshes.widgets, width, height, scale, knobX + 4, button.y, 4, 20, 196, 66, 4, 20, 256, 256, COLORS.white)
+  local trackX = button.x + 5
+  local trackW = button.w - 10
+  local knobX = trackX + math.floor((trackW - 4) * amount)
+  appendScaledRect(meshes.color, width, height, scale, trackX, button.y + button.h - 4,
+    trackW, 1, colorFromRgb(0x30394B))
+  appendScaledRect(meshes.color, width, height, scale, trackX, button.y + button.h - 4,
+    math.max(1, knobX - trackX + 1), 1, TAMARTON.ember)
+  appendScaledRect(meshes.color, width, height, scale, knobX, button.y + button.h - 6,
+    4, 5, colorFromRgb(0xC4A07B))
 end
 
 local function appendTextBox(meshes, width, height, scale, x, y, w, h, text)
-  appendScaledRect(meshes.color, width, height, scale, x - 1, y - 1, w + 2, h + 2, COLORS.fieldBorder)
-  appendScaledRect(meshes.color, width, height, scale, x, y, w, h, COLORS.field)
-  appendText(meshes.font, width, height, scale, text, x + 4, y + 6, TEXT_WHITE)
-end
-
-local function appendMinecraftLogo(meshes, width, height, scale, cx)
-  local x = cx - 137
-  local y = 30
-  appendScaledSprite(meshes.logo, width, height, scale, x, y, 155, 44, 0, 0, 155, 44, 256, 256, COLORS.white)
-  appendScaledSprite(meshes.logo, width, height, scale, x + 155, y, 155, 44, 0, 45, 155, 44, 256, 256, COLORS.white)
+  appendScaledRect(meshes.color, width, height, scale, x - 1, y - 1, w + 2, h + 3, TAMARTON.line)
+  appendScaledRect(meshes.color, width, height, scale, x, y, w, h, TAMARTON.panelLight)
+  appendScaledRect(meshes.color, width, height, scale, x, y + h - 2, w, 2, TAMARTON.ember)
+  appendText(meshes.font, width, height, scale, text, x + 4, y + 6, TAMARTON.paper)
 end
 
 local function appendStandaloneIcon(vertices, width, height, x, y, nativeWidth, nativeHeight)
@@ -651,7 +788,7 @@ local function appendInventoryItem(vertices, width, height, x, y, size, stack, r
   end
 end
 
-local function buildMeshes(width, height, selectedSlot, state, time)
+local function buildMeshes(width, height, selectedSlot, state, time, notice)
   local meshes = {
     color = {},
     widgets = {},
@@ -680,7 +817,11 @@ local function buildMeshes(width, height, selectedSlot, state, time)
   for index=1,9 do
     local stack = hotbarStack(index)
     appendInventoryItem(meshes.terrain,width,height,x+(index-1)*40+5,y+5,30,stack)
-    if stack and stack.count > 1 then appendText(meshes.font,width,height,1,tostring(stack.count),x+(index-1)*40+22,y+25,TEXT_WHITE) end
+    appendStackCount(meshes.font,width,height,stack,x+(index-1)*40+5,y+5,30)
+  end
+  if notice then
+    appendCenteredText(meshes.font,width,height,1,notice.text,center,height-76,
+      colorFromRgb(0xFFFFFF, notice.alpha))
   end
   if state and state.worldGameMode~="creative" and (state.tutorialTime or 0)<75 then
     local hint=state.inventory and state.inventory.recipeHint or "Break a tree, then press E to craft."
@@ -703,6 +844,27 @@ local function appendControlsLabels(meshes, width, height, scale, logicalWidth, 
   end
 end
 
+local function appendMenuSectionLabel(meshes, width, height, scale, x, y, w, label)
+  appendText(meshes.font, width, height, scale, label, x, y, TAMARTON.muted, false)
+  local ruleX = x + textWidth(label) + 7
+  if ruleX < x + w then
+    appendScaledRect(meshes.color, width, height, scale, ruleX, y + 4, x + w - ruleX, 1,
+      colorFromRgb(0x252D3E))
+  end
+  appendScaledRect(meshes.color, width, height, scale, x, y + 10, 3, 2, TAMARTON.ember)
+end
+
+local function appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, title)
+  local layout = uiMenu.settingsLayout(logicalWidth, logicalHeight)
+  appendText(meshes.font, width, height, scale, "SETTINGS", layout.navX, 20, TAMARTON.gold)
+  appendText(meshes.font, width, height, scale, title, layout.contentX, 20, TAMARTON.paper)
+  appendScaledRect(meshes.color, width, height, scale, layout.navX - 5, 44,
+    layout.navW + 10, logicalHeight - 60, colorFromRgb(0x090C21, 0.64))
+  appendScaledRect(meshes.color, width, height, scale, layout.contentX - 7, 44,
+    1, logicalHeight - 60, colorFromRgb(0x252D3E))
+  return layout
+end
+
 local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState, time)
   menuState = menuState or {}
   local scale = guiScale(width, height)
@@ -711,7 +873,7 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
   local cx = math.floor(logicalWidth * 0.5)
   local meshes = {
     panorama = {},
-    panoramaFaces = {{}, {}, {}, {}, {}, {}},
+    panoramaFaces = {},
     background = {},
     color = {},
     logo = {},
@@ -720,44 +882,54 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
   }
 
   if screen == "pause" then
-    appendScaledRect(meshes.color, width, height, scale, 0, 0, logicalWidth, logicalHeight, {0.0, 0.0, 0.0, 0.20})
+    appendScaledRect(meshes.color, width, height, scale, 0, 0, logicalWidth, logicalHeight, {0.02, 0.03, 0.10, 0.72})
+    appendScaledRect(meshes.color, width, height, scale, cx - 114, 28, 228, logicalHeight - 48, TAMARTON.panel)
+    appendScaledRect(meshes.color, width, height, scale, cx - 114, 28, 3, logicalHeight - 48, TAMARTON.ember)
   elseif screen ~= "main" then
-    appendDirtBackground(meshes.background, width, height, scale, logicalWidth, logicalHeight)
+    appendTamartonBackdrop(meshes.color, width, height, scale, logicalWidth, logicalHeight, false)
+    appendScaledRect(meshes.color, width, height, scale, 10, 10,
+      logicalWidth - 20, logicalHeight - 20, TAMARTON.panel)
+    appendScaledRect(meshes.color, width, height, scale, 10, 10, 3,
+      logicalHeight - 20, TAMARTON.ember)
   else
-    appendScaledRect(meshes.panorama, width, height, scale, 0, 0, logicalWidth, logicalHeight, {0.0, 0.0, 0.0, 1.0})
-    appendPanoramaCube(meshes.panoramaFaces, width, height, scale, logicalWidth, logicalHeight, time or 0.0, 0.68, 0, 0)
-    appendPanoramaCube(meshes.panoramaFaces, width, height, scale, logicalWidth, logicalHeight, (time or 0.0) + 0.10, 0.08, -1, 0)
-    appendPanoramaCube(meshes.panoramaFaces, width, height, scale, logicalWidth, logicalHeight, (time or 0.0) - 0.10, 0.08, 1, 0)
-    appendPanoramaCube(meshes.panoramaFaces, width, height, scale, logicalWidth, logicalHeight, (time or 0.0) + 0.16, 0.08, 0, -1)
-    appendPanoramaCube(meshes.panoramaFaces, width, height, scale, logicalWidth, logicalHeight, (time or 0.0) - 0.16, 0.08, 0, 1)
-    appendScaledRect(meshes.color, width, height, scale, 0, 0, logicalWidth, logicalHeight, {0.0, 0.0, 0.0, 0.24})
-    appendMinecraftLogo(meshes, width, height, scale, cx)
-    appendCenteredText(meshes.font, width, height, scale, "Pre-alpha!", cx + 118, 67, TEXT_YELLOW)
-    appendText(meshes.font, width, height, scale, "Minecraft 1.0.0", 2, logicalHeight - 10, TEXT_WHITE)
-    local copyright = "Copyright Mojang AB. Do not distribute!"
-    appendText(meshes.font, width, height, scale, copyright, logicalWidth - textWidth(copyright) - 2, logicalHeight - 10, TEXT_WHITE)
+    appendTamartonBackdrop(meshes.color, width, height, scale, logicalWidth, logicalHeight, true)
+    local panelWidth = math.min(160, math.max(144, math.floor(logicalWidth * 0.40)))
+    local panelX = logicalWidth - panelWidth - 8
+    appendScaledRect(meshes.color, width, height, scale, panelX, 58,
+      panelWidth, math.min(166, logicalHeight - 70), TAMARTON.panel)
+    appendScaledRect(meshes.color, width, height, scale, panelX, 58, 3,
+      math.min(166, logicalHeight - 70), TAMARTON.ember)
+
+    appendScaledRect(meshes.color, width, height, scale, 20, 22, 12, 12, TAMARTON.ember)
+    appendScaledRect(meshes.color, width, height, scale, 23, 25, 6, 6, TAMARTON.gold)
+    appendDisplayText(meshes.font, width, height, scale, "TAMARTON", 39, 21, TAMARTON.paper, 2)
+    appendText(meshes.font, width, height, scale, "A WORLD WITH A REAL SKY", 20, 48, TAMARTON.gold)
+
+    local statementY = logicalHeight - 58
+    appendText(meshes.font, width, height, scale, "ATMOSPHERE / EXPLORATION", 20, statementY, TAMARTON.paper)
+    appendText(meshes.font, width, height, scale, "EARLY DEVELOPMENT  /  BUILD 0.1", 20, statementY + 14, TAMARTON.muted)
   end
 
   if screen == "pause" then
-    appendCenteredText(meshes.font, width, height, scale, "Game menu", cx, 40, TEXT_WHITE)
+    appendCenteredText(meshes.font, width, height, scale, "JOURNEY PAUSED", cx, 40, TAMARTON.gold)
   elseif screen == "select_world" then
-    appendCenteredText(meshes.font, width, height, scale, "Select World", cx, 20, TEXT_WHITE)
-    appendScaledRect(meshes.color, width, height, scale, 0, 32, logicalWidth, logicalHeight - 88, COLORS.panel)
+    appendCenteredText(meshes.font, width, height, scale, "WORLD ATLAS", cx, 20, TAMARTON.gold)
+    appendScaledRect(meshes.color, width, height, scale, 13, 32, logicalWidth - 26, logicalHeight - 88, colorFromRgb(0x090C21, 0.72))
     if #(menuState.savedWorlds or {}) == 0 then
-      appendCenteredText(meshes.font, width, height, scale, "No saved worlds yet", cx, 74, TEXT_WHITE)
-      appendCenteredText(meshes.font, width, height, scale, "Create one to begin", cx, 90, TEXT_MUTED)
+      appendCenteredText(meshes.font, width, height, scale, "NO WORLDS CHARTED", cx, 74, TAMARTON.paper)
+      appendCenteredText(meshes.font, width, height, scale, "Create one to begin the expedition", cx, 90, TAMARTON.muted)
     end
     if menuState.statusMessage and menuState.statusMessage ~= "" then
       appendCenteredText(meshes.font, width, height, scale, menuState.statusMessage, cx, logicalHeight - 68, TEXT_MUTED)
     end
   elseif screen == "confirm_delete_world" then
     local world = menuState.pendingDeleteWorld or {}
-    appendCenteredText(meshes.font, width, height, scale, "Delete World?", cx, 54, TEXT_WHITE)
+    appendCenteredText(meshes.font, width, height, scale, "ERASE THIS WORLD?", cx, 54, TAMARTON.gold)
     appendCenteredText(meshes.font, width, height, scale,
       "'" .. tostring(world.worldName or "Selected World") .. "' will be lost forever!", cx, 82, TEXT_WHITE)
     appendCenteredText(meshes.font, width, height, scale, "This cannot be undone.", cx, 98, TEXT_MUTED)
   elseif screen == "create_world" then
-    appendCenteredText(meshes.font, width, height, scale, "Create New World", cx, 20, TEXT_WHITE)
+    appendCenteredText(meshes.font, width, height, scale, "SHAPE A NEW WORLD", cx, 20, TAMARTON.gold)
     if menuState.moreWorldOptions then
       appendText(meshes.font, width, height, scale, "Seed for the World Generator", cx - 100, 47, TEXT_MUTED)
       appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, menuState.worldSeedText or "")
@@ -774,30 +946,39 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
       end
     end
   elseif screen == "options" then
-    appendCenteredText(meshes.font, width, height, scale, "Options", cx, 20, TEXT_WHITE)
+    local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "GENERAL")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 42, layout.contentW, "AUDIO")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 108, layout.contentW, "EXPERIENCE")
   elseif screen == "video" then
-    appendCenteredText(meshes.font, width, height, scale, "Video Settings", cx, 20, TEXT_WHITE)
+    local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "VISUALS")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 42, layout.contentW, "WORLD")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 82, layout.contentW, "ATMOSPHERE")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 168, layout.contentW, "DISPLAY")
   elseif screen == "controls" then
-    appendCenteredText(meshes.font, width, height, scale, "Controls", cx, 20, TEXT_WHITE)
-    appendControlsLabels(meshes, width, height, scale, logicalWidth, logicalHeight)
-    appendCenteredText(meshes.font, width, height, scale, "Click a binding to cycle its available inputs", cx, logicalHeight - 48, TEXT_MUTED)
+    local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "CONTROLS")
+    local columnW = math.floor((layout.contentW - 6) * 0.5)
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 38, columnW, "MOVEMENT")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX + columnW + 6, 38, columnW, "ACTIONS")
   elseif screen == "multiplayer" then
-    appendCenteredText(meshes.font, width, height, scale, "Play Multiplayer", cx, 20, TEXT_WHITE)
-    appendCenteredText(meshes.font, width, height, scale, "MineLua is currently a local-only build.", cx, 76, TEXT_WHITE)
-    appendCenteredText(meshes.font, width, height, scale, "Networking is not implemented yet.", cx, 92, TEXT_MUTED)
+    appendCenteredText(meshes.font, width, height, scale, "ONLINE PLAY", cx, 20, TAMARTON.gold)
+    appendCenteredText(meshes.font, width, height, scale, "Tamarton is currently a local expedition.", cx, 76, TAMARTON.paper)
+    appendCenteredText(meshes.font, width, height, scale, "Shared worlds are planned for later development.", cx, 92, TAMARTON.muted)
   elseif screen == "texture_packs" then
-    appendCenteredText(meshes.font, width, height, scale, "Texture Packs", cx, 20, TEXT_WHITE)
-    appendCenteredText(meshes.font, width, height, scale, "Default MineLua resources", cx, 70, TEXT_WHITE)
-    appendCenteredText(meshes.font, width, height, scale, "Runtime resource-pack switching is not implemented yet.", cx, 94, TEXT_MUTED)
+    local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "RESOURCES")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 42, layout.contentW, "LIBRARY")
+    appendText(meshes.font, width, height, scale, "The base set defines Tamarton's current look.",
+      layout.contentX, 132, TAMARTON.muted)
+    appendText(meshes.font, width, height, scale, "Custom sets arrive when the format is ready.",
+      layout.contentX, 148, TAMARTON.muted)
   elseif screen == "achievements" then
     local stats = menuState.stats or {}
-    appendCenteredText(meshes.font, width, height, scale, "Achievements", cx, 20, TEXT_WHITE)
-    appendText(meshes.font, width, height, scale, (stats.blocksMined or 0) > 0 and "[x] Getting Started - Mine a block" or "[ ] Getting Started - Mine a block", cx - 120, 60, TEXT_WHITE)
-    appendText(meshes.font, width, height, scale, (stats.blocksPlaced or 0) > 0 and "[x] Builder - Place a block" or "[ ] Builder - Place a block", cx - 120, 82, TEXT_WHITE)
-    appendText(meshes.font, width, height, scale, (stats.distance or 0) >= 100 and "[x] Explorer - Travel 100 blocks" or "[ ] Explorer - Travel 100 blocks", cx - 120, 104, TEXT_WHITE)
+    appendCenteredText(meshes.font, width, height, scale, "MILESTONES", cx, 20, TAMARTON.gold)
+    appendText(meshes.font, width, height, scale, (stats.blocksMined or 0) > 0 and "[x] First Material - Gather from the world" or "[ ] First Material - Gather from the world", cx - 120, 60, TAMARTON.paper)
+    appendText(meshes.font, width, height, scale, (stats.blocksPlaced or 0) > 0 and "[x] Make a Mark - Place something" or "[ ] Make a Mark - Place something", cx - 120, 82, TAMARTON.paper)
+    appendText(meshes.font, width, height, scale, (stats.distance or 0) >= 100 and "[x] Trailblazer - Travel 100 metres" or "[ ] Trailblazer - Travel 100 metres", cx - 120, 104, TAMARTON.paper)
   elseif screen == "stats" then
     local stats = menuState.stats or {}
-    appendCenteredText(meshes.font, width, height, scale, "Statistics", cx, 20, TEXT_WHITE)
+    appendCenteredText(meshes.font, width, height, scale, "FIELD RECORD", cx, 20, TAMARTON.gold)
     appendText(meshes.font, width, height, scale, "Blocks mined: " .. tostring(stats.blocksMined or 0), cx - 100, 60, TEXT_WHITE)
     appendText(meshes.font, width, height, scale, "Blocks placed: " .. tostring(stats.blocksPlaced or 0), cx - 100, 82, TEXT_WHITE)
     appendText(meshes.font, width, height, scale, string.format("Distance travelled: %.1f m", stats.distance or 0), cx - 100, 104, TEXT_WHITE)
@@ -812,12 +993,13 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
       if world then
         local selected = button.worldIndex == menuState.selectedWorldIndex
         local hovered = isHovered(button, mouseX, mouseY)
-        local border = selected and {0.78, 0.78, 0.78, 1.0} or {0.12, 0.12, 0.12, 1.0}
-        local fill = hovered and {0.24, 0.24, 0.24, 0.94} or {0.04, 0.04, 0.04, 0.88}
+        local border = selected and TAMARTON.ember or colorFromRgb(0x20283A)
+        local fill = hovered and TAMARTON.hover or TAMARTON.panelLight
         appendScaledRect(meshes.color, width, height, scale, button.x, button.y, button.w, button.h, border)
         appendScaledRect(meshes.color, width, height, scale, button.x + 1, button.y + 1, button.w - 2, button.h - 2, fill)
         local iconSky = world.worldId == "mars" and {0.66, 0.31, 0.17, 1.0} or
-          (world.generatorType == "superflat" and {0.34, 0.65, 0.20, 1.0} or {0.16, 0.43, 0.72, 1.0})
+          (world.generatorType == "showcase" and {0.58, 0.40, 0.72, 1.0} or
+            (world.generatorType == "superflat" and {0.34, 0.65, 0.20, 1.0} or {0.16, 0.43, 0.72, 1.0}))
         local iconGround = world.worldId == "mars" and {0.44, 0.20, 0.12, 1.0} or {0.20, 0.52, 0.16, 1.0}
         appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 3, 28, 28, iconSky)
         appendScaledRect(meshes.color, width, height, scale, button.x + 3, button.y + 19, 28, 12, iconGround)
@@ -855,11 +1037,11 @@ local function appendVerticalLoadingSegment(vertices, width, height, scale, x, y
 end
 
 local function appendLoadingSquareGraph(meshes, width, height, scale, cx, cy, progress)
-  local green = {0.08, 0.78, 0.08, 1.0}
-  local darkGreen = {0.02, 0.36, 0.02, 1.0}
-  local outer = {0.50, 0.50, 0.50, 1.0}
-  local inner = {0.96, 0.96, 0.96, 1.0}
-  local border = {0.18, 0.18, 0.18, 1.0}
+  local green = TAMARTON.ember
+  local darkGreen = colorFromRgb(0x683A32)
+  local outer = TAMARTON.hover
+  local inner = TAMARTON.panel
+  local border = TAMARTON.line
   local x = cx - 18
   local y = cy - 18
   local amount = math.max(0.0, math.min(1.0, progress or 0.0)) * 4.0
@@ -909,11 +1091,16 @@ local function buildLoadingMeshes(width, height, loadingState)
     font = {}
   }
 
-  appendDirtBackground(meshes.background, width, height, scale, logicalWidth, logicalHeight)
-  appendScaledRect(meshes.color, width, height, scale, 0, 0, logicalWidth, logicalHeight, {0.0, 0.0, 0.0, 0.30})
+  appendTamartonBackdrop(meshes.color, width, height, scale, logicalWidth, logicalHeight, true)
+  appendScaledRect(meshes.color, width, height, scale, cx - 92, cy - 58, 184, 116, TAMARTON.panel)
+  appendScaledRect(meshes.color, width, height, scale, cx - 92, cy - 58, 3, 116, TAMARTON.ember)
 
   local percent = tostring(math.floor(progress * 100.0 + 0.5)) .. "%"
-  appendCenteredText(meshes.font, width, height, scale, percent, cx, cy - 34, TEXT_WHITE)
+  appendCenteredText(meshes.font, width, height, scale,
+    loadingState.title or "CHARTING THE WORLD", cx, cy - 42, TAMARTON.gold)
+  appendCenteredText(meshes.font, width, height, scale,
+    loadingState.message or "Preparing the expedition", cx, cy - 25, TAMARTON.paper)
+  appendCenteredText(meshes.font, width, height, scale, percent, cx, cy + 32, TAMARTON.muted)
   appendLoadingSquareGraph(meshes, width, height, scale, cx, cy + 2, progress)
 
   return meshes
@@ -933,6 +1120,24 @@ local function inventoryRect(layout, sourceX, sourceY, sourceSize)
     w = sourceSize * scale,
     h = sourceSize * scale
   }
+end
+
+local function appendInventoryPanel(vertices, width, height, x, y, w, h)
+  appendRect(vertices, width, height, x + 5, y + 7, w, h, TAMARTON.line)
+  appendRect(vertices, width, height, x, y, w, h, TAMARTON.line)
+  appendRect(vertices, width, height, x + 3, y + 3, w - 6, h - 6, TAMARTON.panel)
+  appendRect(vertices, width, height, x + 3, y + 3, 6, h - 6, TAMARTON.ember)
+end
+
+local function appendInventorySlot(vertices, width, height, x, y, w, h, accent)
+  local border = accent and TAMARTON.ember or colorFromRgb(0x273044)
+  appendRect(vertices, width, height, x - 2, y - 2, w + 4, h + 4, TAMARTON.line)
+  appendRect(vertices, width, height, x - 1, y - 1, w + 2, h + 2, border)
+  appendRect(vertices, width, height, x, y, w, h, colorFromRgb(0x0A0D24, 0.96))
+end
+
+local function appendInventoryHeading(vertices, width, height, text, x, y, color)
+  appendDisplayText(vertices, width, height, 1, text, x, y, color or TAMARTON.gold, 2)
 end
 
 local function appendInventorySteve(vertices, width, height, layout, mouseX, mouseY, time)
@@ -963,6 +1168,7 @@ local CREATIVE_TABS = {
   {id="redstone", item="redstone_ore", x=168},
   {id="search", item="crafting_table", x=280}
 }
+local CREATIVE_INVENTORY_TAB = {id="inventory", x=334}
 
 local function creativeSlotPosition(layout, row, col)
   return layout.x + 18 + col * 36, layout.y + 36 + row * 36
@@ -981,7 +1187,25 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
         return {kind="creative_tab",tab=tab.id}
       end
     end
+    if pointIn(mouseX,mouseY,layout.x+CREATIVE_INVENTORY_TAB.x,layout.y+268,56,58) then
+      return {kind="creative_tab",tab=CREATIVE_INVENTORY_TAB.id}
+    end
     local activeTab = state and state.creativeTab or "building"
+    if activeTab == "inventory" then
+      for row=0,2 do for col=0,8 do
+        local x,y=layout.x+18+col*36,layout.y+44+row*36
+        if pointIn(mouseX,mouseY,x,y,32,32) then
+          return {kind="slot",index=10+row*9+col,x=x,y=y,w=32,h=32}
+        end
+      end end
+      for col=0,8 do
+        local x,y=layout.x+18+col*36,layout.y+176
+        if pointIn(mouseX,mouseY,x,y,32,32) then
+          return {kind="slot",index=col+1,x=x,y=y,w=32,h=32}
+        end
+      end
+      return nil
+    end
     if activeTab == "search" then
       local search = {x=layout.x+164,y=layout.y+10,w=178,h=24}
       if pointIn(mouseX,mouseY,search.x,search.y,search.w,search.h) then return {kind="search"} end
@@ -989,8 +1213,17 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
     local filtered = state and state.creativeFiltered or {}
     for row=0,4 do for col=0,8 do
       local x,y=creativeSlotPosition(layout,row,col)
-      if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="creative",index=row*9+col+1,item=filtered[row*9+col+1],x=x,y=y,w=32,h=32} end
+      local index = row*9+col+1
+      if pointIn(mouseX,mouseY,x,y,32,32) then
+        return {kind="creative",index=index,
+          item=Inventory.creativeItemAt(filtered,state and state.creativeScroll,index),x=x,y=y,w=32,h=32}
+      end
     end end
+    if pointIn(mouseX,mouseY,layout.x+348,layout.y+36,28,176) then
+      local maximum = Inventory.maxCreativeScroll(#filtered)
+      local ratio = math.max(0,math.min(1,(mouseY-(layout.y+51))/146))
+      return {kind="creative_scroll",scroll=math.floor(ratio*maximum+0.5)}
+    end
     for col=0,8 do
       local x,y=layout.x+18+col*36,layout.y+224
       if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1,x=x,y=y,w=32,h=32} end
@@ -1061,73 +1294,141 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
   local creative = screen == "creative_inventory"
   local layout = inventoryLayout(width,height,creative)
   local meshes={panel={},creativePanel={},creativeTabs={},color={},overlay={},terrain={},font={},skin={}}
+  appendRect(meshes.color,width,height,0,0,width,height,{0.01,0.015,0.05,0.58})
+  appendInventoryPanel(meshes.color,width,height,layout.x,layout.y,layout.w,layout.h)
   if creative then
     local activeTab = state.creativeTab or "building"
-    -- The supplied 195x136 creative container art is authored at Minecraft's
-    -- logical GUI scale. Draw it exactly 2x so every native 18px slot aligns
-    -- with input hit-testing and item placement.
-    appendSprite(meshes.creativePanel,width,height,layout.x,layout.y,layout.w,layout.h,
-      0,0,195,136,256,256,COLORS.white)
     for index,tab in ipairs(CREATIVE_TABS) do
       local selected = tab.id == activeTab
-      local sourceX = selected and 28 or 0
-      appendSprite(meshes.creativeTabs,width,height,layout.x+tab.x,layout.y-54,56,64,
-        sourceX,0,28,32,256,256,COLORS.white)
+      local tabX,tabY=layout.x+tab.x,layout.y-48
+      appendRect(meshes.color,width,height,tabX+3,tabY+4,52,48,TAMARTON.line)
+      appendRect(meshes.color,width,height,tabX,tabY,56,50,
+        selected and TAMARTON.ember or TAMARTON.line)
+      appendRect(meshes.color,width,height,tabX+2,tabY+2,52,46,
+        selected and colorFromRgb(0x31232A) or TAMARTON.panelLight)
+      if selected then appendRect(meshes.color,width,height,tabX+2,tabY+46,52,4,TAMARTON.ember) end
       appendInventoryItem(meshes.terrain,width,height,layout.x+tab.x+13,layout.y-43,30,
         {item=tab.item,count=1})
     end
 
-    local titles = {
-      building="Building Blocks", nature="Decoration Blocks",
-      materials="Materials", redstone="Redstone", search="Search Items"
-    }
-    if activeTab == "search" then
-      appendText(meshes.font,width,height,2,(state.inventory.search or "").."_",layout.x+170,layout.y+12,TEXT_NORMAL)
-    else
-      appendText(meshes.font,width,height,2,titles[activeTab] or "Building Blocks",layout.x+18,layout.y+12,TEXT_NORMAL)
+    local inventorySelected = activeTab == CREATIVE_INVENTORY_TAB.id
+    local inventoryTabX = layout.x + CREATIVE_INVENTORY_TAB.x
+    local inventoryTabY = layout.y + 268
+    appendRect(meshes.color,width,height,inventoryTabX+3,inventoryTabY,52,48,TAMARTON.line)
+    appendRect(meshes.color,width,height,inventoryTabX,inventoryTabY,56,50,
+      inventorySelected and TAMARTON.ember or TAMARTON.line)
+    appendRect(meshes.color,width,height,inventoryTabX+2,inventoryTabY+2,52,46,
+      inventorySelected and colorFromRgb(0x31232A) or TAMARTON.panelLight)
+    if inventorySelected then
+      appendRect(meshes.color,width,height,inventoryTabX+2,inventoryTabY+2,52,4,TAMARTON.ember)
     end
-    local items=state.creativeFiltered or {}
-    for row=0,4 do for col=0,8 do
-      local index=row*9+col+1
-      local x,y=creativeSlotPosition(layout,row,col)
-      if items[index] then appendInventoryItem(meshes.terrain,width,height,x+2,y+1,28,{item=items[index],count=64}) end
-    end end
-    -- The current catalog fits on one page; keep the native scrollbar parked at
-    -- its top position so the container still reads as the stock creative GUI.
-    appendRect(meshes.overlay,width,height,layout.x+350,layout.y+37,24,30,{0.58,0.58,0.58,1.0})
-    for col=0,8 do
-      local x,y=layout.x+18+col*36,layout.y+224
-      local stack=state.inventory.slots[col+1]
-      appendInventoryItem(meshes.terrain,width,height,x+2,y+1,28,stack)
-      if stack and stack.count>1 then appendText(meshes.font,width,height,1,tostring(stack.count),x+18,y+20,TEXT_WHITE) end
+    appendRotatedSprite(meshes.skin,width,height,inventoryTabX+12,inventoryTabY+9,
+      32,32,8,8,8,8,64,64,COLORS.white,0)
+    appendRotatedSprite(meshes.skin,width,height,inventoryTabX+12,inventoryTabY+9,
+      32,32,40,8,8,8,64,64,{1,1,1,0.94},0)
+
+    local titles = {
+      building="TERRAIN", nature="FLORA + DECOR",
+      materials="MATERIALS", redstone="MECHANISMS", search="CATALOG SEARCH"
+    }
+    if activeTab == "inventory" then
+      appendInventoryHeading(meshes.font,width,height,"PLAYER INVENTORY",
+        layout.x+18,layout.y+10,TAMARTON.gold)
+      for row=0,2 do for col=0,8 do
+        local index=10+row*9+col
+        local x,y=layout.x+18+col*36,layout.y+44+row*36
+        local stack=state.inventory.slots[index]
+        appendInventorySlot(meshes.color,width,height,x,y,32,32,false)
+        appendInventoryItem(meshes.terrain,width,height,x+2,y+1,28,stack)
+        appendStackCount(meshes.font,width,height,stack,x+2,y+1,28)
+      end end
+      appendText(meshes.font,width,height,1,"HOTBAR",layout.x+18,layout.y+162,TAMARTON.muted)
+      for col=0,8 do
+        local x,y=layout.x+18+col*36,layout.y+176
+        local stack=state.inventory.slots[col+1]
+        appendInventorySlot(meshes.color,width,height,x,y,32,32,true)
+        appendInventoryItem(meshes.terrain,width,height,x+2,y+1,28,stack)
+        appendStackCount(meshes.font,width,height,stack,x+2,y+1,28)
+      end
+    else
+      appendInventoryHeading(meshes.font,width,height,"CATALOG",layout.x+18,layout.y+10,TAMARTON.gold)
+      if activeTab == "search" then
+        appendRect(meshes.color,width,height,layout.x+162,layout.y+8,182,26,TAMARTON.line)
+        appendRect(meshes.color,width,height,layout.x+164,layout.y+10,178,22,colorFromRgb(0x080B20))
+        appendText(meshes.font,width,height,1,(state.inventory.search or "").."_",
+          layout.x+169,layout.y+17,TAMARTON.paper)
+      else
+        local title = titles[activeTab] or "Building Blocks"
+        local countLabel=title.." / "..tostring(#(state.creativeFiltered or {}))
+        appendText(meshes.font,width,height,1,countLabel,layout.x+200,layout.y+17,TAMARTON.muted)
+      end
+      local catalogItems=state.creativeFiltered or {}
+      for row=0,4 do for col=0,8 do
+        local index=row*9+col+1
+        local x,y=creativeSlotPosition(layout,row,col)
+        appendInventorySlot(meshes.color,width,height,x,y,32,32,false)
+        local item=Inventory.creativeItemAt(catalogItems,state.creativeScroll,index)
+        if item then appendInventoryItem(meshes.terrain,width,height,x+2,y+1,28,{item=item,count=64}) end
+      end end
+      local maximum=Inventory.maxCreativeScroll(#catalogItems)
+      local ratio=maximum>0 and Inventory.clampCreativeScroll(state.creativeScroll,#catalogItems)/maximum or 0
+      appendRect(meshes.color,width,height,layout.x+354,layout.y+36,16,176,TAMARTON.line)
+      appendRect(meshes.color,width,height,layout.x+357,layout.y+39,10,170,colorFromRgb(0x090C24))
+      appendRect(meshes.overlay,width,height,layout.x+356,layout.y+39+math.floor(ratio*140),12,30,
+        maximum>0 and TAMARTON.ember or colorFromRgb(0x3A3A52))
+      for col=0,8 do
+        local x,y=layout.x+18+col*36,layout.y+224
+        local stack=state.inventory.slots[col+1]
+        appendInventorySlot(meshes.color,width,height,x,y,32,32,true)
+        appendInventoryItem(meshes.terrain,width,height,x+2,y+1,28,stack)
+        appendStackCount(meshes.font,width,height,stack,x+2,y+1,28)
+      end
     end
   else
-    appendSprite(meshes.panel,width,height,layout.x,layout.y,layout.w,layout.h,0,0,176,166,176,166,COLORS.white)
+    local heading=screen=="crafting_table" and "WORKBENCH" or
+      (screen=="furnace" and "KILN" or "FIELD PACK")
+    local headingY=screen=="inventory" and layout.y+145 or layout.y+14
+    appendInventoryHeading(meshes.font,width,height,heading,layout.x+18,headingY,TAMARTON.gold)
     if screen ~= "crafting_table" and screen ~= "furnace" then
       appendInventorySteve(meshes.skin,width,height,layout,mouseX,mouseY,time)
+      appendText(meshes.font,width,height,1,"ASSEMBLE",layout.x+196,layout.y+14,TAMARTON.muted)
+      for row=0,3 do
+        local rect=inventoryRect(layout,8,8+row*18,16)
+        appendInventorySlot(meshes.color,width,height,rect.x,rect.y,rect.w,rect.h,false)
+      end
+      local offhand=inventoryRect(layout,77,62,16)
+      appendInventorySlot(meshes.color,width,height,offhand.x,offhand.y,offhand.w,offhand.h,true)
     end
     local inv=state.inventory
     for row=0,2 do for col=0,8 do
       local index=10+row*9+col local x,y=layout.x+16+col*36,layout.y+168+row*36
+      appendInventorySlot(meshes.color,width,height,x,y,32,32,false)
       local stack=inv.slots[index] appendInventoryItem(meshes.terrain,width,height,x,y,32,stack)
-      if stack and stack.count>1 then appendText(meshes.font,width,height,1,tostring(stack.count),x+18,y+20,TEXT_WHITE) end
+      appendStackCount(meshes.font,width,height,stack,x,y,32)
     end end
     for col=0,8 do
       local stack=inv.slots[col+1] local x,y=layout.x+16+col*36,layout.y+284
+      appendInventorySlot(meshes.color,width,height,x,y,32,32,true)
       appendInventoryItem(meshes.terrain,width,height,x,y,32,stack)
-      if stack and stack.count>1 then appendText(meshes.font,width,height,1,tostring(stack.count),x+18,y+20,TEXT_WHITE) end
+      appendStackCount(meshes.font,width,height,stack,x,y,32)
     end
     if screen=="furnace" then
       local furnace=inv.furnace or {}
       local input=inventoryRect(layout,56,17,16)
       local fuel=inventoryRect(layout,56,53,16)
       local output=inventoryRect(layout,116,35,16)
+      appendText(meshes.font,width,height,1,"INPUT",input.x-2,input.y-18,TAMARTON.muted)
+      appendText(meshes.font,width,height,1,"FUEL",fuel.x,fuel.y-18,TAMARTON.muted)
+      appendText(meshes.font,width,height,1,"OUTPUT",output.x-8,output.y-18,TAMARTON.muted)
+      appendInventorySlot(meshes.color,width,height,input.x,input.y,input.w,input.h,false)
+      appendInventorySlot(meshes.color,width,height,fuel.x,fuel.y,fuel.w,fuel.h,false)
+      appendInventorySlot(meshes.color,width,height,output.x,output.y,output.w,output.h,true)
       appendInventoryItem(meshes.terrain,width,height,input.x,input.y,input.w,furnace.input)
       appendInventoryItem(meshes.terrain,width,height,fuel.x,fuel.y,fuel.w,furnace.fuel)
       appendInventoryItem(meshes.terrain,width,height,output.x,output.y,output.w,furnace.output)
       for _,entry in ipairs({{furnace.input,input},{furnace.fuel,fuel},{furnace.output,output}}) do
         local stack,rect=entry[1],entry[2]
-        if stack and stack.count>1 then appendText(meshes.font,width,height,1,tostring(stack.count),rect.x+18,rect.y+20,TEXT_WHITE) end
+        appendStackCount(meshes.font,width,height,stack,rect.x,rect.y,rect.w)
       end
       local burn=(furnace.burnTotal or 0)>0 and (furnace.burnTime or 0)/furnace.burnTotal or 0
       local cook=(furnace.cookTotal or 10)>0 and (furnace.cookTime or 0)/furnace.cookTotal or 0
@@ -1144,20 +1445,28 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
       local gridX,gridY=screen=="crafting_table" and 30 or 98,screen=="crafting_table" and 17 or 18
       for row=0,gridSize-1 do for col=0,gridSize-1 do
         local rect=inventoryRect(layout,gridX+col*18,gridY+row*18,16)
-        appendInventoryItem(meshes.terrain,width,height,rect.x,rect.y,rect.w,inv.crafting[1+row*gridSize+col])
+        appendInventorySlot(meshes.color,width,height,rect.x,rect.y,rect.w,rect.h,false)
+        local stack=inv.crafting[1+row*gridSize+col]
+        appendInventoryItem(meshes.terrain,width,height,rect.x,rect.y,rect.w,stack)
+        appendStackCount(meshes.font,width,height,stack,rect.x,rect.y,rect.w)
       end end
       local result=inventoryRect(layout,screen=="crafting_table" and 124 or 154,screen=="crafting_table" and 35 or 28,16)
-      appendInventoryItem(meshes.terrain,width,height,result.x,result.y,result.w,inv:craftResult())
+      appendInventorySlot(meshes.color,width,height,result.x,result.y,result.w,result.h,true)
+      appendText(meshes.font,width,height,1,"OUTPUT",result.x-8,result.y-18,TAMARTON.muted)
+      local resultStack=inv:craftResult()
+      appendInventoryItem(meshes.terrain,width,height,result.x,result.y,result.w,resultStack)
+      appendStackCount(meshes.font,width,height,resultStack,result.x,result.y,result.w)
     end
   end
   local hovered=hud.inventorySlotAt(screen,width,height,mouseX or -1,mouseY or -1,state)
   if hovered and hovered.x then
-    appendRect(meshes.overlay,width,height,hovered.x,hovered.y,hovered.w,hovered.h,{1.0,1.0,1.0,0.24})
+    appendRect(meshes.overlay,width,height,hovered.x,hovered.y,hovered.w,hovered.h,
+      colorFromRgb(0xC79A68, 0.16))
   end
   local cursor=state.inventory.cursor
   if cursor then
     appendInventoryItem(meshes.terrain,width,height,mouseX-16,mouseY-16,32,cursor)
-    if cursor.count>1 then appendText(meshes.font,width,height,1,tostring(cursor.count),mouseX+3,mouseY+3,TEXT_WHITE) end
+    appendStackCount(meshes.font,width,height,cursor,mouseX-16,mouseY-16,32)
   end
   return meshes
 end
@@ -1230,11 +1539,12 @@ local function upload(vertices)
   }
 end
 
-local function createTexture(path, repeatWrap, linear)
+local function createTexture(path, repeatWrap, linear, roundedGuiCorners)
   local img = texture.loadPng(path)
   if not img then
     error("Failed to load HUD texture: " .. path)
   end
+  if roundedGuiCorners then texture.applyGuiCornerTransparency(img) end
 
   local tex = ffi.new("GLuint[1]")
   gl.glGenTextures(1, tex)
@@ -1340,30 +1650,16 @@ function hud.create(skinPath)
       hunger = createTexture("assets/textures/gui/icons/hunger.png"),
       crosshair = createTexture("assets/textures/gui/icons/crosshair.png"),
       font = createTexture("assets/textures/font/ascii.png"),
-      background = createTexture("assets/textures/gui/options_background.png", true),
-      logo = createTexture("assets/textures/gui/title/minecraft.png"),
       skin = createTexture(skinPath or "assets/textures/entity/steve.png"),
-      inventory = createTexture("assets/textures/gui/container/inventory.png"),
-      craftingTable = createTexture("assets/textures/gui/container/crafting_table.png"),
-      furnace = createTexture("assets/textures/gui/container/furnace.png"),
-      creativeItems = createTexture("assets/textures/gui/container/creative_inventory/tab_items.png"),
-      creativeSearch = createTexture("assets/textures/gui/container/creative_inventory/tab_item_search.png"),
-      creativeInventory = createTexture("assets/textures/gui/container/creative_inventory/tab_inventory.png"),
-      creativeTabs = createTexture("assets/textures/gui/container/creative_inventory/tabs.png"),
-      panoramaFaces = {
-        createTexture("assets/textures/gui/title/background/panorama_0.png", false, true),
-        createTexture("assets/textures/gui/title/background/panorama_1.png", false, true),
-        createTexture("assets/textures/gui/title/background/panorama_2.png", false, true),
-        createTexture("assets/textures/gui/title/background/panorama_3.png", false, true),
-        createTexture("assets/textures/gui/title/background/panorama_4.png", false, true),
-        createTexture("assets/textures/gui/title/background/panorama_5.png", false, true)
-      },
+      panoramaFaces = {},
       white = createTexture("assets/textures/gui/widgets.png")
     },
     heldTextures = {},
     heldModels = {},
     heldEquipKey = nil,
     heldEquipStart = 0.0,
+    noticeText = nil,
+    noticeStart = 0.0,
     meshes = nil,
     menuMeshes = nil,
     menuKey = nil,
@@ -1379,12 +1675,45 @@ function hud.create(skinPath)
   }, hud)
 end
 
-function hud:ensureMeshes(width, height, selectedSlot, state, time)
+-- The message above the hotbar, or nil once it has faded out.
+function hud:currentNotice(time)
+  if not self.noticeText then return nil end
+  local age = (time or 0.0) - (self.noticeStart or 0.0)
+  if age < 0 or age > NOTICE_HOLD_SECONDS + NOTICE_FADE_SECONDS then
+    self.noticeText = nil
+    return nil
+  end
+  local alpha = 1.0
+  if age > NOTICE_HOLD_SECONDS then
+    alpha = 1.0 - (age - NOTICE_HOLD_SECONDS) / NOTICE_FADE_SECONDS
+  end
+  return {text = self.noticeText, alpha = math.max(0.0, math.min(1.0, alpha))}
+end
+
+function hud:setNotice(text, time)
+  self.noticeText = text and tostring(text) or nil
+  self.noticeStart = time or 0.0
+end
+
+-- Notices the item in hand changing, which drives both the equip lift and the
+-- name above the hotbar. Kept out of the draw path so it still fires for an
+-- item with no model, and only once per change.
+function hud:trackHeldItem(stack, time)
+  local key = stack and stack.item or nil
+  if self.heldEquipKey == key then return end
+  self.heldEquipKey = key
+  self.heldEquipStart = time or 0.0
+  local definition = key and (blocks.mapping[key] or items.mapping[key])
+  if definition then self:setNotice(definition.name or key, time) end
+end
+
+function hud:ensureMeshes(width, height, selectedSlot, state, time, notice)
   selectedSlot = selectedSlot or 1
   local inventoryVersion = state and state.inventoryVersion or 0
   -- The held model animates from uniforms now, so the flat HUD only rebuilds
-  -- when something it actually draws changes.
-  local statusKey = table.concat({selectedSlot, math.ceil(state and state.health or 20), math.ceil(state and state.hunger or 20), state and state.worldGameMode or "survival", inventoryVersion}, ":")
+  -- when something it actually draws changes. The notice is quantised so a
+  -- fading message costs a handful of rebuilds rather than one per frame.
+  local statusKey = table.concat({selectedSlot, math.ceil(state and state.health or 20), math.ceil(state and state.hunger or 20), state and state.worldGameMode or "survival", inventoryVersion, notice and notice.text or "", notice and math.floor(notice.alpha * 8) or -1}, ":")
   if self.meshes and self.width == width and self.height == height and self.statusKey == statusKey then
     return
   end
@@ -1393,7 +1722,7 @@ function hud:ensureMeshes(width, height, selectedSlot, state, time)
   self.height = height
   self.selectedSlot = selectedSlot
   self.statusKey = statusKey
-  local rawMeshes = buildMeshes(width, height, selectedSlot, state, time)
+  local rawMeshes = buildMeshes(width, height, selectedSlot, state, time, notice)
   rendering.releaseGroup(self.meshes)
   self.meshes = {
     color = upload(rawMeshes.color),
@@ -1426,23 +1755,13 @@ end
 -- runs every frame without touching a vertex buffer.
 function hud:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture, environment)
   local stack = state and state.inventory and state.inventory.slots and state.inventory.slots[selectedSlot or 1]
-  if not stack then
-    self.heldEquipKey = nil
-    return
-  end
+  if not stack then return end
   local model = heldModelFor(self, stack)
   if not model or model.mesh.count == 0 then return end
 
   local texture = model.atlas and atlasTexture or heldTextureFor(self, model.source)
   if not texture then return end
 
-  -- A new item rises into frame instead of appearing. Tracking the key here
-  -- keeps the animation working for hotbar scrolling, crafting and pick-block
-  -- alike, without the game loop having to notice the change.
-  if self.heldEquipKey ~= stack.item then
-    self.heldEquipKey = stack.item
-    self.heldEquipStart = time or 0.0
-  end
   local equip = heldItem.equipPose(((time or 0.0) - self.heldEquipStart) / HELD_EQUIP_SECONDS)
   local swingStyle = state.handSwingStyle
   local swing = heldItem.swingPose(state.handSwing, swingStyle)
@@ -1454,9 +1773,11 @@ function hud:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture
   -- model keeps the same share of the frame on any display.
   local displayScale = math.max(0.75, height / 720)
   local blockScale = model.sprite and 1.0 or heldItem.BLOCK_SCALE
-  local size = (transform.size or defaults.size) * displayScale * blockScale
-  local centerX = width - ((transform.xInset or defaults.xInset) + motion.x) * displayScale
-  local centerY = height - ((transform.yInset or defaults.yInset) + motion.y) * displayScale
+  local size = (transform.size or defaults.size) * (swing.scale or 1.0) * displayScale * blockScale
+  local centerX = width - ((transform.xInset or defaults.xInset) + motion.x +
+    (swing.xInset or 0.0)) * displayScale
+  local centerY = height - ((transform.yInset or defaults.yInset) + motion.y +
+    (swing.yInset or 0.0)) * displayScale
 
   local basePose = heldItem.BLOCK_POSE
   if model.sprite then
@@ -1466,14 +1787,23 @@ function hud:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture
       pitch = transform.pitch or defaults.pitch
     }
   end
-  local poseMatrix = heldItem.rotationMatrix(basePose.roll, basePose.yaw, basePose.pitch)
-  local swingMatrix = heldItem.rotationMatrix(
-    swing.roll + equip.roll, swing.yaw + equip.yaw, swing.pitch + equip.pitch)
+  local poseMatrix
+  local swingMatrix
+  if swing.authored then
+    poseMatrix = heldItem.rotationMatrix(
+      basePose.roll + swing.roll, basePose.yaw + swing.yaw, basePose.pitch + swing.pitch)
+    swingMatrix = heldItem.rotationMatrix(equip.roll, equip.yaw, equip.pitch)
+  else
+    poseMatrix = heldItem.rotationMatrix(basePose.roll, basePose.yaw, basePose.pitch)
+    swingMatrix = heldItem.rotationMatrix(
+      swing.roll + equip.roll, swing.yaw + equip.yaw, swing.pitch + equip.pitch)
+  end
 
-  local cameraDistance = math.max(1.2, transform.perspective or defaults.perspective)
+  local cameraDistance = math.max(1.2, swing.perspective or transform.perspective or defaults.perspective)
   local near = math.max(0.1, cameraDistance - 1.4)
   local far = cameraDistance + 1.4
-  local thickness = model.sprite and math.max(0.002, transform.thickness or defaults.thickness) or 1.0
+  local thickness = model.sprite and
+    math.max(0.002, swing.thickness or transform.thickness or defaults.thickness) or 1.0
 
   local tint = model.definition.color or {1,1,1}
   local ambient = environment.ambient or {0.72,0.75,0.80}
@@ -1489,7 +1819,11 @@ function hud:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture
   gl.glUniform3f(locations.modelScale, 1.0, 1.0, thickness)
   local pivot = heldItem.pivotFor(swingStyle)
   gl.glUniform3f(locations.pivot, pivot[1], pivot[2], pivot[3])
-  gl.glUniform3f(locations.translate, swing.x + equip.x, swing.y + equip.y, swing.z + equip.z)
+  -- Minecraft's standard first-person transform includes a negative Z
+  -- translation. It belongs before projection, alongside animation depth.
+  local modelDepth = transform.depth or defaults.depth
+  gl.glUniform3f(locations.translate, swing.x + equip.x, swing.y + equip.y,
+    modelDepth + swing.z + equip.z)
   gl.glUniform2f(locations.center, ndcX(centerX, width), ndcY(centerY, height))
   gl.glUniform2f(locations.scale, size / width * 2.0, size / height * 2.0)
   gl.glUniform3f(locations.projection, cameraDistance, near, far)
@@ -1517,7 +1851,9 @@ end
 
 function hud:draw(width, height, time, selectedSlot, state, atlasTexture, environment)
   environment=environment or {}
-  self:ensureMeshes(width, height, selectedSlot, state, time)
+  self:trackHeldItem(state and state.inventory and state.inventory.slots and
+    state.inventory.slots[selectedSlot or 1], time)
+  self:ensureMeshes(width, height, selectedSlot, state, time, self:currentNotice(time))
 
   self:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture, environment)
 
@@ -1560,12 +1896,6 @@ function hud:drawInventory(width,height,screen,state,mouseX,mouseY,atlasTexture,
   gl.glDisable(GL_DEPTH_TEST) gl.glEnable(GL_BLEND) gl.glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA) gl.glDepthMask(0)
   gl.glUseProgram(self.shader) gl.glUniform1f(self.timeLocation,0) gl.glUniform1i(self.textureLocation,0)
   self:drawMesh(self.inventoryMeshes.color,self.textures.white)
-  local panelTexture=screen=="crafting_table" and self.textures.craftingTable or
-    (screen=="furnace" and self.textures.furnace or self.textures.inventory)
-  self:drawMesh(self.inventoryMeshes.panel,panelTexture)
-  local creativeBackground = state.creativeTab == "search" and self.textures.creativeSearch or self.textures.creativeItems
-  self:drawMesh(self.inventoryMeshes.creativePanel,creativeBackground)
-  self:drawMesh(self.inventoryMeshes.creativeTabs,self.textures.creativeTabs)
   self:drawMesh(self.inventoryMeshes.overlay,self.textures.white)
   self:drawMesh(self.inventoryMeshes.skin,self.textures.skin)
   if atlasTexture then self:drawMesh(self.inventoryMeshes.terrain,atlasTexture) end
@@ -1620,9 +1950,7 @@ function hud:drawMenu(width, height, screen, mouseX, mouseY, menuState, time)
       self:drawMesh(self.menuMeshes.panoramaFaces[i], self.textures.panoramaFaces[i])
     end
   end
-  self:drawMesh(self.menuMeshes.background, self.textures.background)
   self:drawMesh(self.menuMeshes.color, self.textures.white)
-  self:drawMesh(self.menuMeshes.logo, self.textures.logo)
   self:drawMesh(self.menuMeshes.widgets, self.textures.widgets)
   self:drawMesh(self.menuMeshes.font, self.textures.font)
 
@@ -1665,7 +1993,6 @@ function hud:drawLoading(width, height, loadingState)
   gl.glUniform1f(self.timeLocation, 0.0)
   gl.glUniform1i(self.textureLocation, 0)
 
-  self:drawMesh(self.loadingMeshes.background, self.textures.background)
   self:drawMesh(self.loadingMeshes.color, self.textures.white)
   self:drawMesh(self.loadingMeshes.font, self.textures.font)
 

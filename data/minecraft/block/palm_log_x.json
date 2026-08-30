@@ -1,0 +1,11 @@
+{
+  "name": "Palm Trunk (X Axis)",
+  "texture": {
+    "top": "./textures/blocks/log_jungle_top.png",
+    "bottom": "./textures/blocks/log_jungle_top.png",
+    "side": "./textures/blocks/log_jungle.png"
+  },
+  "hardness": 1.6,
+  "preferredTool": "axe",
+  "properties": {"solid": true, "logAxis": "x", "hidden": true, "drop": "palm_log", "soundMaterial": "wood"}
+}

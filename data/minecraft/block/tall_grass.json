@@ -8,6 +8,7 @@
     "cutout": true,
     "plant": true,
     "cross": true,
+    "randomTransform": true,
     "replaceable": true,
     "breakable": true,
     "targetable": true

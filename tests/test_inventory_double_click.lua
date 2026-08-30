@@ -18,6 +18,20 @@ assert(inventory.slots[2].item == "dirt" and inventory.slots[2].count == 30,
 assert(inventory:collectToCursor() == 0 and inventory.slots[3].count == 8,
   "a full cursor stack should not consume additional items")
 
+local everyContainer = Inventory.new("survival")
+everyContainer.cursor = {item = "oak_planks", count = 8}
+everyContainer.slots[18] = {item = "oak_planks", count = 7}
+everyContainer.crafting[1] = {item = "oak_planks", count = 6}
+everyContainer.furnace.input = {item = "oak_planks", count = 5}
+everyContainer.furnace.fuel = {item = "coal", count = 3}
+assert(everyContainer:collectToCursor() == 18,
+  "double-click collection should include inventory, crafting, and furnace stacks")
+assert(everyContainer.cursor.count == 26 and everyContainer.slots[18] == nil and
+    everyContainer.crafting[1] == nil and everyContainer.furnace.input == nil,
+  "matching stacks from every visible container should move to the cursor")
+assert(everyContainer.furnace.fuel.item == "coal",
+  "double-click collection should leave non-matching container stacks alone")
+
 local drag = Inventory.new("survival")
 drag.cursor = {item = "oak_log", count = 16}
 assert(drag:distributeSlots({1, 2}) == 16,

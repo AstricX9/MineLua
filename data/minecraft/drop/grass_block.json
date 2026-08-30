@@ -1,0 +1,9 @@
+{
+  "block": "minecraft:grass_block",
+  "drops": [
+    {
+      "item": "minecraft:dirt",
+      "count": 1
+    }
+  ]
+}

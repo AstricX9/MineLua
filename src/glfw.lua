@@ -24,6 +24,7 @@ void glfwWindowHint(int hint, int value);
 int glfwGetKey(GLFWwindow* window, int key);
 int glfwGetMouseButton(GLFWwindow* window, int button);
 void glfwSetInputMode(GLFWwindow* window, int mode, int value);
+int glfwRawMouseMotionSupported(void);
 void glfwGetCursorPos(GLFWwindow* window, double* xpos, double* ypos);
 void glfwGetWindowPos(GLFWwindow* window, int* xpos, int* ypos);
 void glfwGetWindowSize(GLFWwindow* window, int* width, int* height);
@@ -47,6 +48,9 @@ local glfw = setmetatable({
 	GLFW_CURSOR_NORMAL = 0x00034001,
 	GLFW_CURSOR_HIDDEN = 0x00034002,
 	GLFW_CURSOR_DISABLED = 0x00034003,
+	GLFW_RAW_MOUSE_MOTION = 0x00033005,
+	GLFW_TRUE = 1,
+	GLFW_FALSE = 0,
 	GLFW_PRESS = 1,
 	GLFW_RELEASE = 0,
 	GLFW_KEY_W = 87,
@@ -75,11 +79,14 @@ local glfw = setmetatable({
 	GLFW_KEY_BACKSPACE = 259,
 	GLFW_KEY_MINUS = 45,
 	GLFW_KEY_ESCAPE = 256,
+	GLFW_KEY_F1 = 290,
+	GLFW_KEY_F2 = 291,
 	GLFW_KEY_F3 = 292,
 	GLFW_KEY_F4 = 293,
 	GLFW_KEY_F11 = 300,
 	GLFW_KEY_LEFT_SHIFT = 340,
 	GLFW_KEY_LEFT_CONTROL = 341,
+	GLFW_KEY_RIGHT_CONTROL = 345,
 	GLFW_MOUSE_BUTTON_LEFT = 0,
 	GLFW_MOUSE_BUTTON_RIGHT = 1,
 	GLFW_MOUSE_BUTTON_MIDDLE = 2,

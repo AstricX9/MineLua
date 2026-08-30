@@ -4,6 +4,7 @@ local itemMesh = require("item_mesh")
 
 local DroppedItems = {}
 DroppedItems.__index = DroppedItems
+DroppedItems.STRIDE_FLOATS = 18
 
 local ITEM_RADIUS = 0.18
 local GRAVITY = 20.0
@@ -11,11 +12,16 @@ local MAX_AGE = 300.0
 local PICKUP_RANGE_SQUARED = 2.25 * 2.25
 local QUARTER_TURN = math.pi * 0.5
 
-local function solidAt(world, x, y, z)
-  if not world then return false end
-  local id = world:blockAt(math.floor(x), math.floor(y), math.floor(z))
+local function supportAt(world, x, y, z)
+  if not world then return nil end
+  local blockX,blockY,blockZ=math.floor(x),math.floor(y),math.floor(z)
+  local id = world:blockAt(blockX,blockY,blockZ)
   local definition = id and blocks.list[id]
-  return definition and definition.properties and definition.properties.solid == true or false
+  local properties=definition and definition.properties
+  if not properties or properties.solid~=true then return nil end
+  local height=world.collisionHeightAt and world:collisionHeightAt(blockX,blockY,blockZ) or 1.0
+  local surface=blockY+height
+  return y<=surface and surface or nil
 end
 
 function DroppedItems.new()
@@ -55,15 +61,25 @@ function DroppedItems:spawn(item, count, position, velocity, pickupDelay)
   return entity
 end
 
+function DroppedItems:spawnDisplay(item, position, scale)
+  local entity = self:spawn(item, 1, position, {0.0, 0.0, 0.0}, math.huge)
+  if not entity then return nil end
+  entity.display = true
+  entity.scale = scale or 1.0
+  entity.rotation = {0.0, 0.0, 0.0}
+  entity.angularVelocity = {0.0, 0.0, 0.0}
+  return entity
+end
+
 local function integrate(entity, dt, world)
   entity.velocity[2] = entity.velocity[2] - GRAVITY * dt
   local nextX = entity.position[1] + entity.velocity[1] * dt
   local nextY = entity.position[2] + entity.velocity[2] * dt
   local nextZ = entity.position[3] + entity.velocity[3] * dt
 
-  if entity.velocity[2] <= 0 and solidAt(world, nextX, nextY - ITEM_RADIUS, nextZ) then
-    local blockY = math.floor(nextY - ITEM_RADIUS)
-    nextY = blockY + 1.0 + ITEM_RADIUS
+  local support=entity.velocity[2]<=0 and supportAt(world,nextX,nextY-ITEM_RADIUS,nextZ) or nil
+  if support then
+    nextY = support + ITEM_RADIUS
     if math.abs(entity.velocity[2]) > 1.0 then
       entity.velocity[2] = -entity.velocity[2] * 0.18
     else
@@ -116,6 +132,10 @@ function DroppedItems:update(dt, world, playerPosition, inventory)
   local index = 1
   while index <= #self.items do
     local entity = self.items[index]
+    if entity.display then
+      index = index + 1
+      goto continue
+    end
     entity.age = entity.age + dt
     entity.pickupDelay = math.max(0.0, entity.pickupDelay - dt)
 
@@ -139,6 +159,7 @@ function DroppedItems:update(dt, world, playerPosition, inventory)
     else
       index = index + 1
     end
+    ::continue::
   end
   return pickedUp
 end
@@ -198,6 +219,10 @@ function DroppedItems.meshVertices(item)
         vertices[#vertices+1] = color[3]
         vertices[#vertices+1] = tex[1] == 0 and u0 or u1
         vertices[#vertices+1] = tex[2] == 0 and v0 or v1
+        vertices[#vertices+1] = 0.0
+        vertices[#vertices+1] = 0.0
+        vertices[#vertices+1] = 1.0
+        vertices[#vertices+1] = 0.0
         vertices[#vertices+1] = 0.0
         vertices[#vertices+1] = 0.0
         vertices[#vertices+1] = 1.0

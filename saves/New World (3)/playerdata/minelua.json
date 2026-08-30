@@ -1,0 +1,100 @@
+{
+  "format": "minelua-player",
+  "savedAt": 1788056522000,
+  "state": {
+    "camera": {
+      "acceleration": 55,
+      "airAcceleration": 14,
+      "airFriction": 2,
+      "allowFlight": false,
+      "bobPhase": 1.5239357711042,
+      "bodyRadius": 0.3,
+      "coyoteTime": 0.1,
+      "coyoteTimer": 0.1,
+      "crouchEyeHeight": 1.24,
+      "crouchSpeed": 2.4,
+      "crouching": false,
+      "eyeHeight": 1.62,
+      "firstMouse": false,
+      "flightToggleWasDown": false,
+      "flyAcceleration": 24,
+      "flyFriction": 18,
+      "flySpeed": 9.5,
+      "flying": false,
+      "fovOffset": 0,
+      "gravity": 15.5,
+      "groundFriction": 46,
+      "groundSnap": 0.36,
+      "grounded": true,
+      "invertMouse": false,
+      "jumpBuffer": 0,
+      "jumpBufferTime": 0.12,
+      "jumpSpeed": 6.6,
+      "jumpWasDown": false,
+      "landingViewOffset": 0,
+      "lastX": 1402,
+      "lastY": 694,
+      "mouseSensitivity": 0.085,
+      "mouseSmoothing": 42,
+      "mouseTurnVelocity": -0.0039166273512807,
+      "moveInputX": 0,
+      "moveInputZ": 0,
+      "pitch": 3.472718250987,
+      "position": [
+        152.75693854047,
+        72.62,
+        23.144695147746
+      ],
+      "reach": 6,
+      "sprintSpeed": 7.2,
+      "sprinting": false,
+      "standEyeHeight": 1.62,
+      "stepHeight": 0.6,
+      "stepViewOffset": 0,
+      "swimAcceleration": 18,
+      "swimSinkSpeed": 0.65,
+      "swimUpSpeed": 4.6,
+      "targetPitch": 3.4727699592469,
+      "targetYaw": -99.987134103059,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "velocityY": 0,
+      "viewBobPitch": 1.2880441366786e-21,
+      "viewBobX": 5.3564161554955e-27,
+      "viewBobY": 1.0337163943267e-26,
+      "viewBobbingEnabled": true,
+      "viewRoll": 0.00017371711564408,
+      "walkSpeed": 5.1,
+      "yaw": -99.987134103059
+    },
+    "inventory": {
+      "crafting": {
+      },
+      "craftingGridSize": 2,
+      "furnace": {
+        "burnTime": 0,
+        "burnTotal": 0,
+        "cookTime": 0,
+        "cookTotal": 10
+      },
+      "gameMode": "survival",
+      "recipeHint": "Break gravel for flint, then gather sticks from leaves or wood.",
+      "search": "",
+      "selected": 1,
+      "slots": [
+        {
+          "count": 1,
+          "item": "allium"
+        },
+        {
+          "count": 1,
+          "item": "tall_grass"
+        }
+      ]
+    }
+  },
+  "version": 1
+}

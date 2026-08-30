@@ -1,10 +1,14 @@
 local ffi = require("ffi")
+local vfs = require("vfs")
 
 local M = {}
 
--- STB Image loader via FFI
+-- STB Image loader via FFI. The from-memory entry point is what a packed
+-- release decodes through: stbi_load only ever sees a real path, and in a
+-- release build the PNGs live inside the container instead.
 ffi.cdef[[
   unsigned char *stbi_load(char const *filename, int *x, int *y, int *channels_in_file, int desired_channels);
+  unsigned char *stbi_load_from_memory(unsigned char const *buffer, int len, int *x, int *y, int *channels_in_file, int desired_channels);
   void stbi_image_free(void *retval_from_stbi_load);
 ]]
 
@@ -51,9 +55,19 @@ local function load_png(path)
   local w = ffi.new("int[1]")
   local h = ffi.new("int[1]")
   local channels = ffi.new("int[1]")
-  
-  -- Force 4 channels (RGBA)
+
+  -- Force 4 channels (RGBA). A loose file on disk wins; only when there is
+  -- none does the container get asked, which keeps texture overrides working
+  -- and costs a packed build one failed open per image.
   local data = stbi.stbi_load(path, w, h, channels, 4)
+  local packed
+  if data == nil then
+    packed = vfs.read(path)
+    if packed then
+      data = stbi.stbi_load_from_memory(ffi.cast("const unsigned char *", packed), #packed,
+        w, h, channels, 4)
+    end
+  end
   if data == nil then return nil end
 
   local width = w[0]
@@ -69,6 +83,136 @@ end
 
 function M.loadPng(path)
   return load_png(path)
+end
+
+-- The classic 176x166 container panels have a tiny rounded silhouette. Some
+-- source packs store those corner texels against an opaque white matte, so
+-- blending alone cannot reveal the world behind them. Clear only the canonical
+-- 18 corner texels and leave every authored interior pixel untouched.
+function M.applyGuiCornerTransparency(img)
+  if not img or img.w ~= 176 or img.h ~= 166 or not img.data then return img end
+
+  local corners = {
+    {0,0},{1,0},{173,0},{174,0},{175,0},
+    {0,1},{174,1},{175,1},{175,2},
+    {0,163},{0,164},{1,164},{175,164},
+    {0,165},{1,165},{2,165},{174,165},{175,165}
+  }
+  for _, point in ipairs(corners) do
+    img.data[(point[2] * img.w + point[1]) * 4 + 3] = 0
+  end
+  return img
+end
+
+-- Minimal PNG writer, used for screenshots.
+--
+-- Deflate is written as stored blocks: a screenshot is a one-off keypress, and
+-- an uncompressed PNG every viewer can open beats pulling in a compressor.
+local crc_table
+
+local function crc32(buffer, length)
+  if not crc_table then
+    crc_table = ffi.new("uint32_t[256]")
+    for n = 0, 255 do
+      local c = n
+      for _ = 1, 8 do
+        if bit.band(c, 1) ~= 0 then
+          c = bit.bxor(0xEDB88320, bit.rshift(c, 1))
+        else
+          c = bit.rshift(c, 1)
+        end
+      end
+      crc_table[n] = c
+    end
+  end
+
+  local crc = 0xFFFFFFFF
+  for i = 0, length - 1 do
+    crc = bit.bxor(crc_table[bit.band(bit.bxor(crc, buffer[i]), 0xFF)], bit.rshift(crc, 8))
+  end
+  return bit.bxor(crc, 0xFFFFFFFF)
+end
+
+local function adler32(buffer, length)
+  local a, b, i = 1, 0, 0
+  while i < length do
+    -- 5552 is the most bytes that can be summed before b can overflow the
+    -- exact integer range of a double.
+    local span = math.min(length - i, 5552)
+    for j = 0, span - 1 do
+      a = a + buffer[i + j]
+      b = b + a
+    end
+    a = a % 65521
+    b = b % 65521
+    i = i + span
+  end
+  return b * 65536 + a
+end
+
+-- Writes `width * height` RGB triples. `bottomUp` flips the rows on the way
+-- out, which is what OpenGL hands back from glReadPixels.
+function M.writePng(path, width, height, rgb, bottomUp)
+  local rowBytes = width * 3
+  local rawLength = height * (1 + rowBytes)
+  local blocks = math.max(1, math.ceil(rawLength / 65535))
+  local zlibLength = 2 + blocks * 5 + rawLength + 4
+  local total = 8 + 25 + (12 + zlibLength) + 12
+  local out = ffi.new("uint8_t[?]", total)
+  local at = 0
+
+  local function byte(value)
+    out[at] = bit.band(value, 0xFF)
+    at = at + 1
+  end
+  local function be32(value)
+    byte(bit.rshift(value, 24)) byte(bit.rshift(value, 16))
+    byte(bit.rshift(value, 8)) byte(value)
+  end
+  local function tag(text)
+    for i = 1, #text do byte(text:byte(i)) end
+  end
+  local function chunk(name, dataStart, dataLength)
+    local crcStart = dataStart - 4
+    be32(crc32(out + crcStart, dataLength + 4))
+  end
+
+  for _, value in ipairs({0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}) do byte(value) end
+
+  be32(13) local ihdr = at + 4 tag("IHDR")
+  be32(width) be32(height)
+  byte(8) byte(2) byte(0) byte(0) byte(0)
+  chunk("IHDR", ihdr, 13)
+
+  be32(zlibLength) local idat = at + 4 tag("IDAT")
+  byte(0x78) byte(0x01)
+  local raw = ffi.new("uint8_t[?]", rawLength)
+  for row = 0, height - 1 do
+    local source = bottomUp and (height - 1 - row) or row
+    local destination = row * (1 + rowBytes)
+    raw[destination] = 0
+    ffi.copy(raw + destination + 1, rgb + source * rowBytes, rowBytes)
+  end
+  local written = 0
+  while written < rawLength do
+    local span = math.min(rawLength - written, 65535)
+    byte(written + span >= rawLength and 1 or 0)
+    byte(bit.band(span, 0xFF)) byte(bit.rshift(span, 8))
+    byte(bit.band(bit.bxor(span, 0xFFFF), 0xFF)) byte(bit.rshift(bit.bxor(span, 0xFFFF), 8))
+    ffi.copy(out + at, raw + written, span)
+    at = at + span
+    written = written + span
+  end
+  be32(adler32(raw, rawLength))
+  chunk("IDAT", idat, zlibLength)
+
+  be32(0) local iend = at + 4 tag("IEND") chunk("IEND", iend, 0)
+
+  local file = io.open(path, "wb")
+  if not file then return false end
+  file:write(ffi.string(out, at))
+  file:close()
+  return true
 end
 
 local function create_missing_texture()

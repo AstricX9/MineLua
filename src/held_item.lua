@@ -17,14 +17,16 @@ local HeldItem = {}
 -- Authored first-person placement.  Position and size are in pixels against a
 -- 720p viewport and scale with the drawable; the angles are degrees.
 HeldItem.DEFAULTS = {
-  xInset = 161.5,
-  yInset = 254.7,
-  size = 526.8,
-  -- Roll is positive because the model is laid in flipped: mirroring the sheet
-  -- reverses which way a screen-plane rotation stands the tool up.
-  roll = 35.8,
-  yaw = -46.1,
-  pitch = -7.2,
+  -- Minecraft's standard right-hand placement is expressed as normalised
+  -- screen position and a scale against the viewport height. Convert it once
+  -- here because the HUD's animation offsets use the 1280x720 authoring grid.
+  xInset = (1.0 - 0.56) * 1280.0 * 0.5,
+  yInset = (1.0 - 0.52) * 720.0 * 0.5,
+  size = 1.0 * 720.0,
+  roll = 0.0,
+  yaw = -45.0,
+  pitch = 0.0,
+  depth = -0.72,
   thickness = 1.0 / 16.0,
   perspective = 3.2
 }
@@ -42,17 +44,26 @@ HeldItem.BLOCK_POSE = {roll = 0.0, yaw = -40.0, pitch = 22.0}
 -- which would just spin the tool on the spot. A tap turns at the wrist; a
 -- felling swing comes from the shoulder, so its pivot sits further out.
 HeldItem.SWING_PIVOT = {0.22, -0.36, 0.0}
-HeldItem.CHOP_PIVOT = {0.10, -0.30, 0.0}
+HeldItem.CHOP_PIVOT = {0.0, 0.0, 0.0}
 
 -- A tap is over before you notice it. A felling swing is the whole point of
 -- carrying an axe, so it takes as long as the chop cadence it drives.
 HeldItem.SWING_SECONDS = 0.28
-HeldItem.CHOP_SECONDS = 2.0
+-- The supplied nine-frame path contains both the outward and return takes.
+HeldItem.CHOP_SECONDS = 0.340
 
 -- Where in the swing the blow actually connects. Damage is applied here, not
 -- on the button press, so the hit and the animation that sold it are one event.
 HeldItem.SWING_IMPACT = 0.42
-HeldItem.CHOP_IMPACT = 0.55
+HeldItem.CHOP_IMPACT_A = 150.0 / 340.0
+HeldItem.CHOP_IMPACT_B = 230.0 / 340.0
+
+-- The carried item uses a broader, slower gait than the camera. Keeping this
+-- phase independent prevents a comfortable camera bob from forcing the hand
+-- into the same small, quick oscillation.
+HeldItem.WALK_CYCLES_PER_METRE = 0.18
+HeldItem.WALK_BOB_X_PIXELS = 18.0
+HeldItem.WALK_BOB_Y_PIXELS = 14.0
 
 -- Axes are two-handed enough to be worth animating differently: everything else
 -- keeps the quick overhead tap.
@@ -221,11 +232,6 @@ end
 
 local REST_POSE = {roll = 0, yaw = 0, pitch = 0, x = 0, y = 0, z = 0}
 
-local function smoothstep(x)
-  x = clamp(x, 0.0, 1.0)
-  return x * x * (3.0 - 2.0 * x)
-end
-
 -- The quick tap. `progress` is one 0..1 cycle: the tool drops back and to the
 -- right, then the wrist drives it down and across so the head traces an arc
 -- through the middle of the frame instead of sliding sideways.
@@ -247,55 +253,100 @@ local function tapPose(t)
   }
 end
 
--- How far along the felling swing the axe is: +1 fully cocked back over the
--- right shoulder, 0 at rest, negative through the follow-through past the far
--- side. Wind up slowly, cross fast, coast back.
-local CHOP_WINDUP = 0.36
-local CHOP_STRIKE = 0.58
-local CHOP_OVERSHOOT = 1.45
+-- Absolute tuner values for the complete two-take felling path. Times are
+-- normalized from the supplied milliseconds only at this boundary; retaining
+-- the authored values here makes the table straightforward to verify or tune.
+HeldItem.CHOP_KEYFRAMES = {
+  {time =   0 / 340, xInset = 161.5, yInset = 254.7, size = 526.8,
+    roll = 35.8, yaw = -46.1, pitch = -2.0, thickness = 0.0625, perspective = 3.20},
+  {time =  45 / 340, xInset = 105.0, yInset = 235.0, size = 535.0,
+    roll = 47.0, yaw = -52.0, pitch = -4.0, thickness = 0.0625, perspective = 3.20},
+  {time =  85 / 340, xInset = 145.0, yInset = 270.0, size = 545.0,
+    roll = 30.0, yaw = -48.0, pitch = -7.0, thickness = 0.0625, perspective = 3.20},
+  {time = 120 / 340, xInset = 310.0, yInset = 300.0, size = 560.0,
+    roll = 5.0, yaw = -40.0, pitch = -11.0, thickness = 0.0625, perspective = 3.20},
+  {time = 150 / 340, xInset = 540.0, yInset = 290.0, size = 575.0,
+    roll = -28.0, yaw = -28.0, pitch = -14.0, thickness = 0.0625, perspective = 3.20},
+  {time = 180 / 340, xInset = 720.0, yInset = 255.0, size = 555.0,
+    roll = -48.0, yaw = -20.0, pitch = -10.0, thickness = 0.0625, perspective = 3.20},
+  {time = 230 / 340, xInset = 430.0, yInset = 230.0, size = 535.0,
+    roll = -10.0, yaw = -34.0, pitch = -5.0, thickness = 0.0625, perspective = 3.20},
+  {time = 285 / 340, xInset = 230.0, yInset = 245.0, size = 528.0,
+    roll = 24.0, yaw = -43.0, pitch = -3.0, thickness = 0.0625, perspective = 3.20},
+  {time = 340 / 340, xInset = 161.5, yInset = 254.7, size = 526.8,
+    roll = 35.8, yaw = -46.1, pitch = -2.0, thickness = 0.0625, perspective = 3.20}
+}
 
-local function chopAmount(t)
-  if t < CHOP_WINDUP then
-    return smoothstep(t / CHOP_WINDUP)
-  end
-  if t < CHOP_STRIKE then
-    local k = (t - CHOP_WINDUP) / (CHOP_STRIKE - CHOP_WINDUP)
-    -- Ease out, so the blade is quickest as it passes the crosshair.
-    return 1.0 - (1.0 + CHOP_OVERSHOOT) * (1.0 - (1.0 - k) * (1.0 - k))
-  end
-  local k = (t - CHOP_STRIKE) / (1.0 - CHOP_STRIKE)
-  return -CHOP_OVERSHOOT * (1.0 - smoothstep(k))
+-- The keyframes predate the Minecraft rest pose above. Treat their first
+-- frame as an animation origin so changing the carried-item placement does
+-- not make a heavy swing snap back to the former idle transform.
+HeldItem.CHOP_REFERENCE = {
+  xInset = 161.5, yInset = 254.7, size = 526.8,
+  roll = 35.8, yaw = -46.1, pitch = -2.0
+}
+
+local CHOP_FIELDS = {
+  "xInset", "yInset", "size", "roll", "yaw", "pitch", "thickness", "perspective"
+}
+
+local function frameTangent(frames, index, field)
+  if index <= 1 or index >= #frames then return 0.0 end
+  local previous, following = frames[index - 1], frames[index + 1]
+  return (following[field] - previous[field]) /
+    math.max(0.0001, following.time - previous.time)
 end
 
--- The felling swing: a wide horizontal sweep from the right shoulder across the
--- view, the way a two-handed axe is actually used, rather than a tap on the
--- spot. Yaw carries the sweep and the translation carries the reach, so the
--- head crosses the crosshair edge-on instead of skimming past it flat.
+-- Cubic Hermite interpolation shares the same tangent on both sides of every
+-- authored pose. Unlike applying smoothstep to each interval, the axe does not
+-- brake to a halt at all three screenshots before continuing its cut.
+local function smoothFrameField(frames, index, field, t)
+  local a, b = frames[index], frames[index + 1]
+  local span = math.max(0.0001, b.time - a.time)
+  local k = clamp((t - a.time) / span, 0.0, 1.0)
+  local k2, k3 = k * k, k * k * k
+  local h00 = 2.0 * k3 - 3.0 * k2 + 1.0
+  local h10 = k3 - 2.0 * k2 + k
+  local h01 = -2.0 * k3 + 3.0 * k2
+  local h11 = k3 - k2
+  return h00 * a[field] + h10 * span * frameTangent(frames, index, field) +
+    h01 * b[field] + h11 * span * frameTangent(frames, index + 1, field)
+end
+
 local function chopPose(t)
-  local a = chopAmount(t)
-  -- The two halves are not mirror images: the wind-up only has to leave the
-  -- frame's edge, while the strike has to carry the head all the way across it.
-  local back = math.max(0.0, a)
-  local through = math.max(0.0, -a)
+  local frames = HeldItem.CHOP_KEYFRAMES
+  local reference = HeldItem.CHOP_REFERENCE
+  local frameIndex = #frames - 1
+  for index = 1, #frames - 1 do
+    if t <= frames[index + 1].time then
+      frameIndex = index
+      break
+    end
+  end
+  local absolute = {}
+  for index = 1, #CHOP_FIELDS do
+    local field = CHOP_FIELDS[index]
+    absolute[field] = smoothFrameField(frames, frameIndex, field, t)
+  end
   return {
-    -- Yaw turns the blade face-on as the swing leaves rest, in both halves:
-    -- the authored pose is oblique enough that adding to it edge-on would make
-    -- the axe vanish to a line at exactly the moment you want to see it.
-    roll = 46.0 * a,
-    yaw = 20.0 * math.abs(a),
-    pitch = -8.0 * a,
-    x = 0.44 * back - 1.10 * through,
-    y = 0.16 * back - 0.08 * through,
-    z = 0.10 * back - 0.06 * through
+    authored = true,
+    x = 0.0, y = 0.0, z = 0.0,
+    xInset = absolute.xInset - reference.xInset,
+    yInset = absolute.yInset - reference.yInset,
+    scale = absolute.size / reference.size,
+    roll = absolute.roll - reference.roll,
+    yaw = absolute.yaw - reference.yaw,
+    pitch = absolute.pitch - reference.pitch,
+    thickness = absolute.thickness,
+    perspective = absolute.perspective
   }
 end
 
-function HeldItem.swingPose(progress, style)
+function HeldItem.swingPose(progress, style, direction)
   local t = clamp(progress or 0.0, 0.0, 1.0)
   -- Both ends of the cycle are the rest pose exactly. Letting the curves land
   -- on their own leaves a residual tilt that never quite settles.
-  if t <= 0.0 or t >= 1.0 then return REST_POSE end
   if style == "chop" then return chopPose(t) end
+  if t <= 0.0 or t >= 1.0 then return REST_POSE end
   return tapPose(t)
 end
 
@@ -315,11 +366,14 @@ function HeldItem.motionOffset(motion)
   local lookY = clamp(motion.lookY or 0.0, -220.0, 220.0)
   local bob = motion.bob or 0.0
   local phase = (motion.walkPhase or 0.0) * math.pi * 2.0
+  local footSide = math.cos(phase)
+  local weightedSide = footSide * (0.76 + 0.24 * math.abs(footSide))
+  local strideLift = math.abs(math.sin(phase)) ^ 1.65
   return {
     -- xInset counts from the right edge, so a rightward turn has to shrink it
     -- for the tool to trail behind the view.
-    x = -lookX * 0.16 + math.sin(phase) * 5.0 * bob,
-    y = lookY * 0.14 + math.abs(math.cos(phase)) * 4.0 * bob
+    x = -lookX * 0.16 + weightedSide * HeldItem.WALK_BOB_X_PIXELS * bob,
+    y = lookY * 0.14 + (strideLift - 0.32) * HeldItem.WALK_BOB_Y_PIXELS * bob
   }
 end
 
@@ -339,19 +393,27 @@ function HeldItem.updateSwing(state, dt, attacking, heavy)
   end
   if not state.handSwinging then
     state.handSwing = 0.0
+    state.handSwingStyle = heavy and "chop" or "quick"
     return false
   end
 
-  local impact = state.handSwingStyle == "chop" and HeldItem.CHOP_IMPACT or HeldItem.SWING_IMPACT
   local before = state.handSwing or 0.0
   local after = before + math.max(0.0, dt or 0.0) /
     math.max(0.05, state.handSwingSeconds or HeldItem.SWING_SECONDS)
-  if before < impact and after >= impact then landed = true end
+  local impactA, impactB
+  if state.handSwingStyle == "chop" then
+    impactA = HeldItem.CHOP_IMPACT_A
+    impactB = HeldItem.CHOP_IMPACT_B
+  else
+    impactA = HeldItem.SWING_IMPACT
+  end
+  if (before < impactA and after >= impactA) or
+      (impactB and before < impactB and after >= impactB) then landed = true end
   if after >= 1.0 then
     if attacking then
       after = after % 1.0
       -- A frame long enough to wrap the cycle still owes the next blow.
-      if not landed and after >= impact then landed = true end
+      if not landed and (after >= impactA or (impactB and after >= impactB)) then landed = true end
       state.handSwingStyle = heavy and "chop" or "quick"
       state.handSwingSeconds = heavy and HeldItem.CHOP_SECONDS or HeldItem.SWING_SECONDS
     else
@@ -387,7 +449,8 @@ function HeldItem.updateMotion(motion, camera, dt)
   local target = walking and math.min(1.0, speed / (camera.walkSpeed or 5.1)) or 0.0
   motion.bob = (motion.bob or 0.0) + (target - (motion.bob or 0.0)) * math.min(1.0, dt * 8.0)
   if walking then
-    motion.walkPhase = ((motion.walkPhase or 0.0) + dt * speed * 0.42) % 1.0
+    motion.walkPhase = ((motion.walkPhase or 0.0) +
+      dt * speed * HeldItem.WALK_CYCLES_PER_METRE) % 1.0
   end
 end
 

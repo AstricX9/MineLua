@@ -70,7 +70,9 @@ local forbidden = {
   [blocks.grass] = true,
   [blocks.tall_grass] = true,
   [blocks.oak_log] = true,
-  [blocks.spruce_log] = true
+  [blocks.spruce_log] = true,
+  [blocks.oak_log_alive] = true,
+  [blocks.spruce_log_alive] = true
 }
 for x = 0, 15 do
   for y = 0, 127 do

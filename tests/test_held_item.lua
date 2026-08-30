@@ -12,6 +12,11 @@ items.initTextures(atlas)
 
 local defaults = heldItem.DEFAULTS
 assert(defaults.size > 0 and defaults.perspective > 1.2, "the authored placement must be usable")
+assert(math.abs(defaults.xInset - 281.6) < 0.001 and
+  math.abs(defaults.yInset - 172.8) < 0.001 and defaults.size == 720.0 and
+  defaults.roll == 0.0 and defaults.yaw == -45.0 and defaults.pitch == 0.0 and
+  defaults.depth == -0.72,
+  "the rest pose should match Minecraft's standard right-hand transform")
 
 -- Tools extrude every opaque texel, so the model is far more than two quads and
 -- carries several distinct normals.
@@ -54,18 +59,59 @@ local mid = heldItem.swingPose(0.35)
 assert(math.abs(mid.roll) > 20 and math.abs(mid.pitch) > 15, "the strike should be a real arc")
 assert(heldItem.swingPose(1.0).roll == heldItem.swingPose(0.0).roll, "the cycle must close")
 
--- The felling swing crosses the view rather than tapping on the spot: it cocks
--- back to the right first, then sweeps well past centre the other way.
+-- The complete 340 ms felling swing passes through all nine supplied tuner
+-- poses, including size, depth and perspective rather than just screen motion.
 assert(heldItem.isHeavy(items.mapping.wood_axe), "axes swing heavy")
 assert(not heldItem.isHeavy(items.mapping.wood_pickaxe), "pickaxes keep the quick tap")
-local windup = heldItem.swingPose(0.3, "chop")
-local through = heldItem.swingPose(0.6, "chop")
-assert(windup.x > 0.2 and windup.roll > 20, "the axe should cock back to the right")
-assert(through.x < -0.8 and through.roll < -30, "and sweep the head across to the far side")
-assert(math.abs(through.x) > math.abs(heldItem.swingPose(0.6, "quick").x) * 8,
-  "the felling sweep travels far further than a tap")
-assert(heldItem.swingPose(1.0, "chop").x == 0, "the felling cycle must close too")
-assert(heldItem.CHOP_SECONDS > heldItem.SWING_SECONDS * 4, "a felling swing is a slow, heavy thing")
+local function close(actual, expected, label)
+  assert(math.abs(actual - expected) < 0.001,
+    string.format("%s: expected %.3f, got %.3f", label, expected, actual))
+end
+local supplied = {
+  {0,   161.5, 254.7, 526.8,  35.8, -46.1,  -2.0},
+  {45,  105.0, 235.0, 535.0,  47.0, -52.0,  -4.0},
+  {85,  145.0, 270.0, 545.0,  30.0, -48.0,  -7.0},
+  {120, 310.0, 300.0, 560.0,   5.0, -40.0, -11.0},
+  {150, 540.0, 290.0, 575.0, -28.0, -28.0, -14.0},
+  {180, 720.0, 255.0, 555.0, -48.0, -20.0, -10.0},
+  {230, 430.0, 230.0, 535.0, -10.0, -34.0,  -5.0},
+  {285, 230.0, 245.0, 528.0,  24.0, -43.0,  -3.0},
+  {340, 161.5, 254.7, 526.8,  35.8, -46.1,  -2.0}
+}
+for index, expected in ipairs(supplied) do
+  local pose = heldItem.swingPose(expected[1] / 340, "chop")
+  local label = "keyframe " .. index
+  local reference = heldItem.CHOP_REFERENCE
+  close(defaults.xInset + pose.xInset, defaults.xInset + expected[2] - reference.xInset, label .. " x")
+  close(defaults.yInset + pose.yInset, defaults.yInset + expected[3] - reference.yInset, label .. " y")
+  close(defaults.size * pose.scale, defaults.size * expected[4] / reference.size, label .. " size")
+  close(defaults.roll + pose.roll, defaults.roll + expected[5] - reference.roll, label .. " roll")
+  close(defaults.yaw + pose.yaw, defaults.yaw + expected[6] - reference.yaw, label .. " yaw")
+  close(defaults.pitch + pose.pitch, defaults.pitch + expected[7] - reference.pitch, label .. " pitch")
+  close(pose.thickness, 0.0625, label .. " depth")
+  close(pose.perspective, 3.20, label .. " perspective")
+end
+local farPose = heldItem.swingPose(180 / 340, "chop")
+local returnPose = heldItem.swingPose(230 / 340, "chop")
+assert(farPose.xInset > returnPose.xInset,
+  "the second take should reverse direction after the 180 ms far pose")
+assert(heldItem.swingPose(1.0, "chop").xInset == 0 and
+  heldItem.swingPose(1.0, "chop").roll == 0,
+  "the supplied final frame must return exactly to the starting pose")
+assert(heldItem.CHOP_SECONDS == 0.340,
+  "the supplied millisecond timing should drive the animation directly")
+
+-- It must pass through a keyframe without pausing there. Matching finite
+-- differences on both sides catches the old per-segment easing behaviour.
+local keyTime, epsilon = 150 / 340, 0.001
+local keyPose = heldItem.swingPose(keyTime, "chop")
+local beforeKey = heldItem.swingPose(keyTime - epsilon, "chop")
+local afterKey = heldItem.swingPose(keyTime + epsilon, "chop")
+local incomingSpeed = (keyPose.xInset - beforeKey.xInset) / epsilon
+local outgoingSpeed = (afterKey.xInset - keyPose.xInset) / epsilon
+assert(incomingSpeed > 100 and outgoingSpeed > 100 and
+  math.abs(incomingSpeed - outgoingSpeed) < math.max(incomingSpeed, outgoingSpeed) * 0.05,
+  "the axe should flow smoothly through the middle pose without braking")
 
 -- Equipping lifts the model from below and settles at the authored pose.
 assert(heldItem.equipPose(0).y < -0.5, "a new item starts below the frame")
@@ -82,22 +128,27 @@ assert(state.handSwinging and state.handSwing < 1.0, "holding attack keeps swing
 heldItem.updateSwing(state, heldItem.SWING_SECONDS, false)
 assert(not state.handSwinging and state.handSwing == 0.0, "releasing ends the swing at rest")
 
--- A held attack lands one blow per cycle, at the impact point rather than the
--- start, and a heavy swing takes the whole chop interval to come round again.
+-- One press completes both takes and lands twice, even when the button is
+-- released immediately after its press edge.
 local chopper = {handSwing = 0.0, handSwinging = false}
 local step, elapsed, blows = 1 / 60, 0.0, 0
 assert(heldItem.updateSwing(chopper, 0.0, true, true) == false, "the blade has not arrived yet")
 assert(chopper.handSwingStyle == "chop", "an axe should swing heavy")
-local firstBlow = nil
-while elapsed < heldItem.CHOP_SECONDS * 3 do
-  if heldItem.updateSwing(chopper, step, true, true) then
+local firstBlow, secondBlow = nil, nil
+while chopper.handSwinging and elapsed < heldItem.CHOP_SECONDS + 0.1 do
+  if heldItem.updateSwing(chopper, step, false, true) then
     blows = blows + 1
-    firstBlow = firstBlow or elapsed
+    if not firstBlow then firstBlow = elapsed else secondBlow = elapsed end
   end
   elapsed = elapsed + step
 end
-assert(blows == 3, "three cycles should land exactly three blows, got " .. blows)
-assert(firstBlow > heldItem.CHOP_SECONDS * 0.3, "the first blow lands partway through the swing")
+assert(blows == 2, "one axe input should land both takes, got " .. blows)
+assert(firstBlow and secondBlow and
+  math.abs(firstBlow - heldItem.CHOP_SECONDS * heldItem.CHOP_IMPACT_A) < 2 / 60 and
+  math.abs(secondBlow - heldItem.CHOP_SECONDS * heldItem.CHOP_IMPACT_B) < 2 / 60,
+  "the 150 ms and 230 ms takes should each have their own impact")
+assert(not chopper.handSwinging and chopper.handSwing == 0.0,
+  "the two-take action returns to its original rest pose")
 
 -- Sway follows the view and decays back to nothing when the camera settles.
 local motion = {lookX = 0, lookY = 0, bob = 0, walkPhase = 0}
@@ -110,6 +161,26 @@ local turned = heldItem.motionOffset(motion)
 assert(turned.x < 0, "xInset counts from the right edge, so the hand trails the turn")
 for _ = 1, 240 do heldItem.updateMotion(motion, camera, 1 / 60) end
 assert(math.abs(heldItem.motionOffset(motion).x) < 1.0, "a still camera should settle back")
+
+-- Held-item sway changes side across the stride, but advances on its own
+-- slower cycle so camera-bob tuning cannot make the carried item feel frantic.
+camera.velocity = {0, 0, -5.1}
+camera.walkSpeed = 5.1
+motion.bob = 1.0
+motion.walkPhase = 0.0
+local phaseBefore = motion.walkPhase
+heldItem.updateMotion(motion, camera, 1 / 60)
+local phaseAfter = motion.walkPhase
+local firstFoot = heldItem.motionOffset({bob = 1.0, walkPhase = 0.0})
+local otherFoot = heldItem.motionOffset({bob = 1.0, walkPhase = 0.5})
+assert(firstFoot.x * otherFoot.x < 0,
+  "the carried item should sway toward opposite sides on opposite footsteps")
+assert(phaseAfter > phaseBefore and
+  math.abs(phaseAfter - heldItem.WALK_CYCLES_PER_METRE * 5.1 / 60) < 0.0001,
+  "held-item gait should advance on its own distance-based cycle")
+local highStep = heldItem.motionOffset({bob = 1.0, walkPhase = 0.25})
+assert(math.abs(firstFoot.x) >= 17.0 and highStep.y >= 9.0,
+  "held-item gait should have a broad, clearly visible excursion")
 
 -- A yaw that wraps past 180 degrees is a small turn, not a full spin.
 motion.yaw, motion.lookX = 179, 0
