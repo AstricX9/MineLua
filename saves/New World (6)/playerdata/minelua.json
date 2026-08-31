@@ -1,16 +1,29 @@
 {
   "format": "minelua-player",
-  "savedAt": 1788079158000,
+  "savedAt": 1788158135000,
   "state": {
     "camera": {
       "acceleration": 55,
       "airAcceleration": 14,
       "airFriction": 2,
       "allowFlight": true,
-      "bobPhase": 56.068264657455,
+      "bobPhase": 678.34241401743,
       "bodyRadius": 0.3,
+      "controlBindings": {
+        "attack": "MOUSE1",
+        "back": "S",
+        "drop": "Q",
+        "forward": "W",
+        "inventory": "E",
+        "jump": "SPACE",
+        "left": "A",
+        "pick": "MOUSE3",
+        "right": "D",
+        "sneak": "CTRL",
+        "use": "MOUSE2"
+      },
       "coyoteTime": 0.1,
-      "coyoteTimer": 0,
+      "coyoteTimer": 0.1,
       "crouchEyeHeight": 1.24,
       "crouchSpeed": 2.4,
       "crouching": false,
@@ -21,54 +34,54 @@
       "flyFriction": 18,
       "flySpeed": 9.5,
       "flying": false,
-      "fovOffset": 3.4999999998853,
+      "fovOffset": 0,
       "gravity": 15.5,
       "groundFriction": 46,
       "groundSnap": 0.36,
-      "grounded": false,
+      "grounded": true,
       "invertMouse": false,
       "jumpBuffer": 0,
       "jumpBufferTime": 0.12,
       "jumpSpeed": 6.6,
-      "jumpWasDown": true,
-      "landingViewOffset": -0.01432991227264,
-      "lastX": -10001,
-      "lastY": 550,
+      "jumpWasDown": false,
+      "landingViewOffset": -9.4420463931338e-22,
+      "lastX": 1103,
+      "lastY": 1054,
       "mouseSensitivity": 0.085,
       "mouseSmoothing": 42,
-      "mouseTurnVelocity": 1.8903480976787,
-      "moveInputX": 0.042594126288034,
-      "moveInputZ": 0.99909245838699,
-      "pitch": -8.4621182806852,
+      "mouseTurnVelocity": 3.5843795343606,
+      "moveInputX": 0,
+      "moveInputZ": 0,
+      "pitch": -1.2115392308294,
       "position": [
-        -256.47630745804,
-        67.115532195183,
-        -101.35203940042
+        -95.247261884456,
+        75.62,
+        -177.6684868773
       ],
       "reach": 8,
       "sprintSpeed": 7.2,
-      "sprinting": true,
+      "sprinting": false,
       "standEyeHeight": 1.62,
       "stepHeight": 0.6,
-      "stepViewOffset": 0,
+      "stepViewOffset": -4.9042860859605e-220,
       "swimAcceleration": 18,
       "swimSinkSpeed": 0.65,
       "swimUpSpeed": 4.6,
-      "targetPitch": -8.459192760379,
-      "targetYaw": -992.41151433476,
+      "targetPitch": -1.1866996306577,
+      "targetYaw": -2396.5413739633,
       "velocity": [
-        0.30667770927384,
-        5.6811615500001,
-        7.1934657003863
+        0,
+        0,
+        0
       ],
-      "velocityY": 5.2528733000001,
-      "viewBobPitch": 0.021269410310884,
-      "viewBobX": 0.0029989243142747,
-      "viewBobY": -0.00080072574334871,
+      "velocityY": 0,
+      "viewBobPitch": 2.9522822855641e-24,
+      "viewBobX": 2.4522011147282e-28,
+      "viewBobY": -1.3447152287392e-28,
       "viewBobbingEnabled": true,
-      "viewRoll": -0.069565225258878,
+      "viewRoll": -0.037131630327775,
       "walkSpeed": 5.1,
-      "yaw": -992.44120221057
+      "yaw": -2396.5894425114
     },
     "inventory": {
       "crafting": {
@@ -82,12 +95,24 @@
       },
       "gameMode": "creative",
       "recipeHint": "Break gravel for flint, then gather sticks from leaves or wood.",
-      "search": "",
-      "selected": 2,
+      "search": "eee",
+      "selected": 4,
       "slots": [
         {
           "count": 64,
           "item": "cobblestone"
+        },
+        {
+          "count": 64,
+          "item": "dirt"
+        },
+        {
+          "count": 64,
+          "item": "torch"
+        },
+        {
+          "count": 64,
+          "item": "spruce_log"
         }
       ]
     }

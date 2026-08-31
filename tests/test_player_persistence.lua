@@ -10,6 +10,7 @@ package.loaded.glfw = stub
 
 local Camera = require("camera")
 local Inventory = require("inventory")
+local saves = require("saves")
 
 local sourceCamera = Camera.new({flying = true, allowFlight = true})
 sourceCamera.position = {123.25, 77.5, -456.75}
@@ -58,5 +59,32 @@ assert(restoredInventory.futureInventoryField.enabled == true,
   "new serializable inventory fields are captured automatically")
 assert(restoredInventory.recipeBook == runtimeRecipeBook,
   "runtime recipe data survives restoration")
+
+local temporaryWorld
+local atomicSaveOk, atomicSaveError = pcall(function()
+  temporaryWorld = saves.createWorld({
+    worldName = "MineLua player persistence test " .. tostring(os.time()),
+    gameMode = "survival",
+    generatorType = "default",
+    seed = 456
+  })
+  local firstSaved, firstError = saves.savePlayer(temporaryWorld, {
+    camera = savedCamera,
+    inventory = savedInventory,
+    sequence = 1
+  })
+  assert(firstSaved, firstError)
+  local secondSaved, secondError = saves.savePlayer(temporaryWorld, {
+    camera = savedCamera,
+    inventory = savedInventory,
+    sequence = 2
+  })
+  assert(secondSaved, secondError)
+  local reloaded = saves.loadPlayer(temporaryWorld)
+  assert(reloaded and reloaded.sequence == 2,
+    "atomic replacement publishes the complete newest player state")
+end)
+if temporaryWorld then saves.deleteWorld(temporaryWorld) end
+assert(atomicSaveOk, atomicSaveError)
 
 print("player persistence tests passed")

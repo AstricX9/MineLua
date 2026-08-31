@@ -8,6 +8,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+$logsRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "logs"))
+$buildLogsRoot = [System.IO.Path]::GetFullPath((Join-Path $logsRoot "build"))
+New-Item -ItemType Directory -Force -Path $logsRoot,$buildLogsRoot | Out-Null
+
+$logVersion = $Version -replace '[^A-Za-z0-9._-]', '_'
+$logTimestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$buildLogPath = Join-Path $buildLogsRoot "release-$logVersion-$logTimestamp.log"
+Start-Transcript -LiteralPath $buildLogPath -Force | Out-Null
+$transcriptStarted = $true
+Write-Host "Build log: $buildLogPath"
+
+try {
 $publicRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "build\public"))
 
 # Number successful release archives consecutively. Failed builds do not
@@ -156,11 +168,19 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $packageRoot "BUILD_MANIFEST.json") -Encoding utf8
 
+$packageRootPrefix = "$packageRoot\"
 $checksums = Get-ChildItem -LiteralPath $packageRoot -File -Recurse |
   Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
   Sort-Object FullName |
   ForEach-Object {
-    $relative = [System.IO.Path]::GetRelativePath($packageRoot, $_.FullName).Replace('\','/')
+    if (-not $_.FullName.StartsWith($packageRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Refusing to checksum a file outside the package root: $($_.FullName)"
+    }
+    # System.IO.Path.GetRelativePath is unavailable in Windows PowerShell 5.1's
+    # .NET Framework runtime. Every input was recursively enumerated beneath
+    # packageRoot, so removing the already-validated prefix is equivalent and
+    # works on both Windows PowerShell 5.1 and modern PowerShell.
+    $relative = $_.FullName.Substring($packageRootPrefix.Length).Replace('\','/')
     "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(),$relative
   }
 $checksums | Set-Content -LiteralPath (Join-Path $packageRoot "SHA256SUMS.txt") -Encoding ascii
@@ -172,23 +192,27 @@ Set-Content -LiteralPath "$archivePath.sha256" -Value "$archiveHash  $packageNam
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
 try {
+  # Windows PowerShell 5.1's Compress-Archive stores directory separators as
+  # backslashes. Normalize once so archive validation is independent of the
+  # PowerShell/.NET version that created the zip.
+  $archiveNames = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\','/') })
   # An obfuscated package is a handful of files, so the old "at least a hundred
   # entries" sanity check only applies to a loose one. What stands in for it is
   # the container: it carries everything those entries used to be.
   $minimumEntries = if ($PlainAssets) { 100 } else { 12 }
   if ($zip.Entries.Count -lt $minimumEntries) { throw "Release archive is unexpectedly incomplete." }
-  if (-not ($zip.Entries | Where-Object { $_.FullName -eq "$packageName/MineLua.exe" })) {
+  if ($archiveNames -notcontains "$packageName/MineLua.exe") {
     throw "Release archive does not contain MineLua.exe."
   }
   if (-not $PlainAssets) {
-    if (-not ($zip.Entries | Where-Object { $_.FullName -eq "$packageName/lib/minelua.pak" })) {
+    if ($archiveNames -notcontains "$packageName/lib/minelua.pak") {
       throw "Release archive does not contain the asset container."
     }
-    $strayAssets = $zip.Entries | Where-Object { $_.FullName -match '\.(png|wav|json|vsh|fsh|glsl)$' } |
-      Where-Object { $_.FullName -ne "$packageName/data/config/settings.json" -and
-                     $_.FullName -ne "$packageName/BUILD_MANIFEST.json" }
+    $strayAssets = $archiveNames | Where-Object { $_ -match '\.(png|wav|json|vsh|fsh|glsl)$' } |
+      Where-Object { $_ -ne "$packageName/data/config/settings.json" -and
+                     $_ -ne "$packageName/BUILD_MANIFEST.json" }
     if ($strayAssets) {
-      throw "Loose assets reached the archive: $($strayAssets.FullName -join ', ')"
+      throw "Loose assets reached the archive: $($strayAssets -join ', ')"
     }
   }
   $entryCount = $zip.Entries.Count
@@ -214,4 +238,21 @@ if ($containerKey) {
   Entries = $entryCount
   Bytes = (Get-Item -LiteralPath $archivePath).Length
   Obfuscated = (-not $PlainAssets)
+}
+} catch {
+  Write-Host "BUILD FAILED" -ForegroundColor Red
+  Write-Host ($_ | Out-String) -ForegroundColor Red
+  # A zip is not a successful release until all validation above has passed.
+  # Remove failed archives so they do not consume the next build number.
+  if ($archivePath -and (Test-Path -LiteralPath $archivePath)) {
+    Remove-Item -LiteralPath $archivePath -Force
+  }
+  if ($archivePath -and (Test-Path -LiteralPath "$archivePath.sha256")) {
+    Remove-Item -LiteralPath "$archivePath.sha256" -Force
+  }
+  throw
+} finally {
+  if ($transcriptStarted) {
+    try { Stop-Transcript | Out-Null } catch { }
+  }
 }

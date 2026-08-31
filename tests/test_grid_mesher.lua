@@ -216,6 +216,8 @@ assert(shadedHigh > shadedLow,
 local creaseLow = topFaceLight({{1, 0, 1}, {0, 1, 1}})
 assert(creaseLow < shadedLow,
   string.format("two occluders darken a corner further (%.4f against %.4f)", creaseLow, shadedLow))
+assert(creaseLow < 1e-9,
+  string.format("a fully occluded corner has no artificial light floor (saw %.4f)", creaseLow))
 print(string.format("AO: open %.3f, one occluder %.3f, corner crease %.3f",
   openLow, shadedLow, creaseLow))
 
