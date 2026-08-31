@@ -10,6 +10,23 @@ local terrain = {}
 
 terrain.SEA_LEVEL = settings.seaLevel or 63
 terrain.activeSeed = settings.seed or 1
+
+-- The noise hashes run hundreds of thousands of times per chunk, so anything
+-- they touch is hoisted: the library functions to locals, and the seed term to
+-- a value folded only when the seed changes rather than looked up through two
+-- tables and multiplied out on every call.
+local floor = math.floor
+local bit = require("bit")
+local tobit = bit.tobit
+local wgnoise = require("worldgen.noise")
+local imul, mix32 = wgnoise.imul, wgnoise.mix32
+
+local seedKey = 0
+
+local function refreshSeedTerm()
+  seedKey = imul(tobit((terrain.activeSeed or settings.seed or 1) * 101), 1442695041)
+end
+refreshSeedTerm()
 terrain.activeWorldId = "earth"
 terrain.activeProfile = worldProfiles.get(terrain.activeWorldId)
 
@@ -44,6 +61,7 @@ function terrain.setSeed(seed)
   local nextSeed = tonumber(seed) or settings.seed or 1
   if terrain.activeSeed ~= nextSeed then
     terrain.activeSeed = nextSeed
+    refreshSeedTerm()
     worldgen:setSeed(nextSeed)
     macroCache = {}
     macroCacheCount = 0
@@ -372,16 +390,16 @@ local function smoothstep(t)
   return t * t * (3.0 - 2.0 * t)
 end
 
+-- Salts are small constants, so their term stays well inside the exact range of
+-- a double; the world seed is folded into seedKey once instead.
 local function hash2(x, z, seed)
-  seed = seed + (terrain.activeSeed or settings.seed or 1) * 101
-  local n = x * 374761393 + z * 668265263 + seed * 1442695041
-  n = math.sin(n) * 43758.5453123
-  return n - math.floor(n)
+  return mix32(tobit(tobit(x * 374761393) + tobit(z * 668265263) +
+    seed * 1442695041 + seedKey))
 end
 
 local function valueNoise(x, z, seed)
-  local x0 = math.floor(x)
-  local z0 = math.floor(z)
+  local x0 = floor(x)
+  local z0 = floor(z)
   local x1 = x0 + 1
   local z1 = z0 + 1
 
@@ -399,31 +417,27 @@ local function valueNoise(x, z, seed)
 end
 
 local function hash3(x, y, z, seed)
-  seed = seed + (terrain.activeSeed or settings.seed or 1) * 101
-  local n = x * 374761393 + y * 1442695041 + z * 668265263 + seed * 1274126177
-  n = math.sin(n) * 43758.5453123
-  return n - math.floor(n)
+  return mix32(tobit(tobit(x * 374761393) + tobit(y * 1442695041) +
+    tobit(z * 668265263) + seed * 1274126177 + seedKey))
 end
 
+-- The eight lattice corners were read through a closure defined on every call.
+-- That allocation, once per octave per cell, dominated the density pass; reading
+-- them directly is the same arithmetic without it.
 local function valueNoise3(x, y, z, seed)
-  local x0 = math.floor(x)
-  local y0 = math.floor(y)
-  local z0 = math.floor(z)
+  local x0 = floor(x)
+  local y0 = floor(y)
+  local z0 = floor(z)
+  local x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
   local sx = smoothstep(x - x0)
   local sy = smoothstep(y - y0)
   local sz = smoothstep(z - z0)
 
-  local function sample(dx, dy, dz)
-    return hash3(x0 + dx, y0 + dy, z0 + dz, seed)
-  end
-
-  local x00 = lerp(sample(0, 0, 0), sample(1, 0, 0), sx)
-  local x10 = lerp(sample(0, 1, 0), sample(1, 1, 0), sx)
-  local x01 = lerp(sample(0, 0, 1), sample(1, 0, 1), sx)
-  local x11 = lerp(sample(0, 1, 1), sample(1, 1, 1), sx)
-  local y0v = lerp(x00, x10, sy)
-  local y1v = lerp(x01, x11, sy)
-  return lerp(y0v, y1v, sz)
+  local x00 = lerp(hash3(x0, y0, z0, seed), hash3(x1, y0, z0, seed), sx)
+  local x10 = lerp(hash3(x0, y1, z0, seed), hash3(x1, y1, z0, seed), sx)
+  local x01 = lerp(hash3(x0, y0, z1, seed), hash3(x1, y0, z1, seed), sx)
+  local x11 = lerp(hash3(x0, y1, z1, seed), hash3(x1, y1, z1, seed), sx)
+  return lerp(lerp(x00, x10, sy), lerp(x01, x11, sy), sz)
 end
 
 local function fbm(x, z, seed, octaves, frequency)
@@ -797,13 +811,24 @@ terrain.DENSITY_NOISE_BOUND = math.ceil(
   DENSITY_MOUNTAIN_AMPLITUDE * math.max(DENSITY_MOUNTAIN_BIAS, 1.0 - DENSITY_MOUNTAIN_BIAS)
 )
 
+-- The mountain term is gated on column.mountain and contributes exactly zero
+-- below the threshold, which is about nine columns in ten. Those need only the
+-- two unconditional terms, so their undecided band is half as tall -- and that
+-- band is the only place the expensive 3D noise is evaluated at all. Narrowing
+-- it stays exact for the same reason the wider bound is: outside the band the
+-- sign of the density is already settled.
+terrain.DENSITY_NOISE_BOUND_FLAT = math.ceil(
+  DENSITY_LOW_AMPLITUDE * 0.5 + DENSITY_DETAIL_AMPLITUDE * 0.5
+)
+terrain.DENSITY_MOUNTAIN_THRESHOLD = 0.35
+
 local function terrainDensityAt(worldX, y, worldZ, maxHeight, column)
   local base = column.height - y
   local deepBias = y < 8 and (8 - y) * 1.6 or 0.0
   local upperFade = smoothstep((y - terrain.SEA_LEVEL - 18) / math.max(1, maxHeight - terrain.SEA_LEVEL - 24))
   local lowNoise = (fbm3(worldX, y, worldZ, 151, 3, 0.018) - 0.5) * DENSITY_LOW_AMPLITUDE
   local detailNoise = (fbm3(worldX + 900.0, y * 1.7, worldZ - 450.0, 163, 2, 0.045) - 0.5) * DENSITY_DETAIL_AMPLITUDE
-  local mountainBoost = (column.mountain or 0.0) > 0.35 and (fbm3(worldX, y, worldZ, 167, 3, 0.026) - DENSITY_MOUNTAIN_BIAS) * DENSITY_MOUNTAIN_AMPLITUDE * upperFade or 0.0
+  local mountainBoost = (column.mountain or 0.0) > terrain.DENSITY_MOUNTAIN_THRESHOLD and (fbm3(worldX, y, worldZ, 167, 3, 0.026) - DENSITY_MOUNTAIN_BIAS) * DENSITY_MOUNTAIN_AMPLITUDE * upperFade or 0.0
   return base + deepBias + lowNoise + detailNoise + mountainBoost
 end
 
@@ -1751,7 +1776,9 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
   -- DENSITY_NOISE_BOUND, so outside a band of that width around the surface the
   -- sign is already decided and evaluating the noise cannot change the result.
   -- Skipping those levels is exact, not an approximation.
-  local bound = terrain.DENSITY_NOISE_BOUND
+  local mountainBound = terrain.DENSITY_NOISE_BOUND
+  local flatBound = terrain.DENSITY_NOISE_BOUND_FLAT
+  local mountainThreshold = terrain.DENSITY_MOUNTAIN_THRESHOLD
 
   -- A whole x-slice was one step, which is several ms of work. The frame budget
   -- can only stop between steps, so it overshot by that much every time it hit
@@ -1766,6 +1793,7 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
       if column.waterLevel then
         chunk.waterSurface[x + z * 16 + 1] = column.waterLevel - 0.35
       end
+      local bound = (column.mountain or 0.0) > mountainThreshold and mountainBound or flatBound
       local bandLow = column.height - bound
       local bandHigh = column.height + bound
 

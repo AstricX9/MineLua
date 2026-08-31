@@ -154,6 +154,7 @@ uniform vec3 uAmbient;
 uniform vec3 uSunColor;
 uniform vec3 uMoonColor;
 uniform vec3 uLightDir;
+uniform vec3 uEmission;
 uniform vec3 uParams; // local skylight, underwater amount, ambient floor
 
 vec3 srgbToLinear(vec3 color) {
@@ -176,6 +177,7 @@ void main() {
   totalLight += uSunColor * mix(0.26, 1.0, sunDiffuse) * localLight;
   totalLight += uMoonColor * mix(0.34, 0.82, moonDiffuse) * localLight;
   totalLight = max(totalLight, vec3(uParams.z));
+  totalLight = max(totalLight, uEmission * 1.18);
   vec3 color = linearToSrgb(srgbToLinear(sampled.rgb * uTint) * totalLight);
   float underwater = clamp(uParams.y, 0.0, 1.0);
   color = mix(color, color * vec3(0.30, 0.68, 0.88), underwater * 0.58);
@@ -948,12 +950,13 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
   elseif screen == "options" then
     local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "GENERAL")
     appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 42, layout.contentW, "AUDIO")
-    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 108, layout.contentW, "EXPERIENCE")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 88, layout.contentW, "CAMERA")
   elseif screen == "video" then
     local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "VISUALS")
     appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 42, layout.contentW, "WORLD")
     appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 82, layout.contentW, "ATMOSPHERE")
-    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 168, layout.contentW, "DISPLAY")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 122, layout.contentW, "CAMERA")
+    appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 162, layout.contentW, "DISPLAY")
   elseif screen == "controls" then
     local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "CONTROLS")
     local columnW = math.floor((layout.contentW - 6) * 0.5)
@@ -966,9 +969,9 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
   elseif screen == "texture_packs" then
     local layout = appendSettingsShell(meshes, width, height, scale, logicalWidth, logicalHeight, "RESOURCES")
     appendMenuSectionLabel(meshes, width, height, scale, layout.contentX, 42, layout.contentW, "LIBRARY")
-    appendText(meshes.font, width, height, scale, "The base set defines Tamarton's current look.",
+    appendText(meshes.font, width, height, scale, "The base set defines Tamarton's current visual language.",
       layout.contentX, 132, TAMARTON.muted)
-    appendText(meshes.font, width, height, scale, "Custom sets arrive when the format is ready.",
+    appendText(meshes.font, width, height, scale, "Use the preview world to inspect every authored surface.",
       layout.contentX, 148, TAMARTON.muted)
   elseif screen == "achievements" then
     local stats = menuState.stats or {}
@@ -1638,6 +1641,7 @@ function hud.create(skinPath)
       sunColor = heldUniform("uSunColor"),
       moonColor = heldUniform("uMoonColor"),
       lightDir = heldUniform("uLightDir"),
+      emission = heldUniform("uEmission"),
       params = heldUniform("uParams")
     },
     textures = {
@@ -1832,6 +1836,17 @@ function hud:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture
   gl.glUniform3f(locations.sunColor, sunColor[1], sunColor[2], sunColor[3])
   gl.glUniform3f(locations.moonColor, moonColor[1], moonColor[2], moonColor[3])
   gl.glUniform3f(locations.lightDir, lightDir[1], lightDir[2], lightDir[3])
+  local authoredEmission = model.definition.properties and model.definition.properties.emission
+  local emissionRed, emissionGreen, emissionBlue = 0.0, 0.0, 0.0
+  if type(authoredEmission) == "number" then
+    emissionRed, emissionGreen, emissionBlue = authoredEmission, authoredEmission, authoredEmission
+  elseif type(authoredEmission) == "table" then
+    emissionRed = tonumber(authoredEmission[1]) or 0.0
+    emissionGreen = tonumber(authoredEmission[2]) or 0.0
+    emissionBlue = tonumber(authoredEmission[3]) or 0.0
+  end
+  gl.glUniform3f(locations.emission,
+    emissionRed / 15.0, emissionGreen / 15.0, emissionBlue / 15.0)
   gl.glUniform3f(locations.params, environment.localLight or 1.0,
     environment.underwater and 1.0 or 0.0, environment.ambientFloor or 0.04)
 
@@ -2081,7 +2096,9 @@ function hud.menuButtonAt(screen, width, height, mouseX, mouseY, menuState)
   local logicalMouseX = mouseX / scale
   local logicalMouseY = mouseY / scale
   local buttons = uiMenu.buttons(screen, logicalWidth, logicalHeight, menuState)
-  for i = 1, #buttons do
+  -- Later buttons are visual overlays (for example dropdown choices), so they
+  -- also receive pointer priority over the controls underneath them.
+  for i = #buttons, 1, -1 do
     local button = buttons[i]
     if button.enabled ~= false and isHovered(button, logicalMouseX, logicalMouseY) then
       return button.id

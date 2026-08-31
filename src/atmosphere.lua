@@ -132,7 +132,7 @@ function atmosphere.forSun(sunDir, fogStart, fogEnd, observerUp, worldProfile, s
     skyZenith = math3d.mixColor(authored.zenithNight, authored.zenithDay, day),
     sunAureole = authored.aureole,
     sunElevation = sunElevation,
-    shadowStrength = math3d.mix(0.02, worldProfile.id == "mars" and 0.54 or 0.46, day) *
+    shadowStrength = math3d.mix(0.02, worldProfile.id == "mars" and 0.58 or 0.50, day) *
       math3d.smoothstep(-0.03, 0.18, sunElevation)
   }
 end

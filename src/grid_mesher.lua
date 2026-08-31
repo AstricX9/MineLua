@@ -55,7 +55,7 @@ local FACE_QUADS = {
 -- module is a stub that hands out 15 nearly everywhere, so AO was always doing
 -- the visual work.
 local AO_LEVELS = {1.00, 0.82, 0.67, 0.52}
-local AO_BOTH_SIDES = 0.45
+local AO_BOTH_SIDES = 0.0
 
 -- Sky light falls off with depth below the column's highest solid block, so
 -- caves read as caves. Fifteen is open sky.

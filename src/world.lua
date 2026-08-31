@@ -37,6 +37,10 @@ function World.new(options)
   self.lightingJobRevision = nil
   -- Chunks whose sky light changed since the renderer last drained this set.
   self.lightTouched = {}
+  -- Bumped by any block write. The carried-light occlusion volume watches it,
+  -- because walling a torch off changes what it can reach without changing the
+  -- stored light of a single cell.
+  self.geometryRevision = 0
 
   if not options.deferInitialChunks then
     self:ensureChunksAroundBlock(0, 0)
@@ -432,6 +436,7 @@ function World:setBlock(x, y, z, id)
   local oldRed, oldGreen, oldBlue = entry.chunk:getBlockLight(localX, y, localZ)
   entry.chunk:setBlock(localX, y, localZ, id)
   entry.dataRevision = (entry.dataRevision or 0) + 1
+  self.geometryRevision = self.geometryRevision + 1
   self.dirtyChunks[World.chunkKey(entry.chunkX, entry.chunkZ)] = entry
   lighting.applyBlockChange(self, x, y, z, beforeColumn, self.lightTouched,
     oldBlockId, oldRed, oldGreen, oldBlue)
@@ -528,6 +533,7 @@ function World:skyLightSampler(chunkX, chunkZ)
   local baseZ = chunkZ * CHUNK_SIZE
   local maxHeight = self.maxHeight
   local floor = math.floor
+  local centre = neighbours[0]
 
   return function(x, y, z)
     if y > maxHeight then
@@ -549,7 +555,18 @@ function World:skyLightSampler(chunkX, chunkZ)
 
     local entry = neighbours[cz * 3 + cx]
     if not entry then
-      return 15
+      -- An unloaded neighbour used to read as open sky. That is only true
+      -- outdoors: it also poured daylight into anything built against the edge
+      -- of the loaded region, and put a bright rim on every chunk meshed
+      -- before its neighbour arrived. Mirror the nearest cell of this chunk
+      -- instead, so open ground still reads 15 and a sealed room stays sealed.
+      -- The chunk is remeshed once the neighbour actually loads.
+      if not centre then
+        return 15
+      end
+      local mirrorX = lx < 0 and 0 or (lx > 15 and 15 or lx)
+      local mirrorZ = lz < 0 and 0 or (lz > 15 and 15 or lz)
+      return centre.chunk:getSkyLight(mirrorX, y, mirrorZ)
     end
 
     return entry.chunk:getSkyLight(lx - cx * CHUNK_SIZE, y, lz - cz * CHUNK_SIZE)

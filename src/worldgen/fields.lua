@@ -17,15 +17,28 @@ function Fields:setSettings(settings)
   self.cache, self.cacheCount = {}, 0
 end
 
-local function cacheKey(x, z)
-  return tostring(x) .. "," .. tostring(z)
+-- A two-level numeric index rather than an "x,z" string key. Building that key
+-- cost two number-to-string conversions and a concatenation on every lookup,
+-- including the hits -- and hits are the overwhelming majority, because a chunk
+-- and its tree skirt sample the same columns many times over.
+local function cacheGet(cache, x, z)
+  local row = cache[x]
+  return row and row[z]
+end
+
+local function cachePut(cache, x, z, value)
+  local row = cache[x]
+  if not row then
+    row = {}
+    cache[x] = row
+  end
+  row[z] = value
 end
 
 -- These are independent, low-frequency world fields. Later stages are free to
 -- combine them, but none is inferred from a named biome or surface material.
 function Fields:sample(x, z)
-  local key = cacheKey(x, z)
-  local cached = self.cache[key]
+  local cached = cacheGet(self.cache, x, z)
   if cached then return cached end
   if self.cacheCount > 180000 then self.cache, self.cacheCount = {}, 0 end
 
@@ -111,7 +124,8 @@ function Fields:sample(x, z)
     surfaceDetail = surfaceDetail,
     localVariation = localVariation
   }
-  self.cache[key], self.cacheCount = result, self.cacheCount + 1
+  cachePut(self.cache, x, z, result)
+  self.cacheCount = self.cacheCount + 1
   return result
 end
 

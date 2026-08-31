@@ -206,7 +206,7 @@ profiles.register({
   -- than Earth, not to be lifted until it does not.
   post = {
     eyeKey = 0.27,
-    eyeMaxExposure = 2.00
+    eyeMaxExposure = 1.60
   }
 })
 

@@ -1,6 +1,7 @@
 local ffi = require("ffi")
 local glfw = require("glfw")
 local persistence = require("state_persistence")
+local inputBindings = require("input_bindings")
 
 local Camera = {}
 Camera.__index = Camera
@@ -35,6 +36,10 @@ end
 
 local function isDown(window, key)
   return glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
+end
+
+local function actionDown(self, window, action)
+  return inputBindings.actionDown(window, self.controlBindings, action)
 end
 
 local EPSILON = 0.0001
@@ -429,21 +434,21 @@ function Camera:applyHorizontalInput(dt, window)
   local inputZ = 0.0
   local forwardInput = 0.0
 
-  if isDown(window, glfw.GLFW_KEY_W) then
+  if actionDown(self, window, "forward") then
     inputX = inputX + front[1]
     inputZ = inputZ + front[3]
     forwardInput = forwardInput + 1.0
   end
-  if isDown(window, glfw.GLFW_KEY_S) then
+  if actionDown(self, window, "back") then
     inputX = inputX - front[1]
     inputZ = inputZ - front[3]
     forwardInput = forwardInput - 1.0
   end
-  if isDown(window, glfw.GLFW_KEY_D) then
+  if actionDown(self, window, "right") then
     inputX = inputX + right[1]
     inputZ = inputZ + right[3]
   end
-  if isDown(window, glfw.GLFW_KEY_A) then
+  if actionDown(self, window, "left") then
     inputX = inputX - right[1]
     inputZ = inputZ - right[3]
   end
@@ -454,7 +459,7 @@ function Camera:applyHorizontalInput(dt, window)
     inputZ = inputZ / inputLength
   end
 
-  local crouching = isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) and not self.flying
+  local crouching = actionDown(self, window, "sneak") and not self.flying
   -- Remembered for the movement step, which refuses to walk a crouching player
   -- off a ledge.
   self.crouching = crouching
@@ -632,10 +637,10 @@ end
 function Camera:applyVerticalMovement(dt, window, world)
   if self.flying then
     local verticalInput = 0.0
-    if isDown(window, glfw.GLFW_KEY_SPACE) then
+    if actionDown(self, window, "jump") then
       verticalInput = verticalInput + 1.0
     end
-    if isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) then
+    if actionDown(self, window, "sneak") then
       verticalInput = verticalInput - 1.0
     end
 
@@ -652,17 +657,17 @@ function Camera:applyVerticalMovement(dt, window, world)
       self.velocity[2] = 0.0
     end
     self.grounded = false
-    self.jumpWasDown = isDown(window, glfw.GLFW_KEY_SPACE)
+    self.jumpWasDown = actionDown(self, window, "jump")
     return
   end
 
   if self:isBodyInLiquid(world) then
-    local jumpDown = isDown(window, glfw.GLFW_KEY_SPACE)
-    local descendDown = isDown(window, glfw.GLFW_KEY_LEFT_CONTROL)
+    local jumpDown = actionDown(self, window, "jump")
+    local descendDown = actionDown(self, window, "sneak")
     local front = self:getFront()
     local aimIntent = 0.0
-    if isDown(window, glfw.GLFW_KEY_W) then aimIntent = aimIntent + front[2] end
-    if isDown(window, glfw.GLFW_KEY_S) then aimIntent = aimIntent - front[2] end
+    if actionDown(self, window, "forward") then aimIntent = aimIntent + front[2] end
+    if actionDown(self, window, "back") then aimIntent = aimIntent - front[2] end
 
     -- Aimed swimming and dedicated rise/dive controls are additive. Looking up
     -- while holding W reinforces Space; looking the other way counteracts it.
@@ -713,7 +718,7 @@ function Camera:applyVerticalMovement(dt, window, world)
     self.coyoteTimer = math.max(0.0, self.coyoteTimer - dt)
   end
 
-  local jumpDown = isDown(window, glfw.GLFW_KEY_SPACE)
+  local jumpDown = actionDown(self, window, "jump")
   -- Buffer only the press edge. Holding space must not trigger another jump on
   -- the first grounded frame after landing.
   if jumpDown and not self.jumpWasDown then

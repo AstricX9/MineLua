@@ -1,11 +1,17 @@
 local ffi = require("ffi")
+local appPaths = require("app_paths")
 local filesystem = require("filesystem")
 local json = require("json")
 local worldProfiles = require("world_profiles")
 
 local saves = {}
 
-local SAVE_ROOT = "saves"
+-- Absolute and resolved once. "saves" was relative to the working directory,
+-- which put a packaged build's worlds inside the folder the next install
+-- deletes, and left them unwritable under Program Files. appPaths keeps an
+-- existing ./saves in place for a checkout or a portable install, and otherwise
+-- uses the per-user data directory.
+local SAVE_ROOT = appPaths.saveRoot()
 local VERSION_NAME = "MineLua Pre-alpha"
 local VERSION_ID = 100
 local PLAYER_DATA_VERSION = 1
@@ -14,25 +20,22 @@ if ffi.os == "Windows" then
   ffi.cdef[[
     int _mkdir(const char *dirname);
     int RemoveDirectoryA(const char *pathName);
+    int MoveFileExA(const char *existingFileName, const char *newFileName, unsigned long flags);
+    unsigned long GetCurrentProcessId(void);
+    unsigned long GetLastError(void);
   ]]
 else
   ffi.cdef[[
     int mkdir(const char *path, unsigned int mode);
+    int getpid(void);
   ]]
 end
 
-local function mkdir(path)
-  if ffi.os == "Windows" then
-    ffi.C._mkdir((path:gsub("/", "\\")))
-  else
-    ffi.C.mkdir(path, tonumber("755", 8))
-  end
-end
-
-local function ensureDir(path)
-  mkdir(path)
-  return path
-end
+-- Both create every missing level. The old single-level mkdir quietly did
+-- nothing when a parent was absent, and the caller only discovered it when the
+-- file write failed later.
+local ensureDir = appPaths.ensureDirectory
+local mkdir = appPaths.ensureDirectory
 
 local function escapeJson(value)
   value = tostring(value or "")
@@ -97,9 +100,58 @@ local function encodeJson(value, indent)
 end
 
 local function writeFile(path, content)
-  local file = assert(io.open(path, "wb"))
-  file:write(content)
-  file:close()
+  local file, openError = io.open(path, "wb")
+  if not file then return false, path .. ": " .. tostring(openError) end
+
+  local wrote, writeError = file:write(content)
+  local closed, closeError = file:close()
+  if not wrote then return false, path .. ": " .. tostring(writeError) end
+  if not closed then return false, path .. ": " .. tostring(closeError) end
+  return true
+end
+
+local function mustWriteFile(path, content)
+  local wrote, writeError = writeFile(path, content)
+  if not wrote then error(writeError, 2) end
+end
+
+local temporaryWriteCounter = 0
+
+local function processId()
+  if ffi.os == "Windows" then return tonumber(ffi.C.GetCurrentProcessId()) end
+  return tonumber(ffi.C.getpid())
+end
+
+local function replaceFile(from, to)
+  if ffi.os == "Windows" then
+    -- REPLACE_EXISTING | WRITE_THROUGH: the old valid JSON remains in place
+    -- until the complete temporary file has reached the same directory.
+    if ffi.C.MoveFileExA(from:gsub("/", "\\"), to:gsub("/", "\\"), 0x9) ~= 0 then
+      return true
+    end
+    return false, "Windows error " .. tostring(tonumber(ffi.C.GetLastError()))
+  end
+
+  local replaced, replaceError = os.rename(from, to)
+  if replaced then return true end
+  return false, replaceError
+end
+
+local function atomicWriteFile(path, content)
+  temporaryWriteCounter = temporaryWriteCounter + 1
+  local temporary = string.format("%s.tmp.%d.%d", path, processId(), temporaryWriteCounter)
+  local wrote, writeError = writeFile(temporary, content)
+  if not wrote then
+    os.remove(temporary)
+    return false, writeError
+  end
+
+  local replaced, replaceError = replaceFile(temporary, path)
+  if not replaced then
+    os.remove(temporary)
+    return false, path .. ": unable to replace player data: " .. tostring(replaceError)
+  end
+  return true
 end
 
 local function readFile(path)
@@ -215,8 +267,8 @@ function saves.createWorld(options)
   local worldId = worldProfiles.id(options.worldId)
 
   ensureMinecraftLayout(path)
-  writeFile(path .. "/session.lock", tostring(now) .. "\n")
-  writeFile(path .. "/levelname.txt", worldName .. "\n")
+  mustWriteFile(path .. "/session.lock", tostring(now) .. "\n")
+  mustWriteFile(path .. "/levelname.txt", worldName .. "\n")
 
   local level = {
     Data = {
@@ -242,8 +294,8 @@ function saves.createWorld(options)
     }
   }
 
-  writeFile(path .. "/level.dat", encodeJson(level) .. "\n")
-  writeFile(path .. "/mineLua.json", encodeJson({
+  mustWriteFile(path .. "/level.dat", encodeJson(level) .. "\n")
+  mustWriteFile(path .. "/mineLua.json", encodeJson({
     allowCheats = options.allowCheats == true,
     bonusChest = options.bonusChest == true,
     gameMode = options.gameMode or "survival",
@@ -360,9 +412,11 @@ function saves.deleteWorld(worldSave)
 end
 
 function saves.savePlayer(worldSave, playerState)
-  assert(worldSave and worldSave.path, "A world save path is required")
+  if not worldSave or not worldSave.path then
+    return false, "A world save path is required"
+  end
   ensureDir(worldSave.path .. "/playerdata")
-  writeFile(worldSave.path .. "/playerdata/minelua.json", encodeJson({
+  return atomicWriteFile(worldSave.path .. "/playerdata/minelua.json", encodeJson({
     format = "minelua-player",
     version = PLAYER_DATA_VERSION,
     savedAt = os.time() * 1000,
@@ -392,4 +446,11 @@ function saves.ensureDirectory(path)
   return ensureDir(path)
 end
 
-return saves
+-- Where worlds actually live. The world list shows this so a player who cannot
+-- find their saves does not have to guess.
+function saves.root()
+  return SAVE_ROOT
+end
+
+return saves
+

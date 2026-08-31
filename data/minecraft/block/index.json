@@ -93,5 +93,6 @@
   "birch_log_alive_x",
   "birch_log_alive_z",
   "acacia_log_alive_x",
-  "acacia_log_alive_z"
+  "acacia_log_alive_z",
+  "torch"
 ]

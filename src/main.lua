@@ -67,7 +67,19 @@ end
 
 local ok, err = pcall(game.run)
 if not ok then
-  print("Error: " .. tostring(err))
+  local message = "Error: " .. tostring(err)
+  print(message)
+  pcall(function()
+    require("saves").ensureDirectory("logs")
+    local path = "logs/crash-" .. os.date("%Y-%m-%d_%H.%M.%S") .. ".log"
+    local file, openError = io.open(path, "wb")
+    if not file then error(openError) end
+    local wrote, writeError = file:write(message .. "\n")
+    local closed, closeError = file:close()
+    if not wrote then error(writeError) end
+    if not closed then error(closeError) end
+    print("Crash report: " .. path)
+  end)
 end
 
 if game.exitAfterScreenshots then

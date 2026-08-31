@@ -98,6 +98,10 @@ graphics.atmosphere = {
   cloudDensity = 1.35,
   cloudBottom = 132.0,
   cloudTop = 136.0,
+  -- How much sunlight a cloud takes out of the ground beneath it. The shadow is
+  -- cast from the same cell mask the visible cloud sheet is built from, so the
+  -- patches on the ground line up with the clouds overhead. 0 disables it.
+  cloudShadowStrength = 0.42,
   sunGlare = 0.58,
   maxFogAmount = 0.72,
   -- Extinction per block at sea level and its exponential falloff with height.
@@ -163,10 +167,10 @@ graphics.post = {
 
   eyeAdaptation = true,
   eyeKey = 0.34,
-  eyeMinExposure = 0.55,
-  eyeMaxExposure = 2.35,
-  eyeBrightenSpeed = 1.35,
-  eyeDarkenSpeed = 3.25,
+  eyeMinExposure = 0.70,
+  eyeMaxExposure = 1.75,
+  eyeBrightenSpeed = 0.75,
+  eyeDarkenSpeed = 1.50,
 
   -- Metering. The sky is a light source inside the frame rather than the
   -- subject of it, so it is averaged in at a fraction of the area it covers;
@@ -180,7 +184,7 @@ graphics.post = {
   -- How much of the scene's own brightness the exposure cancels. 1.0 is the
   -- textbook key/average law, which makes midnight look like an underexposed
   -- noon; below 1.0 leaves night dark and day bright while still tracking.
-  eyeResponse = 0.85
+  eyeResponse = 0.60
 }
 
 -- Physical sky: Rayleigh + Mie single scattering, marched per pixel. Sample

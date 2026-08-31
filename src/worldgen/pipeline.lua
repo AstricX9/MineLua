@@ -13,8 +13,23 @@ local Hydrology = require("worldgen.hydrology")
 local Pipeline = {}
 Pipeline.__index = Pipeline
 
-local function keyFor(x, z, maxHeight)
-  return tostring(x) .. "," .. tostring(z) .. ":" .. tostring(maxHeight or 127)
+-- Two-level numeric indexing instead of an "x,z:maxHeight" string key. Building
+-- that key meant three number-to-string conversions and two concatenations on
+-- every lookup, hits included, and a chunk plus its tree skirt asks for the same
+-- columns repeatedly. maxHeight is a property of the world rather than of a
+-- column, so it is tracked once for the whole cache.
+local function cacheGet(cache, x, z)
+  local row = cache[x]
+  return row and row[z]
+end
+
+local function cachePut(cache, x, z, value)
+  local row = cache[x]
+  if not row then
+    row = {}
+    cache[x] = row
+  end
+  row[z] = value
 end
 
 function Pipeline.new(settings, seed)
@@ -25,6 +40,7 @@ function Pipeline.new(settings, seed)
   self.fields = Fields.new(self.settings, self.seed)
   self.geology = Geology.new(self.settings, self.seed)
   self.baseCache, self.sampleCache, self.sampleCacheCount = {}, {}, 0
+  self.sampleCacheHeight = nil
   self.hydrology = Hydrology.new(self.settings, self.seed,
     function(x, z) return self:baseElevationAt(x, z) end,
     function(x, z) return self.fields:sample(x, z) end,
@@ -39,6 +55,7 @@ function Pipeline:setSeed(seed)
   self.fields:setSeed(seed)
   self.geology:setSeed(seed)
   self.baseCache, self.sampleCache, self.sampleCacheCount = {}, {}, 0
+  self.sampleCacheHeight = nil
   self.hydrology:reset(self.settings, seed, self.seaLevel)
 end
 
@@ -48,6 +65,7 @@ function Pipeline:refresh(settings)
   self.fields:setSettings(self.settings)
   self.geology:setSettings(self.settings)
   self.baseCache, self.sampleCache, self.sampleCacheCount = {}, {}, 0
+  self.sampleCacheHeight = nil
   self.hydrology:reset(self.settings, self.seed, self.seaLevel)
 end
 
@@ -62,8 +80,7 @@ end
 -- Height before rivers and lakes. Hydrology samples only this stage, so flow
 -- direction cannot be invalidated by terrain that is replaced afterwards.
 function Pipeline:baseElevationAt(x, z)
-  local key = tostring(x) .. "," .. tostring(z)
-  local cached = self.baseCache[key]
+  local cached = cacheGet(self.baseCache, x, z)
   if cached then return cached.height, cached.fields, cached.geology, cached.components end
 
   local s = self.settings
@@ -132,7 +149,7 @@ function Pipeline:baseElevationAt(x, z)
     preHydrology = height
   }
   local result = {height = height, fields = fields, geology = geology, components = components}
-  self.baseCache[key] = result
+  cachePut(self.baseCache, x, z, result)
   return height, fields, geology, components
 end
 
@@ -170,10 +187,20 @@ end
 
 function Pipeline:sampleColumn(x, z, maxHeight)
   maxHeight = maxHeight or 127
-  local key = keyFor(x, z, maxHeight)
-  local cached = self.sampleCache[key]
+  -- The reset assigned three values to two names, leaving sampleCacheCount
+  -- holding a table. The very next column then compared a table with a number
+  -- and generation died -- around seven hundred chunks into a world.
+  if maxHeight ~= self.sampleCacheHeight then
+    self.sampleCache, self.sampleCacheCount = {}, 0
+    self.sampleCacheHeight = maxHeight
+  end
+  local cached = cacheGet(self.sampleCache, x, z)
   if cached then return cached end
-  if self.sampleCacheCount > 180000 then self.sampleCache, self.sampleCacheCount = {}, {}, 0 end
+  if self.sampleCacheCount > 180000 then
+    self.sampleCache, self.sampleCacheCount = {}, 0
+    -- The base cache is the larger of the two and had no eviction at all.
+    self.baseCache = {}
+  end
 
   local s, sea = self.settings, self.seaLevel
   local baseHeight, fields, geology, components = self:baseElevationAt(x, z)
@@ -295,7 +322,8 @@ function Pipeline:sampleColumn(x, z, maxHeight)
     components = heightExplanation
   }
   result.components.final = result.height
-  self.sampleCache[key], self.sampleCacheCount = result, self.sampleCacheCount + 1
+  cachePut(self.sampleCache, x, z, result)
+  self.sampleCacheCount = self.sampleCacheCount + 1
   return result
 end
 

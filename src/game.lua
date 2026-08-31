@@ -4,6 +4,7 @@ local GL = require("gl")
 local atmosphere = require("atmosphere")
 local blocks = require("blocks")
 local camera = require("camera")
+local carriedLight = require("carried_light")
 local character = require("character")
 local DistantTerrain = require("distant_terrain")
 local DevMenu = require("dev_menu")
@@ -22,11 +23,15 @@ local terrain = require("terrain")
 local texture = require("texture")
 local uiFlow = require("ui_flow")
 local voxel = require("voxel")
+local lighting = require("lighting")
 local World = require("world")
 local worldInteraction = require("world_interaction")
 local worldProfiles = require("world_profiles")
 local renderDistance = require("render_distance")
 local showcase = require("showcase")
+local inputBindings = require("input_bindings")
+local motionBlur = require("motion_blur")
+local userSettings = require("user_settings")
 local astronomy = {
   ephemeris = require("sky_ephemeris"),
   catalog = require("star_catalog"),
@@ -76,6 +81,7 @@ local CLOUD = {
   bottom = graphics.atmosphere.cloudBottom or 132.0,
   alpha = 0.76
 }
+local CLOUD_SHADOW_INTERNAL_FORMAT = 0x8229  -- GL_R8
 CLOUD.top = graphics.atmosphere.cloudTop or (CLOUD.bottom + 4.0)
 local FOG_GRID = {
   width = graphics.atmosphere.volumetricGridWidth or 160,
@@ -206,6 +212,13 @@ uniform vec3 ambientColor;
 uniform vec3 lightColor;
 uniform vec3 moonLightColor;
 uniform vec3 lightingParams;
+uniform vec3 carriedLightPosition;
+uniform vec3 carriedLightEmission;
+uniform sampler3D carriedLightVolume;
+uniform vec4 carriedVolume;  // xyz = world corner of voxel 0, w = 1 / volume size
+uniform sampler2D cloudShadowMap;
+uniform vec4 cloudShadow;    // xy = sheet origin in world, z = 1 / sheet span, w = cloud base
+uniform float cloudShadowStrength;
 uniform vec3 faceLight;
 uniform float exposure;
 uniform float shadowStrength;
@@ -240,6 +253,29 @@ float fixedFaceShade(vec3 normal, float material) {
   if (normal.y < -0.9) return 0.50;
   if (abs(normal.x) > 0.9) return 0.60;
   return 0.80;
+}
+
+// How much of the sun reaches this point past the cloud deck.
+//
+// The cloud sheet is a flat layer of cells, so this is just where the sun ray
+// crosses its altitude, looked up in the same cell mask the sheet is drawn
+// from. The mask is pre-blurred and wraps, so one tap gives a soft edge that
+// tiles with the clouds above it.
+float cloudShadowAt(vec3 worldPosition, vec3 sunDirection) {
+  if (cloudShadowStrength <= 0.0) return 1.0;
+
+  // Grazing sun smears the projection across the whole sheet, and by then there
+  // is little direct light left to remove, so fade the effect out instead.
+  float elevation = smoothstep(0.05, 0.25, sunDirection.y);
+  if (elevation <= 0.0) return 1.0;
+
+  float travel = (cloudShadow.w - worldPosition.y) / max(sunDirection.y, 1e-3);
+  // Above the deck there is nothing overhead to cast anything.
+  if (travel <= 0.0) return 1.0;
+
+  vec2 hit = worldPosition.xz + sunDirection.xz * travel;
+  float coverage = texture(cloudShadowMap, (hit - cloudShadow.xy) * cloudShadow.z).r;
+  return 1.0 - coverage * cloudShadowStrength * elevation;
 }
 
 float shadowAt(vec3 normal, vec3 light, float diff) {
@@ -323,27 +359,62 @@ void main() {
   if(texColor.a < 0.5) discard;
   vec3 albedo = srgbToLinear(texColor.rgb) * srgbToLinear(vColor);
 
-  float voxelLight = vInfo.z > 0.0 ? clamp(vInfo.z, 0.0, 1.0) : 1.0;
-  if (material > 0.5) {
-    voxelLight = max(voxelLight, 0.34);
-  }
+  float voxelLight = clamp(vInfo.z, 0.0, 1.0);
 
   float sunDiffuse = material > 1.5 ? mix(0.88, 1.0, diff) : mix(0.68, 1.0, diff);
   float faceShadeValue = fixedFaceShade(normalize(vNormal), material);
-  float shadowAmount = shadowAt(norm, light, diff) * shadowStrength;
-  float shadowVisibility = mix(1.0, 0.45, clamp(shadowAmount, 0.0, 1.0));
+  float shadowCoverage = shadowAt(norm, light, diff);
+  float shadowAmount = clamp(shadowCoverage * shadowStrength, 0.0, 1.0);
+  // Fully shadowed ground kept only 45% of its sunlight, which reads as a hole
+  // rather than as shade once the sky term is this dim. Sky light already falls
+  // off correctly on its own; the direct term does not need to do the work
+  // twice.
+  float solidShadowVisibility = mix(1.0, 0.66, shadowAmount);
+  // Crossed foliage has a deliberately bright, upward-facing lighting model.
+  // Let complete daytime coverage remove its direct light, so it does not glow
+  // against the ground beneath an occluder.
+  float foliageMask = step(1.5, material);
   float daylight = lightingParams.x;
-  float ambientFloor = lightingParams.z;
+  float foliageShadowVisibility = 1.0 - shadowCoverage * daylight;
+  float shadowVisibility = mix(solidShadowVisibility, foliageShadowVisibility, foliageMask);
 
+  // The directional shadow map removes sunlight, not hemispherical sky light.
+  // Keeping those terms separate prevents dense crossed foliage from mutually
+  // shadowing itself to pure black while voxel AO can still reach zero.
   vec3 skyContribution = ambientColor * voxelLight;
   vec3 blockContribution = vBlockLight * 1.18;
-  vec3 sunContribution = lightColor * faceShadeValue * sunDiffuse * shadowVisibility * voxelLight;
+  // A held emitter follows the player without rewriting voxel light or
+  // remeshing chunks every frame. Each RGB channel loses one authored light
+  // level per metre, matching the existing block-light propagation curve.
+  //
+  // Distance alone cannot see walls, so the carried light used to shine through
+  // them: sealing yourself into a room lit the terrain outside it. The
+  // occlusion volume is a flood fill from the hand through the real voxels, and
+  // taking the longer of the two distances keeps the smooth analytic falloff
+  // close in while never reaching further than light actually can.
+  vec3 carriedCell = (vFragPos + normalize(vNormal) * 0.5 - carriedVolume.xyz) *
+    carriedVolume.w;
+  float carriedReach = 0.0;
+  if (all(greaterThanEqual(carriedCell, vec3(0.0))) &&
+      all(lessThanEqual(carriedCell, vec3(1.0)))) {
+    carriedReach = texture(carriedLightVolume, carriedCell).r * 15.0;
+  }
+  float carriedDistance = max(length(vFragPos - carriedLightPosition),
+    15.0 - carriedReach);
+  vec3 carriedLevel = max(carriedLightEmission - vec3(carriedDistance), vec3(0.0));
+  vec3 carriedDarkness = vec3(1.0) - clamp(carriedLevel / 15.0, 0.0, 1.0);
+  vec3 carriedContribution = (vec3(1.0) - carriedDarkness) /
+    (carriedDarkness * 3.0 + vec3(1.0)) * 1.18;
+  blockContribution += carriedContribution;
+  float cloudShade = cloudShadowAt(vFragPos, light);
+  vec3 sunContribution = lightColor * faceShadeValue * sunDiffuse * shadowVisibility *
+    voxelLight * cloudShade;
   vec3 moonContribution = moonLightColor * mix(0.76, 1.0, max(dot(norm, -light), 0.0)) * faceShadeValue * voxelLight;
   vec3 totalLight = skyContribution + sunContribution + moonContribution + blockContribution;
-  totalLight = max(totalLight, vec3(ambientFloor));
 
   vec3 litColor = albedo * totalLight * exposure;
-  float caustic = voxelCaustics(vFragPos, norm, light) * daylight * shadowVisibility * voxelLight;
+  float caustic = voxelCaustics(vFragPos, norm, light) * daylight * shadowVisibility *
+    voxelLight * cloudShade;
   vec3 causticColor = srgbToLinear(vec3(0.52, 0.90, 1.0));
   litColor += albedo * lightColor * causticColor * caustic * causticStrength;
   vec3 finalColor = linearToSrgb(litColor);
@@ -1323,7 +1394,54 @@ local function createCloudMesh(path)
     end
   end
 
-  return uploadMesh(vertices)
+  -- The same cell mask the sheet was built from, as a texture the terrain
+  -- shader can sample along the sun ray. Building it here rather than from the
+  -- source PNG is the point: the patches of shade on the ground are then the
+  -- clouds actually overhead, not an approximation of them.
+  --
+  -- Softened by one cell either way, no more. A cloud shadow's real penumbra is
+  -- a fraction of a block -- the sun is only half a degree wide -- so the only
+  -- softness wanted here is enough to stop the twelve-unit cells reading as
+  -- squares. Bilinear filtering on the sampler supplies most of it; this keeps
+  -- the shapes recognisable as the clouds overhead rather than smearing them
+  -- into an even grey.
+  local coverage = ffi.new("unsigned char[?]", cells * cells)
+  for x = 0, cells - 1 do
+    for z = 0, cells - 1 do
+      local total = 0.0
+      for dx = -1, 1 do
+        for dz = -1, 1 do
+          -- Wrapped, because the sheet wraps: a shadow must not seam where the
+          -- cloud above it does not.
+          if filled[(x + dx) % cells][(z + dz) % cells] then total = total + 1.0 end
+        end
+      end
+      coverage[z * cells + x] = math.floor(total / 9.0 * 255.0 + 0.5)
+    end
+  end
+
+  local shadowTexture = ffi.new("GLuint[1]")
+  gl.glGenTextures(1, shadowTexture)
+  gl.glBindTexture(GL.TEXTURE_2D, shadowTexture[0])
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.REPEAT)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.REPEAT)
+  gl.glTexImage2D(GL.TEXTURE_2D, 0, CLOUD_SHADOW_INTERNAL_FORMAT, cells, cells, 0,
+    GL.RED, GL.UNSIGNED_BYTE, coverage)
+  gl.glBindTexture(GL.TEXTURE_2D, 0)
+
+  return uploadMesh(vertices), shadowTexture[0]
+end
+
+-- Where the cloud sheet sits this frame. drawClouds and the terrain pass both
+-- need it, and they have to agree exactly or the shadows drift off the clouds.
+local function cloudSheetOffset(playerCamera, time)
+  local drift = time * 0.55
+  local span = CLOUD.meshCells * CLOUD.cellSize
+  local offsetX = math.floor((playerCamera.position[1] + drift) / span + 0.5) * span
+  local offsetZ = math.floor((playerCamera.position[3] + drift * 0.12) / span + 0.5) * span
+  return offsetX - drift, offsetZ - drift * 0.12, span
 end
 
 local function createTextureAtlas()
@@ -2108,15 +2226,12 @@ local function drawNightSky(program,locations,state,playerCamera,skyState,sky,
 end
 
 local function drawClouds(cloudShader, cloudMesh, locations, playerCamera, view, projection, time, sky)
-  local drift = time * 0.55
-  local span = CLOUD.meshCells * CLOUD.cellSize
-  local offsetX = math.floor((playerCamera.position[1] + drift) / span + 0.5) * span
-  local offsetZ = math.floor((playerCamera.position[3] + drift * 0.12) / span + 0.5) * span
+  local offsetX, offsetZ = cloudSheetOffset(playerCamera, time)
 
   gl.glUseProgram(cloudShader)
   gl.glUniformMatrix4fv(locations.projection, 1, 0, ffi.new("float[16]", projection))
   gl.glUniformMatrix4fv(locations.view, 1, 0, ffi.new("float[16]", view))
-  gl.glUniform3f(locations.offset, offsetX - drift, 0.0, offsetZ - drift * 0.12)
+  gl.glUniform3f(locations.offset, offsetX, 0.0, offsetZ)
   gl.glUniform1f(locations.alpha, CLOUD.alpha)
   gl.glUniform3f(locations.tint, sky.cloudColor[1], sky.cloudColor[2], sky.cloudColor[3])
 
@@ -2451,7 +2566,7 @@ local function refreshDrawableSize(window, state)
 end
 
 local function createDisplayState()
-  return {
+  local state = {
     fullscreen = false,
     f11WasDown = false,
     f1WasDown = false,
@@ -2501,11 +2616,17 @@ local function createDisplayState()
     allowCheats = false,
     bonusChest = false,
     renderDistance = renderDistance.clamp(DISTANT_CHUNK_RADIUS, 24),
+    soundVolume = 100,
     sensitivity = 100,
     invertMouse = false,
     fovDegrees = graphics.window.fovDegrees or 70,
     viewBobbing = true,
+    motionBlur = "Off",
+    vsync = VSYNC_ENABLED,
+    clouds = true,
+    bloom = POST.bloom ~= false,
     particles = "All",
+    controlBindings = {},
     savedWorlds = {},
     selectedWorldIndex = nil,
     pendingDeleteWorld = nil,
@@ -2550,6 +2671,28 @@ local function createDisplayState()
     windowW = WINDOW_W,
     windowH = WINDOW_H
   }
+  local defaults = {
+    soundVolume = 100,
+    sensitivity = 100,
+    invertMouse = false,
+    fovDegrees = graphics.window.fovDegrees or 70,
+    renderDistance = renderDistance.clamp(DISTANT_CHUNK_RADIUS, 24),
+    vsync = VSYNC_ENABLED,
+    clouds = true,
+    bloom = POST.bloom ~= false,
+    particles = "All",
+    viewBobbing = true,
+    motionBlur = "Off",
+    fullscreen = false,
+    controlBindings = inputBindings.DEFAULTS
+  }
+  return userSettings.apply(state, userSettings.load(nil, defaults), defaults)
+end
+
+local function saveUserSettings(state)
+  local ok, err = userSettings.save(state)
+  if not ok then io.stderr:write("Unable to save user settings: " .. tostring(err) .. "\n") end
+  return ok
 end
 
 local function playerOptionsForGameMode(gameMode, worldProfile)
@@ -2586,11 +2729,17 @@ local function saveCurrentPlayer(state, playerCamera)
     return false
   end
 
-  local ok, err = pcall(saves.savePlayer, state.currentWorldSave, playerSnapshot(state, playerCamera))
-  if not ok then
-    io.stderr:write("Unable to save player data: " .. tostring(err) .. "\n")
+  local called, saved, saveError = pcall(
+    saves.savePlayer, state.currentWorldSave, playerSnapshot(state, playerCamera))
+  if not called then
+    io.stderr:write("Unable to save player data: " .. tostring(saved) .. "\n")
+    return false
   end
-  return ok
+  if not saved then
+    io.stderr:write("Unable to save player data: " .. tostring(saveError) .. "\n")
+    return false
+  end
+  return true
 end
 
 local function restorePlayer(state, playerCamera, savedPlayer)
@@ -2660,7 +2809,7 @@ local function setFullscreen(window, state, enabled, locP)
   updateViewportAndProjection(locP)
 end
 
-local function handleUiCommand(window, command, playerCamera, state)
+local function handleUiCommand(window, command, playerCamera, state, locP)
   if command == "quit_game" then
     glfw.glfwSetWindowShouldClose(window, 1)
   elseif command == "quit_to_title" then
@@ -2670,6 +2819,10 @@ local function handleUiCommand(window, command, playerCamera, state)
     if playerCamera then
       playerCamera.firstMouse = true
     end
+  elseif command == "toggle_fullscreen" then
+    setFullscreen(window, state, not state.fullscreen, locP)
+  elseif command == "apply_vsync" then
+    glfw.glfwSwapInterval(state.vsync ~= false and 1 or 0)
   end
 end
 
@@ -2765,10 +2918,12 @@ local function updateFullscreenInput(window, state, locP, playerCamera, devMenu)
 
   if f11Down and not state.f11WasDown then
     setFullscreen(window, state, not state.fullscreen, locP)
+    saveUserSettings(state)
   end
 
   if escapeDown and not state.escapeWasDown and state.fullscreen then
     setFullscreen(window, state, false, locP)
+    saveUserSettings(state)
   elseif escapeDown and not state.escapeWasDown and state.devMenuOpen then
     devMenu:setOpen(false)
     state.devMenuOpen = false
@@ -2882,7 +3037,7 @@ end
 local function updateInventoryInput(window, state, playerCamera)
   if not state.hasWorld or state.devMenuOpen then return end
 
-  local inventoryDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_E) == glfw.GLFW_PRESS
+  local inventoryDown = inputBindings.actionDown(window, state.controlBindings, "inventory")
   local typingCreativeSearch = state.screen == "creative_inventory" and state.creativeTab == "search"
   if inventoryDown and not state.inventoryWasDown and not typingCreativeSearch then
     if state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" or state.screen == "furnace" then
@@ -3037,7 +3192,7 @@ local function updateInventoryInput(window, state, playerCamera)
   state.inventoryRightWasDown = rightDown
 end
 
-local function updateMenuInput(window, state, playerCamera)
+local function updateMenuInput(window, state, playerCamera, locP)
   if state.devMenuOpen then
     state.menuClickWasDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
     state.activeMenuSlider = nil
@@ -3073,8 +3228,10 @@ local function updateMenuInput(window, state, playerCamera)
     if slider then
       state.activeMenuSlider = slider
       uiFlow.applySlider(state, slider, value)
+      state.userSettingsDirty = true
     elseif not state.menuClickWasDown then
       local action = hud.menuButtonAt(state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
+      local previousSettings = userSettings.stateKey(state)
       local command = uiFlow.applyAction(state, action)
       if state.deleteWorldRequested then
         local worldToDelete = state.deleteWorldRequested
@@ -3088,9 +3245,14 @@ local function updateMenuInput(window, state, playerCamera)
         state.refreshWorldListRequested = true
       end
       if state.refreshWorldListRequested then game.refreshSavedWorldList(state) end
-      handleUiCommand(window, command, playerCamera, state)
+      handleUiCommand(window, command, playerCamera, state, locP)
+      if userSettings.stateKey(state) ~= previousSettings then saveUserSettings(state) end
     end
   else
+    if state.userSettingsDirty then
+      saveUserSettings(state)
+      state.userSettingsDirty = false
+    end
     state.activeMenuSlider = nil
   end
 
@@ -3101,8 +3263,8 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
     droppedItems, fallingTrees, blockParticles, audioEngine, dt)
   local Mining=require("mining")
   local FallingTrees=require("falling_trees")
-  local breakDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
-  local placeDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_RIGHT) == glfw.GLFW_PRESS
+  local breakDown = inputBindings.actionDown(window, state.controlBindings, "attack")
+  local placeDown = inputBindings.actionDown(window, state.controlBindings, "use")
 
   local slotKeys = {
     glfw.GLFW_KEY_1,
@@ -3217,7 +3379,7 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
     end
   end
 
-  local dropDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_Q) == glfw.GLFW_PRESS
+  local dropDown = inputBindings.actionDown(window, state.controlBindings, "drop")
   if dropDown and not state.dropWasDown and state.worldGameMode ~= "creative" then
     -- Ctrl+Q throws the whole stack, so clearing junk out of the hotbar is one
     -- keypress instead of sixty-four.
@@ -3239,7 +3401,7 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
 
   -- Middle click puts what you are looking at in your hand, pulling it forward
   -- from the backpack when it is not already on the hotbar.
-  local pickDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_MIDDLE) == glfw.GLFW_PRESS
+  local pickDown = inputBindings.actionDown(window, state.controlBindings, "pick")
   if pickDown and not state.pickWasDown then
     local hit = world:raycast(playerCamera.position, (playerCamera.getViewFront or playerCamera.getFront)(playerCamera), playerCamera.reach or graphics.player.reach or 6.0)
     local definition = hit and blocks.list[hit.id]
@@ -3325,7 +3487,7 @@ function game.captureScreenshot(width, height)
 end
 
 function game.run()
-  local ok, err = pcall(function()
+  local ok, err = xpcall(function()
     local window = initWindow()
 
     GL.loadModernGL()
@@ -3381,7 +3543,11 @@ function game.run()
     local currentWaterLevel = WATER_LEVEL
     local characterMesh = graphics.player.showDebugBody and createCharacterMesh() or nil
     local skyMesh = uploadSkyMesh()
-    local cloudMesh = createCloudMesh("assets/textures/environment/clouds.png")
+    local cloudMesh, cloudShadowTexture = createCloudMesh("assets/textures/environment/clouds.png")
+    -- Where the cloud sheet is this frame, shared by the terrain and water
+    -- passes so a shadow band stays continuous across the shoreline.
+    local cloudShadow = {originX = 0.0, originZ = 0.0, inverseSpan = 0.0,
+      altitude = CLOUD.bottom, strength = 0.0, texture = cloudShadowTexture}
     local shadowMap = effects.createShadowMap(graphics.shadows.cascadeMapSizes)
     local sceneTarget = effects.createSceneTarget(windowWidth, windowHeight)
     local waterBackgroundTarget = effects.createSceneTarget(windowWidth, windowHeight)
@@ -3432,6 +3598,13 @@ function game.run()
       lightColor = gl.glGetUniformLocation(shader, "lightColor"),
       moonLightColor = gl.glGetUniformLocation(shader, "moonLightColor"),
       lightingParams = gl.glGetUniformLocation(shader, "lightingParams"),
+      carriedLightPosition = gl.glGetUniformLocation(shader, "carriedLightPosition"),
+      carriedLightEmission = gl.glGetUniformLocation(shader, "carriedLightEmission"),
+      carriedLightVolume = gl.glGetUniformLocation(shader, "carriedLightVolume"),
+      carriedVolume = gl.glGetUniformLocation(shader, "carriedVolume"),
+      cloudShadowMap = gl.glGetUniformLocation(shader, "cloudShadowMap"),
+      cloudShadow = gl.glGetUniformLocation(shader, "cloudShadow"),
+      cloudShadowStrength = gl.glGetUniformLocation(shader, "cloudShadowStrength"),
       faceLight = gl.glGetUniformLocation(shader, "faceLight"),
       exposure = gl.glGetUniformLocation(shader, "exposure"),
       shadowStrength = gl.glGetUniformLocation(shader, "shadowStrength"),
@@ -3521,6 +3694,9 @@ function game.run()
       waterLevel = gl.glGetUniformLocation(waterShader, "waterLevel"),
       viewPos = gl.glGetUniformLocation(waterShader, "viewPos"),
       sunDir = gl.glGetUniformLocation(waterShader, "sunDir"),
+      cloudShadowMap = gl.glGetUniformLocation(waterShader, "cloudShadowMap"),
+      cloudShadow = gl.glGetUniformLocation(waterShader, "cloudShadow"),
+      cloudShadowStrength = gl.glGetUniformLocation(waterShader, "cloudShadowStrength"),
       fogColor = gl.glGetUniformLocation(waterShader, "fogColor"),
       lightColor = gl.glGetUniformLocation(waterShader, "lightColor"),
       skyZenithColor = gl.glGetUniformLocation(waterShader, "skyZenithColor"),
@@ -3554,6 +3730,7 @@ function game.run()
       cameraProjection = gl.glGetUniformLocation(atmospherePostShader, "cameraProjection"),
       depthParams = gl.glGetUniformLocation(atmospherePostShader, "depthParams"),
       volumeParams = gl.glGetUniformLocation(atmospherePostShader, "volumeParams"),
+      localSkyVisibility = gl.glGetUniformLocation(atmospherePostShader, "localSkyVisibility"),
       blurAmount = gl.glGetUniformLocation(atmospherePostShader, "blurAmount"),
       underwaterAmount = gl.glGetUniformLocation(atmospherePostShader, "underwaterAmount"),
       time = gl.glGetUniformLocation(atmospherePostShader, "time"),
@@ -3562,7 +3739,8 @@ function game.run()
       eyeExposure = gl.glGetUniformLocation(atmospherePostShader, "eyeExposure"),
       gradeParams = gl.glGetUniformLocation(atmospherePostShader, "gradeParams"),
       tonemapParams = gl.glGetUniformLocation(atmospherePostShader, "tonemapParams"),
-      godRaysStrength = gl.glGetUniformLocation(atmospherePostShader, "godRaysStrength")
+      godRaysStrength = gl.glGetUniformLocation(atmospherePostShader, "godRaysStrength"),
+      motionBlurVector = gl.glGetUniformLocation(atmospherePostShader, "motionBlurVector")
     }
     effects.godRaysRuntime = {
       shader = programs.godRays,
@@ -3613,6 +3791,8 @@ function game.run()
     gl.glUniform1i(shadowLocations.terrainMaps[2], 3)
     gl.glUniform1i(shadowLocations.terrainMaps[3], 4)
     gl.glUniform1i(terrainLocations.waterNormalMap, 2)
+    gl.glUniform1i(terrainLocations.carriedLightVolume, 5)
+    gl.glUniform1i(terrainLocations.cloudShadowMap, 6)
     gl.glUseProgram(skyShader)
     gl.glUniform1i(skyLocations.moonTex, 2)
     gl.glUseProgram(shader)
@@ -3631,6 +3811,12 @@ function game.run()
     }
     local worldgenPreviewMesh = nil
     local displayState = createDisplayState()
+    glfw.glfwSwapInterval(displayState.vsync ~= false and 1 or 0)
+    local launchFullscreen = displayState.fullscreen == true
+    displayState.fullscreen = false
+    if launchFullscreen then
+      setFullscreen(window, displayState, true, terrainLocations.projection)
+    end
     local audioEngine = game.AudioEngine.new()
     local scrollCallback = ffi.cast("GLFWscrollfun", function(_, _, yoffset)
       displayState.hotbarScroll = displayState.hotbarScroll + tonumber(yoffset)
@@ -3681,7 +3867,7 @@ function game.run()
       if displayState.inventory and displayState.inventory:updateSmelting(dt) then
         displayState.inventoryVersion=(displayState.inventoryVersion or 0)+1
       end
-      updateMenuInput(window, displayState, playerCamera)
+      updateMenuInput(window, displayState, playerCamera, terrainLocations.projection)
       displayState.renderDistance = renderDistance.clamp(displayState.renderDistance, DISTANT_CHUNK_RADIUS)
       distantTerrain:setRadius(displayState.renderDistance)
       world.chunkRadius = renderDistance.fullDetailRadius(displayState.renderDistance, CHUNK_RENDER_RADIUS)
@@ -3899,6 +4085,7 @@ function game.run()
             math.max(0.1, (displayState.sensitivity or 100) / 100.0)
           playerCamera.invertMouse = displayState.invertMouse == true
           playerCamera.viewBobbingEnabled = displayState.viewBobbing ~= false
+          playerCamera.controlBindings = displayState.controlBindings
           -- Inventory and developer UI are overlays, not pause screens. Keep
           -- movement, gravity and view motion running beneath them, while a
           -- visible cursor owns mouse look and gameplay clicks.
@@ -3924,7 +4111,7 @@ function game.run()
             displayState.pickWasDown =
               glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_MIDDLE) == glfw.GLFW_PRESS
             displayState.dropWasDown =
-              glfw.glfwGetKey(window, glfw.GLFW_KEY_Q) == glfw.GLFW_PRESS
+              inputBindings.actionDown(window, displayState.controlBindings, "drop")
           end
         else
           displayState.hotbarScroll = 0.0
@@ -4045,6 +4232,50 @@ function game.run()
         gl.glUniform3f(terrainLocations.lightColor, sky.lightColor[1], sky.lightColor[2], sky.lightColor[3])
         gl.glUniform3f(terrainLocations.moonLightColor, sky.moonLightColor[1], sky.moonLightColor[2], sky.moonLightColor[3])
         gl.glUniform3f(terrainLocations.lightingParams, sky.daylight, sky.moonAmount, sky.ambientFloor)
+        local carriedRed, carriedGreen, carriedBlue = 0.0, 0.0, 0.0
+        if not previewMode and displayState.inventory then
+          carriedRed, carriedGreen, carriedBlue = lighting.heldEmission(
+            displayState.inventory.slots[displayState.selectedSlot])
+        end
+        local carriedPosition = viewPosition
+        if not previewMode then
+          local carriedFront = (playerCamera.getViewFront or playerCamera.getFront)(playerCamera)
+          local carriedRight = playerCamera:getRight()
+          carriedPosition = {
+            viewPosition[1] + carriedFront[1] * 0.35 + carriedRight[1] * 0.28,
+            viewPosition[2] + carriedFront[2] * 0.35 - 0.35,
+            viewPosition[3] + carriedFront[3] * 0.35 + carriedRight[3] * 0.28
+          }
+        end
+        gl.glUniform3f(terrainLocations.carriedLightPosition,
+          carriedPosition[1], carriedPosition[2], carriedPosition[3])
+        gl.glUniform3f(terrainLocations.carriedLightEmission,
+          carriedRed, carriedGreen, carriedBlue)
+        -- Flood fill from the hand, so the carried light stops at walls instead
+        -- of shining through them. Only runs when the player crosses a voxel,
+        -- edits a block, or first takes an emitter in hand.
+        local carriedVolume = carriedLight.update(previewMode and nil or world,
+          carriedPosition[1], carriedPosition[2], carriedPosition[3],
+          carriedRed > 0 or carriedGreen > 0 or carriedBlue > 0)
+        gl.glUniform4f(terrainLocations.carriedVolume,
+          carriedVolume.originX, carriedVolume.originY, carriedVolume.originZ,
+          1.0 / carriedLight.SIZE)
+        -- The sheet moves, so the shadows have to follow it frame by frame. Both
+        -- come from cloudSheetOffset, which is the only thing keeping the shade
+        -- under the cloud that cast it.
+        local cloudOriginX, cloudOriginZ, cloudSpan = cloudSheetOffset(playerCamera, currentTime)
+        local cloudsVisible = not previewMode and displayState.clouds ~= false and
+          activeWorldProfile.hasClouds
+        cloudShadow.originX = cloudOriginX - cloudSpan * 0.5
+        cloudShadow.originZ = cloudOriginZ - cloudSpan * 0.5
+        cloudShadow.inverseSpan = 1.0 / cloudSpan
+        cloudShadow.altitude = CLOUD.bottom
+        cloudShadow.texture = cloudShadowTexture
+        cloudShadow.strength = cloudsVisible and
+          (graphics.atmosphere.cloudShadowStrength or 0.0) or 0.0
+        gl.glUniform4f(terrainLocations.cloudShadow, cloudShadow.originX,
+          cloudShadow.originZ, cloudShadow.inverseSpan, cloudShadow.altitude)
+        gl.glUniform1f(terrainLocations.cloudShadowStrength, cloudShadow.strength)
         gl.glUniform1f(terrainLocations.shadowStrength, sky.shadowStrength)
         gl.glUniform1f(terrainLocations.waterLevel,
           previewMode and -1000.0 or (currentWaterLevel or -1000.0))
@@ -4080,6 +4311,10 @@ function game.run()
           gl.glBindTexture(GL.TEXTURE_2D, shadowMap.cascades[2].depthTexture[0])
           gl.glActiveTexture(0x84C4)
           gl.glBindTexture(GL.TEXTURE_2D, shadowMap.cascades[3].depthTexture[0])
+          gl.glActiveTexture(GL.TEXTURE5)
+          gl.glBindTexture(GL.TEXTURE_3D, carriedLight.texture() or 0)
+          gl.glActiveTexture(GL.TEXTURE6)
+          gl.glBindTexture(GL.TEXTURE_2D, cloudShadowTexture)
           gl.glActiveTexture(GL.TEXTURE0)
           for _, mesh in ipairs(visibleMeshes) do
             rendering.draw(mesh)
@@ -4100,7 +4335,7 @@ function game.run()
               atlasTex, graphics.dielectrics, model
             )
           end
-          if activeWorldProfile.hasClouds then
+          if activeWorldProfile.hasClouds and displayState.clouds ~= false then
             drawClouds(cloudShader, cloudMesh, cloudLocations, playerCamera, view, projection, currentTime, sky)
           end
           if currentWaterLevel and #visibleWater > 0 then
@@ -4108,7 +4343,7 @@ function game.run()
             effects.drawWater(
               waterShader, visibleWater, waterLocations, playerCamera, view, projection, sunDir, sky,
               currentWaterLevel, ocean, waterBackgroundTarget, windowWidth, windowHeight,
-              currentTime, CAMERA_NEAR, CAMERA_FAR
+              currentTime, CAMERA_NEAR, CAMERA_FAR, cloudShadow
             )
           end
         end
@@ -4123,7 +4358,7 @@ function game.run()
         -- than the threshold bleeds. Runs at half resolution downward, so the
         -- whole chain costs about as much as one full-resolution pass.
         local bloomTexture = nil
-        if activePostSettings.bloom ~= false then
+        if activePostSettings.bloom ~= false and displayState.bloom ~= false then
           bloomTexture = effects.renderBloom(bloomShaders, bloomChain, sceneTarget.colorTexture[0], skyMesh, {
             threshold = activePostSettings.bloomThreshold or 0.70,
             softKnee = activePostSettings.bloomSoftKnee or 0.60,
@@ -4148,14 +4383,31 @@ function game.run()
 
         gl.glBindFramebuffer(GL.FRAMEBUFFER, 0)
         gl.glViewport(0, 0, windowWidth, windowHeight)
+        local motionX, motionY = motionBlur.vector(
+          displayState.motionBlur, activeCamera.yaw, activeCamera.pitch,
+          displayState.motionBlurPreviousYaw, displayState.motionBlurPreviousPitch,
+          math.deg(CAMERA_FOV), windowWidth / math.max(1, windowHeight),
+          not previewMode and not displayState.screen)
+        displayState.motionBlurPreviousYaw = activeCamera.yaw
+        displayState.motionBlurPreviousPitch = activeCamera.pitch
+        local localSkyVisibility = 1.0
+        if not previewMode then
+          local atmospherePosition = activeCamera.getViewPosition and
+            activeCamera:getViewPosition() or activeCamera.position
+          localSkyVisibility = world:skyLightAt(
+            math.floor(atmospherePosition[1]), math.floor(atmospherePosition[2]),
+            math.floor(atmospherePosition[3])) / 15.0
+        end
         effects.drawAtmospherePost(atmospherePostShader, skyMesh,
           atmospherePostLocations, sceneTarget, activeCamera, CAMERA_FOV,
           windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR,
           previewMode and 0.0 or displayState.underwaterAmount,
+          localSkyVisibility,
           previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings,
           displayState.screen == "pause" and 1.15 or 0.0,
           underwaterOverlayTexture, currentTime, bloomTexture, activePostSettings,
-          volumetricFog, effects.eyeExposureTexture, effects.godRaysTexture)
+          volumetricFog, effects.eyeExposureTexture, effects.godRaysTexture,
+          {motionX, motionY})
         -- Inventory screens are live overlays. Keep the in-world survival UI
         -- underneath, then add the creative/survival container on top of it.
         -- The developer tools are drawn last and follow the same layering rule.
@@ -4226,9 +4478,11 @@ function game.run()
       end
     end
 
+    saveUserSettings(displayState)
     saveCurrentPlayer(displayState, playerCamera)
     audioEngine:close()
     world:close()
+    carriedLight.release()
     effects.releaseBloomChain(bloomChain)
     effects.releaseGodRays(effects.godRaysRuntime)
     effects.godRaysRuntime = nil
@@ -4253,7 +4507,7 @@ function game.run()
     rendering.release(skyMesh)
     rendering.release(cloudMesh)
     hudOverlay:release()
-  end)
+  end, debug.traceback)
 
   glfw.glfwTerminate()
 

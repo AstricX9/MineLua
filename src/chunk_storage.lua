@@ -4,7 +4,10 @@ local Chunk = require("chunk")
 local storage = {}
 
 local FORMAT_VERSION = 1
-local GENERATOR_REVISION = 1
+-- Bumped when world generation changes shape. Chunks live under a directory
+-- named for this, so an existing world regenerates instead of seaming new
+-- terrain against chunks the previous generator wrote.
+local GENERATOR_REVISION = 2
 local CELL_COUNT = 16 * 256 * 16
 local WATER_COLUMN_COUNT = 16 * 16
 local NIL_WATER = 0xffff

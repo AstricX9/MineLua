@@ -319,6 +319,9 @@ uniform sampler2D normalMap1;
 uniform sampler2D normalMap2;
 uniform sampler2D sceneColor;
 uniform sampler2D sceneDepth;
+uniform sampler2D cloudShadowMap;
+uniform vec4 cloudShadow;    // xy = sheet origin in world, z = 1 / sheet span, w = cloud base
+uniform float cloudShadowStrength;
 
 const float PI = 3.14159265359;
 
@@ -480,8 +483,23 @@ void main() {
     geometrySmith(nDotV, nDotL, roughness) * fresnel /
     max(4.0 * nDotV * nDotL, 0.01);
 
+  // The sun glitter on open water is the most obvious thing a passing cloud
+  // takes away, and the terrain under the same cloud has already lost its
+  // direct light. Reading the same mask the same way keeps the shadow
+  // continuous where the water meets the shore.
+  float cloudShade = 1.0;
+  if (cloudShadowStrength > 0.0) {
+    float elevation = smoothstep(0.05, 0.25, lightDirection.y);
+    float travel = (cloudShadow.w - vWorldPos.y) / max(lightDirection.y, 1e-3);
+    if (elevation > 0.0 && travel > 0.0) {
+      vec2 hit = vWorldPos.xz + lightDirection.xz * travel;
+      float coverage = texture(cloudShadowMap, (hit - cloudShadow.xy) * cloudShadow.z).r;
+      cloudShade = 1.0 - coverage * cloudShadowStrength * elevation;
+    }
+  }
+
   vec3 color = mix(refracted, reflected, fresnel);
-  color += lightColor * directSpecular * nDotL * 2.2;
+  color += lightColor * directSpecular * nDotL * 2.2 * cloudShade;
   color = mix(color, vec3(0.72, 0.82, 0.84) * max(lightColor, vec3(0.35)), foam * 0.72);
   FragColor = vec4(color, 1.0);
 }
@@ -1071,6 +1089,7 @@ uniform vec3 cameraUp;
 uniform vec3 cameraProjection;
 uniform vec3 depthParams;
 uniform vec3 volumeParams; // near, far, maximum opacity
+uniform float localSkyVisibility;
 uniform float blurAmount;
 uniform float underwaterAmount;
 uniform float time;
@@ -1080,6 +1099,7 @@ uniform sampler2D eyeExposure;
 uniform vec4 gradeParams;   // exposure, bloomStrength, saturation, contrast
 uniform vec3 tonemapParams; // mode, knee, white
 uniform float godRaysStrength;
+uniform vec2 motionBlurVector;
 
 // Exactly identity below `knee`, then compresses smoothly toward `white`.
 // This is the operator that suits a retrofit: the scene was authored to look
@@ -1145,12 +1165,40 @@ vec4 sampleIntegratedVolume(float distance) {
   float opacity = 1.0 - integrated.a;
   float cappedOpacity = min(opacity, volumeParams.z);
   float scale = opacity > 1.0e-5 ? cappedOpacity / opacity : 0.0;
-  return vec4(integrated.rgb * scale, 1.0 - cappedOpacity);
+  // The froxel volume describes the open atmosphere and cannot see voxel
+  // walls. Suppress its in-scattering when the camera's own voxel cell has no
+  // route to the sky; extinction remains so lit cave contents still fade with
+  // distance without sealed air glowing on its own.
+  float localVisibility = clamp(localSkyVisibility, 0.0, 1.0);
+  return vec4(integrated.rgb * scale * localVisibility, 1.0 - cappedOpacity);
+}
+
+vec3 sampleMotionBlur(vec2 uv) {
+  if (dot(motionBlurVector, motionBlurVector) < 1.0e-8) {
+    return texture(sceneColor, uv).rgb;
+  }
+
+  float centerDepth = texture(sceneDepth, uv).r;
+  vec3 sum = vec3(0.0);
+  float totalWeight = 0.0;
+  // Trail from the current sample toward the preceding camera pose. Raw depth
+  // agreement prevents foreground silhouettes from smearing across the sky.
+  for (int index = 0; index < 8; ++index) {
+    float amount = float(index) / 7.0;
+    vec2 sampleUv = clamp(uv + motionBlurVector * amount, vec2(0.001), vec2(0.999));
+    float sampleDepth = texture(sceneDepth, sampleUv).r;
+    float depthWeight = 1.0 / (1.0 + abs(sampleDepth - centerDepth) * 160.0);
+    float shutterWeight = 1.0 - amount * 0.35;
+    float weight = depthWeight * shutterWeight;
+    sum += texture(sceneColor, sampleUv).rgb * weight;
+    totalWeight += weight;
+  }
+  return sum / max(totalWeight, 1.0e-4);
 }
 
 void main() {
   vec2 texel = 1.0 / vec2(textureSize(sceneColor, 0));
-  vec3 scene = texture(sceneColor, vUv).rgb;
+  vec3 scene = sampleMotionBlur(vUv);
   if (blurAmount > 0.001) {
     vec2 radius = texel * blurAmount;
     scene = scene * 0.36;
@@ -1161,7 +1209,8 @@ void main() {
   }
   float rawDepth = texture(sceneDepth, vUv).r;
   vec3 bloom = texture(bloomTexture, vUv).rgb;
-  vec3 godRays = texture(godRaysTexture, vUv).rgb;
+  vec3 godRays = texture(godRaysTexture, vUv).rgb *
+    clamp(localSkyVisibility, 0.0, 1.0);
   if (rawDepth >= 0.9999) {
     vec4 volume = sampleIntegratedVolume(volumeParams.y);
     vec3 skyColor = scene * volume.a + volume.rgb;
@@ -1318,13 +1367,13 @@ function effects.updateEyeAdaptation(program, locations, state, sceneTexture,
   gl.glUniform1i(locations.previousExposure, 1)
   gl.glUniform1i(locations.sceneDepth, 2)
   gl.glUniform4f(locations.adaptationParams,
-    settings.eyeKey or 0.34, settings.eyeMinExposure or 0.55,
-    settings.eyeMaxExposure or 2.35, math.min(deltaTime or 0.0, 0.1))
+    settings.eyeKey or 0.34, settings.eyeMinExposure or 0.70,
+    settings.eyeMaxExposure or 1.75, math.min(deltaTime or 0.0, 0.1))
   gl.glUniform2f(locations.adaptationSpeeds,
-    settings.eyeBrightenSpeed or 1.35, settings.eyeDarkenSpeed or 3.25)
+    settings.eyeBrightenSpeed or 0.75, settings.eyeDarkenSpeed or 1.50)
   gl.glUniform4f(locations.meterParams,
     settings.eyeSkyWeight or 0.25, settings.eyeEdgeWeight or 0.35,
-    settings.eyeSampleClamp or 2.0, settings.eyeResponse or 0.85)
+    settings.eyeSampleClamp or 2.0, settings.eyeResponse or 0.60)
   gl.glActiveTexture(GL_TEXTURE0)
   gl.glBindTexture(GL_TEXTURE_2D, sceneTexture)
   gl.glActiveTexture(GL_TEXTURE1)
@@ -2022,7 +2071,7 @@ function effects.renderShadowPass(shadowShader, shadowMap, locations, terrainMes
 end
 
 function effects.drawWater(waterShader, waterMeshes, locations, playerCamera, view, projection, sunDir, atmosphere,
-    waterLevel, ocean, background, viewportWidth, viewportHeight, time, nearPlane, farPlane)
+    waterLevel, ocean, background, viewportWidth, viewportHeight, time, nearPlane, farPlane, cloudShadow)
   local cascadeSizes = ocean.cascadeSizes
   local displacementWeights = ocean.displacementWeights
   local normalWeights = ocean.normalWeights
@@ -2055,6 +2104,14 @@ function effects.drawWater(waterShader, waterMeshes, locations, playerCamera, vi
   gl.glUniform1i(locations.normalMap2, 5)
   gl.glUniform1i(locations.sceneColor, 6)
   gl.glUniform1i(locations.sceneDepth, 7)
+  gl.glUniform1i(locations.cloudShadowMap, 8)
+  if cloudShadow then
+    gl.glUniform4f(locations.cloudShadow, cloudShadow.originX, cloudShadow.originZ,
+      cloudShadow.inverseSpan, cloudShadow.altitude)
+    gl.glUniform1f(locations.cloudShadowStrength, cloudShadow.strength)
+  else
+    gl.glUniform1f(locations.cloudShadowStrength, 0.0)
+  end
   for unit = 0, 2 do
     gl.glActiveTexture(GL_TEXTURE0 + unit)
     gl.glBindTexture(GL_TEXTURE_2D, ocean.displacementTexture)
@@ -2067,6 +2124,8 @@ function effects.drawWater(waterShader, waterMeshes, locations, playerCamera, vi
   gl.glBindTexture(GL_TEXTURE_2D, background.colorTexture[0])
   gl.glActiveTexture(GL_TEXTURE0 + 7)
   gl.glBindTexture(GL_TEXTURE_2D, background.depthTexture[0])
+  gl.glActiveTexture(GL_TEXTURE0 + 8)
+  gl.glBindTexture(GL_TEXTURE_2D, (cloudShadow and cloudShadow.texture) or 0)
 
   -- Refraction is composited in the shader from a pre-water scene copy, so the
   -- resulting surface is opaque and must not be alpha-blended a second time.
@@ -2211,8 +2270,8 @@ end
 
 function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarget,
     playerCamera, fov, viewportWidth, viewportHeight, nearPlane, farPlane,
-    underwaterAmount, settings, blurAmount, underwaterOverlayTexture, time, bloomTexture,
-    grade, volume, eyeExposureTexture, godRaysTexture)
+    underwaterAmount, localSkyVisibility, settings, blurAmount, underwaterOverlayTexture, time, bloomTexture,
+    grade, volume, eyeExposureTexture, godRaysTexture, motionBlurVector)
   settings = settings or {}
   grade = grade or {}
 
@@ -2237,6 +2296,7 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   gl.glUniform3f(locations.cameraProjection, projectionX, projectionY, 0.0)
   gl.glUniform3f(locations.depthParams, nearPlane, farPlane, 0.0)
   gl.glUniform3f(locations.volumeParams, volume.near, volume.far, settings.maxFogAmount or 0.72)
+  gl.glUniform1f(locations.localSkyVisibility, localSkyVisibility or 0.0)
   gl.glUniform1f(locations.blurAmount, blurAmount or 0.0)
   gl.glUniform1f(locations.underwaterAmount, underwaterAmount or 0.0)
   gl.glUniform1f(locations.time, time or 0.0)
@@ -2245,6 +2305,8 @@ function effects.drawAtmospherePost(postShader, screenMesh, locations, sceneTarg
   gl.glUniform1i(locations.eyeExposure, 5)
   gl.glUniform1f(locations.godRaysStrength,
     godRaysTexture and (grade.godRaysStrength or 0.30) or 0.0)
+  motionBlurVector = motionBlurVector or {0.0, 0.0}
+  gl.glUniform2f(locations.motionBlurVector, motionBlurVector[1] or 0.0, motionBlurVector[2] or 0.0)
   gl.glUniform4f(locations.gradeParams,
     grade.exposure or 1.0,
     bloomTexture and (grade.bloomStrength or 0.06) or 0.0,

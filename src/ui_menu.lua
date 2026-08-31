@@ -147,32 +147,35 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
     return buttons
   elseif screen == "options" then
     local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "general")
-    buttons[#buttons + 1] = {id = "cycle_music", kind = "setting", label = "Music", valueLabel = percent(menuState.musicVolume), x = layout.contentX, y = 56, w = layout.contentW, h = 22}
-    buttons[#buttons + 1] = {id = "cycle_sound", kind = "setting", label = "World Sound", valueLabel = percent(menuState.soundVolume), x = layout.contentX, y = 82, w = layout.contentW, h = 22}
-    buttons[#buttons + 1] = {id = "cycle_sensitivity", kind = "setting", label = "Look Speed", valueLabel = percent(menuState.sensitivity), x = layout.contentX, y = 122, w = layout.contentW, h = 22}
-    buttons[#buttons + 1] = {id = "cycle_difficulty", kind = "setting", label = "World Threat", valueLabel = menuState.difficulty or "Normal", x = layout.contentX, y = 148, w = layout.contentW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_invert_mouse", kind = "setting", label = "Invert Look", valueLabel = onOff(menuState.invertMouse), x = layout.contentX, y = 174, w = layout.contentW, h = 22}
-    buttons[#buttons + 1] = {id = "cycle_fov", kind = "setting", label = "View Angle", valueLabel = tostring(menuState.fovDegrees or 70), x = layout.contentX, y = 200, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_sound", kind = "setting", label = "World Sound", valueLabel = percent(menuState.soundVolume), x = layout.contentX, y = 56, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_sensitivity", kind = "setting", label = "Look Speed", valueLabel = percent(menuState.sensitivity), x = layout.contentX, y = 102, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_invert_mouse", kind = "setting", label = "Invert Look", valueLabel = onOff(menuState.invertMouse), x = layout.contentX, y = 128, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_fov", kind = "setting", label = "View Angle", valueLabel = tostring(menuState.fovDegrees or 70) .. " deg", x = layout.contentX, y = 154, w = layout.contentW, h = 22}
     return buttons
   elseif screen == "video" then
-    local guiScale = menuState.guiScale == 0 and "Auto" or tostring(menuState.guiScale or "Auto")
     local selectedRenderDistance = renderDistance.clamp(menuState.renderDistance, 8)
     local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "visuals")
     local gap = 6
     local columnW = math.floor((layout.contentW - gap) * 0.5)
     local left, right = layout.contentX, layout.contentX + columnW + gap
-    buttons[#buttons + 1] = {id = "toggle_graphics", kind = "setting", label = "Detail", valueLabel = menuState.graphicsMode or "Fancy", x = left, y = 56, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "render_distance", kind = "slider", presentation = "setting", label = "Horizon", valueLabel = tostring(selectedRenderDistance) .. " ch", value = selectedRenderDistance, minValue = menu.RENDER_DISTANCE_MIN, maxValue = menu.RENDER_DISTANCE_MAX, x = right, y = 56, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_smooth_lighting", kind = "setting", label = "Smooth Light", valueLabel = onOff(menuState.smoothLighting), x = left, y = 96, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_vsync", kind = "setting", label = "VSync", valueLabel = onOff(menuState.vsync), x = right, y = 96, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "cycle_brightness", kind = "setting", label = "Brightness", valueLabel = percent(menuState.brightness), x = left, y = 122, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_clouds", kind = "setting", label = "Clouds", valueLabel = onOff(menuState.clouds), x = right, y = 122, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_bloom", kind = "setting", label = "Sky Bloom", valueLabel = onOff(menuState.bloom), x = left, y = 148, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "cycle_particles", kind = "setting", label = "Particles", valueLabel = menuState.particles or "All", x = right, y = 148, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_anaglyph", kind = "setting", label = "3D Anaglyph", valueLabel = onOff(menuState.anaglyph), x = left, y = 180, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_view_bobbing", kind = "setting", label = "View Motion", valueLabel = onOff(menuState.viewBobbing), x = right, y = 180, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "cycle_gui_scale", kind = "setting", label = "UI Scale", valueLabel = guiScale, x = left, y = 204, w = columnW, h = 22}
-    buttons[#buttons + 1] = {id = "toggle_fullscreen", kind = "setting", label = "Fullscreen", valueLabel = onOff(menuState.fullscreen), x = right, y = 204, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "render_distance", kind = "slider", presentation = "setting", label = "Horizon", valueLabel = tostring(selectedRenderDistance) .. " ch", value = selectedRenderDistance, minValue = menu.RENDER_DISTANCE_MIN, maxValue = menu.RENDER_DISTANCE_MAX, x = left, y = 56, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_particles", kind = "setting", label = "Particles", valueLabel = menuState.particles or "All", x = right, y = 56, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_clouds", kind = "setting", label = "Clouds", valueLabel = onOff(menuState.clouds), x = left, y = 96, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_bloom", kind = "setting", label = "Sky Bloom", valueLabel = onOff(menuState.bloom), x = right, y = 96, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_view_bobbing", kind = "setting", label = "View Motion", valueLabel = onOff(menuState.viewBobbing), x = left, y = 136, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_motion_blur_dropdown", kind = "setting", label = "Motion Blur", valueLabel = menuState.motionBlur or "Off", x = right, y = 136, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_vsync", kind = "setting", label = "VSync", valueLabel = onOff(menuState.vsync), x = left, y = 176, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_fullscreen", kind = "setting", label = "Fullscreen", valueLabel = onOff(menuState.fullscreen), x = right, y = 176, w = columnW, h = 22}
+    if menuState.openDropdown == "motion_blur" then
+      local levels = {"Off", "Low", "Medium", "High"}
+      for index, level in ipairs(levels) do
+        buttons[#buttons + 1] = {
+          id = "set_motion_blur_" .. level:lower(), label = level,
+          x = right, y = 46 + (index - 1) * 22, w = columnW, h = 20,
+          style = level == menuState.motionBlur and "nav_active" or "quiet"
+        }
+      end
+    end
     return buttons
   elseif screen == "controls" then
     local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "controls")
@@ -189,14 +192,11 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
       local entry = actions[index]
       buttons[#buttons + 1] = {id = "bind_" .. entry[1], kind = "setting", label = entry[2], valueLabel = bindingLabel(menuState, entry[1], entry[3]), x = right, y = 52 + (index - 1) * 24, w = columnW, h = 20}
     end
-    buttons[#buttons + 1] = {id = "unavailable_chat", kind = "setting", label = "Chat", valueLabel = "PLANNED", x = right, y = 148, w = columnW, h = 20, enabled = false}
-    buttons[#buttons + 1] = {id = "unavailable_players", kind = "setting", label = "Player List", valueLabel = "PLANNED", x = right, y = 172, w = columnW, h = 20, enabled = false}
     return buttons
   elseif screen == "texture_packs" then
     local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "resources")
     buttons[#buttons + 1] = {id = "noop", kind = "setting", label = "Tamarton Base Set", valueLabel = "ACTIVE", x = layout.contentX, y = 56, w = layout.contentW, h = 22}
-    buttons[#buttons + 1] = {id = "noop", kind = "setting", label = "Custom Resource Sets", valueLabel = "PLANNED", x = layout.contentX, y = 96, w = layout.contentW, h = 22}
-    buttons[#buttons + 1] = {id = "create_texture_showcase", label = "Create Texture Preview World", x = layout.contentX, y = 136, w = layout.contentW, h = 22, style = "primary"}
+    buttons[#buttons + 1] = {id = "create_texture_showcase", label = "Create Texture Preview World", x = layout.contentX, y = 96, w = layout.contentW, h = 22, style = "primary"}
     return buttons
   elseif screen == "multiplayer" then
     return {{id = "back_main", label = "Done", x = cx - 100, y = logicalHeight - 28, w = 200, h = 20}}
@@ -217,12 +217,11 @@ function menu.stateKey(menuState)
     menuState.moreWorldOptions and "more" or "simple", menuState.worldSeedText or "",
     tostring(menuState.generateStructures), tostring(menuState.allowCheats), tostring(menuState.bonusChest),
     tostring(menuState.worldListVersion or 0), tostring(menuState.selectedWorldIndex or 0), tostring(menuState.worldListPage or 1),
-    menuState.menuParentScreen or "none", tostring(menuState.musicVolume), tostring(menuState.soundVolume),
+    menuState.menuParentScreen or "none", tostring(menuState.soundVolume),
     tostring(menuState.invertMouse), tostring(menuState.sensitivity), tostring(menuState.fovDegrees),
-    tostring(menuState.difficulty), tostring(menuState.graphicsMode), tostring(menuState.renderDistance),
-    tostring(menuState.smoothLighting), tostring(menuState.vsync), tostring(menuState.anaglyph),
-    tostring(menuState.viewBobbing), tostring(menuState.guiScale), tostring(menuState.fullscreen),
-    tostring(menuState.brightness), tostring(menuState.clouds), tostring(menuState.bloom),
+    tostring(menuState.renderDistance), tostring(menuState.vsync),
+    tostring(menuState.viewBobbing), tostring(menuState.motionBlur), tostring(menuState.openDropdown),
+    tostring(menuState.fullscreen), tostring(menuState.clouds), tostring(menuState.bloom),
     tostring(menuState.particles), bindings.attack or "", bindings.use or "", bindings.forward or "",
     bindings.back or "", bindings.left or "", bindings.right or "", bindings.jump or "",
     bindings.sneak or "", bindings.pick or "", bindings.drop or "", bindings.inventory or "", tostring(menuState.statusMessage or ""),

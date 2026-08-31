@@ -42,16 +42,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR ignored, int s
 
     wchar_t runtime[MAX_PATH];
     wchar_t script[MAX_PATH];
-    wchar_t saves[MAX_PATH];
     StringCchPrintfW(runtime, MAX_PATH, L"%s\\lib\\luajit.exe", root);
     StringCchPrintfW(script, MAX_PATH, L"%s\\src\\main.lua", root);
-    StringCchPrintfW(saves, MAX_PATH, L"%s\\saves", root);
 
     if (!SetCurrentDirectoryW(root)) {
         show_error(L"Could not enter the MineLua installation directory.", GetLastError());
         return 1;
     }
-    CreateDirectoryW(saves, NULL);
+    /* The game resolves its own save location (src/app_paths.lua). Creating one
+       here pinned every install to a saves folder inside the package, which the
+       next install replaces and which is not writable under Program Files. */
     SetEnvironmentVariableW(L"LUA_PATH", L"src\\?.lua;src\\?\\init.lua;.\\?.lua;;");
     SetEnvironmentVariableW(L"MINELUA_RELEASE", L"1");
 

@@ -1,2 +1,9 @@
 world_cache/
 build/
+logs/*
+!logs/.gitkeep
+!logs/build/
+logs/build/*
+!logs/build/.gitkeep
+data/config/user_settings.json
+saves/

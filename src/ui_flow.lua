@@ -1,6 +1,7 @@
 local flow = {}
 local worldProfiles = require("world_profiles")
 local renderDistance = require("render_distance")
+local inputBindings = require("input_bindings")
 
 local function cycleValue(current, values)
   for index = 1, #values do
@@ -10,20 +11,6 @@ local function cycleValue(current, values)
   end
   return values[1]
 end
-
-local CONTROL_CHOICES = {
-  attack = {"MOUSE1", "Q"},
-  use = {"MOUSE2", "E"},
-  pick = {"MOUSE3", "R"},
-  forward = {"W", "UP"},
-  back = {"S", "DOWN"},
-  left = {"A", "LEFT"},
-  right = {"D", "RIGHT"},
-  jump = {"SPACE", "R"},
-  sneak = {"CTRL", "C"},
-  drop = {"Q", "R"},
-  inventory = {"E", "R"}
-}
 
 function flow.inventoryScreenForGameMode(gameMode)
   return gameMode == "creative" and "creative_inventory" or "inventory"
@@ -84,6 +71,10 @@ end
 function flow.applyAction(state, action)
   if not action or action == "noop" then
     return nil
+  end
+
+  if action ~= "toggle_motion_blur_dropdown" and not action:match("^set_motion_blur_") then
+    state.openDropdown = nil
   end
 
   if action == "singleplayer" then
@@ -218,41 +209,35 @@ function flow.applyAction(state, action)
     return "quit_game"
   elseif action == "toggle_invert_mouse" then
     state.invertMouse = not state.invertMouse
-  elseif action == "cycle_music" then
-    state.musicVolume = cycleValue(state.musicVolume, {0, 25, 50, 75, 100})
   elseif action == "cycle_sound" then
     state.soundVolume = cycleValue(state.soundVolume, {0, 25, 50, 75, 100})
   elseif action == "cycle_sensitivity" then
     state.sensitivity = cycleValue(state.sensitivity, {50, 75, 100, 125, 150})
   elseif action == "cycle_fov" then
     state.fovDegrees = cycleValue(state.fovDegrees, {60, 70, 80, 90, 100})
-  elseif action == "cycle_difficulty" then
-    state.difficulty = cycleValue(state.difficulty, {"Peaceful", "Easy", "Normal", "Hard"})
-  elseif action == "toggle_graphics" then
-    state.graphicsMode = state.graphicsMode == "Fast" and "Fancy" or "Fast"
-  elseif action == "toggle_smooth_lighting" then
-    state.smoothLighting = not state.smoothLighting
   elseif action == "toggle_vsync" then
     state.vsync = not state.vsync
-  elseif action == "toggle_anaglyph" then
-    state.anaglyph = not state.anaglyph
+    return "apply_vsync"
   elseif action == "toggle_view_bobbing" then
     state.viewBobbing = not state.viewBobbing
-  elseif action == "cycle_gui_scale" then
-    state.guiScale = cycleValue(state.guiScale, {0, 1, 2, 3, 4})
   elseif action == "toggle_fullscreen" then
     return "toggle_fullscreen"
-  elseif action == "cycle_brightness" then
-    state.brightness = cycleValue(state.brightness, {50, 75, 100, 125, 150})
   elseif action == "toggle_clouds" then
     state.clouds = not state.clouds
   elseif action == "toggle_bloom" then
     state.bloom = not state.bloom
   elseif action == "cycle_particles" then
     state.particles = cycleValue(state.particles, {"All", "Decreased", "Minimal"})
+  elseif action == "toggle_motion_blur_dropdown" then
+    state.openDropdown = state.openDropdown == "motion_blur" and nil or "motion_blur"
+  elseif action:match("^set_motion_blur_") then
+    local value = action:match("^set_motion_blur_(.+)$")
+    local labels = {off = "Off", low = "Low", medium = "Medium", high = "High"}
+    if labels[value] then state.motionBlur = labels[value] end
+    state.openDropdown = nil
   elseif action:sub(1, 5) == "bind_" then
     local name = action:sub(6)
-    local choices = CONTROL_CHOICES[name]
+    local choices = inputBindings.CHOICES[name]
     if choices then
       state.controlBindings = state.controlBindings or {}
       state.controlBindings[name] = cycleValue(state.controlBindings[name], choices)
