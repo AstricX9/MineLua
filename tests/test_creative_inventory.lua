@@ -31,7 +31,7 @@ local state = {
   creativeScroll = 1,
   inventory = Inventory.new("creative")
 }
-local target = hud.inventorySlotAt("creative_inventory", 800, 600, 224, 201, state)
+local target = hud.inventorySlotAt("creative_inventory", 800, 600, 158, 202, state)
 assert(target and target.item == all[10],
   "creative slot hit-testing should use the same scrolled catalogue index as rendering")
 
@@ -41,13 +41,13 @@ for index = 1, Inventory.SLOT_COUNT do
     "creative mode should not pre-fill the player's inventory")
 end
 
-local inventoryTab = hud.inventorySlotAt("creative_inventory", 800, 600, 545, 440, state)
+local inventoryTab = hud.inventorySlotAt("creative_inventory", 800, 600, 474, 440, state)
 assert(inventoryTab and inventoryTab.kind == "creative_tab" and inventoryTab.tab == "inventory",
   "creative inventory exposes the Minecraft-style player inventory tab at the bottom")
 state.creativeTab = "inventory"
-local backpackSlot = hud.inventorySlotAt("creative_inventory", 800, 600, 224, 209, state)
-local hotbarSlot = hud.inventorySlotAt("creative_inventory", 800, 600, 224, 341, state)
-assert(backpackSlot and backpackSlot.kind == "slot" and backpackSlot.index == 10,
+local backpackSlot = hud.inventorySlotAt("creative_inventory", 800, 600, 158, 210, state)
+local hotbarSlot = hud.inventorySlotAt("creative_inventory", 800, 600, 158, 342, state)
+assert(backpackSlot and backpackSlot.kind == "slot" and backpackSlot.index == 14,
   "the bottom creative tab exposes the player's backpack")
 assert(hotbarSlot and hotbarSlot.kind == "slot" and hotbarSlot.index == 1,
   "the bottom creative tab exposes the player's hotbar")

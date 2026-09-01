@@ -14,6 +14,7 @@ debugger.printIssues()
 --   --world [seed]                     skip the menus into a generated world
 --   --time <hour>                      hold the sun at that solar hour
 --   --hold <item>                      equip that item in the first hotbar slot
+--   --perspective <0|1|2>              start in first/rear/front-person view
 --   --cartesian                        fall back to the old aligned voxel grid
 --   --screenshot <seconds,...> <path>  write a PPM per listed time, then quit
 --
@@ -35,6 +36,10 @@ local OPTIONS = {
   end,
   ["--hold"] = function(value)
     game.startHold = value
+    return 1
+  end,
+  ["--perspective"] = function(value)
+    game.startPerspective = math.max(0, math.min(2, math.floor(tonumber(value) or 0)))
     return 1
   end,
   ["--time"] = function(value)

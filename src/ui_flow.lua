@@ -96,6 +96,8 @@ function flow.applyAction(state, action)
     state.moreWorldOptions = false
     state.worldNameText = "New World"
     state.worldNamePristine = true
+    state.activeTextField = "world_name"
+    state.textCaret = #(state.worldNameText or "")
     state.worldSeedText = ""
     state.generateStructures = true
     state.allowCheats = false
@@ -107,6 +109,9 @@ function flow.applyAction(state, action)
     state.worldGameMode = "creative"
   elseif action == "toggle_more_world_options" then
     state.moreWorldOptions = not state.moreWorldOptions
+    state.activeTextField = state.moreWorldOptions and "world_seed" or "world_name"
+    local activeText = state.moreWorldOptions and state.worldSeedText or state.worldNameText
+    state.textCaret = #(activeText or "")
   elseif action == "toggle_generator" then
     state.worldGeneratorType = cycleValue(state.worldGeneratorType or "default",
       {"default", "superflat", "showcase"})
@@ -158,10 +163,6 @@ function flow.applyAction(state, action)
     state.screen = "pause"
   elseif action == "back_select" then
     state.screen = "select_world"
-  elseif action == "previous_world_page" then
-    state.worldListPage = math.max(1, (state.worldListPage or 1) - 1)
-  elseif action == "next_world_page" then
-    state.worldListPage = (state.worldListPage or 1) + 1
   elseif action:match("^select_saved_world_%d+$") then
     state.selectedWorldIndex = tonumber(action:match("(%d+)$"))
   elseif action == "play_selected_world" then

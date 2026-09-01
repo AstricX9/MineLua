@@ -115,6 +115,13 @@ function Camera.new(options)
     moveInputX = 0.0,
     moveInputZ = 0.0,
     sprinting = false,
+    movementMultiplier = 1.0,
+    sprintConditionMultiplier = 1.0,
+    damageShake = 0.0,
+    damageShakePhase = 0.0,
+    damageViewYaw = 0.0,
+    damageViewPitch = 0.0,
+    lastLandingImpact = nil,
     bobPhase = 0.0,
     viewBobX = 0.0,
     viewBobY = 0.0,
@@ -123,8 +130,38 @@ function Camera.new(options)
     stepViewOffset = 0.0,
     landingViewOffset = 0.0,
     viewBobbingEnabled = options.viewBobbingEnabled ~= false,
-    fovOffset = 0.0
+    fovOffset = 0.0,
+    -- 0 = first person, 1 = camera behind the player, 2 = camera facing them.
+    perspective = options.perspective or 0,
+    thirdPersonDistance = options.thirdPersonDistance or 4.0,
+    thirdPersonActualDistance = options.thirdPersonDistance or 4.0
   }, Camera)
+end
+
+function Camera:cyclePerspective()
+  self.perspective = ((self.perspective or 0) + 1) % 3
+  return self.perspective
+end
+
+function Camera:isThirdPerson()
+  return (self.perspective or 0) ~= 0
+end
+
+-- Pull the camera toward the player when a solid block sits between the eye
+-- and the requested third-person position. This avoids seeing through walls
+-- while retaining the familiar four-block camera distance in open space.
+function Camera:updatePerspectiveObstruction(world)
+  if not self:isThirdPerson() then
+    self.thirdPersonActualDistance = self.thirdPersonDistance
+    return
+  end
+
+  local front = self:getFront()
+  local direction = self.perspective == 1 and
+    {-front[1], -front[2], -front[3]} or front
+  local desired = self.thirdPersonDistance or 4.0
+  local hit = world and world.raycast and world:raycast(self.position, direction, desired, 0.08) or nil
+  self.thirdPersonActualDistance = hit and math.max(0.25, hit.distance - 0.18) or desired
 end
 
 function Camera:getFront()
@@ -476,7 +513,10 @@ function Camera:applyHorizontalInput(dt, window)
   elseif crouching then
     maxSpeed = self.crouchSpeed
   elseif sprinting then
-    maxSpeed = self.sprintSpeed
+    maxSpeed = self.sprintSpeed * math.max(0.0, self.sprintConditionMultiplier or 1.0)
+  end
+  if not self.flying then
+    maxSpeed = maxSpeed * math.max(0.0, self.movementMultiplier or 1.0)
   end
 
   local targetX = inputX * maxSpeed
@@ -544,27 +584,41 @@ end
 -- The bob pitch is visual-only. Movement and collision continue to use
 -- getFront(), while the rendered view gets the small weighted stride tilt.
 function Camera:getViewFront()
-  local radYaw = math.rad(self.yaw)
-  local radPitch = math.rad(self.pitch + (self.viewBobPitch or 0.0))
-  return normalize({
+  local radYaw = math.rad(self.yaw + (self.damageViewYaw or 0.0))
+  local radPitch = math.rad(self.pitch + (self.viewBobPitch or 0.0) +
+    (self.damageViewPitch or 0.0))
+  local front = normalize({
     math.cos(radYaw) * math.cos(radPitch),
     math.sin(radPitch),
     math.sin(radYaw) * math.cos(radPitch)
   })
+  if self.perspective == 2 then
+    return {-front[1], -front[2], -front[3]}
+  end
+  return front
 end
 
 function Camera:getViewPosition()
   local right = self:getRight()
-  return {
+  local position = {
     self.position[1] + right[1] * self.viewBobX,
     self.position[2] + self.viewBobY + self.stepViewOffset + self.landingViewOffset,
     self.position[3] + right[3] * self.viewBobX
   }
+  if self:isThirdPerson() then
+    local front = self:getFront()
+    local direction = self.perspective == 1 and -1.0 or 1.0
+    local distance = self.thirdPersonActualDistance or self.thirdPersonDistance or 4.0
+    position[1] = position[1] + front[1] * distance * direction
+    position[2] = position[2] + front[2] * distance * direction
+    position[3] = position[3] + front[3] * distance * direction
+  end
+  return position
 end
 
 function Camera:getViewUp()
   local front = self:getViewFront()
-  local right = self:getRight()
+  local right = self:getRight(front)
   local baseUp = {
     right[2] * front[3] - right[3] * front[2],
     right[3] * front[1] - right[1] * front[3],
@@ -794,6 +848,12 @@ function Camera:update(dt, window, world, allowMouseLook)
     self.firstMouse = true
   end
   self:updateMovement(dt, window, world)
+  self.lastLandingImpact = not wasGrounded and self.grounded and impactVelocityY < 0 and
+    -impactVelocityY or nil
+  self.damageShakePhase = (self.damageShakePhase or 0.0) + dt * 23.0
+  local shake = math.max(0.0, self.damageShake or 0.0)
+  self.damageViewYaw = math.sin(self.damageShakePhase * 0.83) * shake
+  self.damageViewPitch = math.sin(self.damageShakePhase * 1.31 + 0.8) * shake * 0.72
   self:updateViewMotion(dt, previousY, wasGrounded, impactVelocityY)
 end
 

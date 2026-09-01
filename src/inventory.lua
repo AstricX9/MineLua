@@ -6,8 +6,9 @@ local persistence = require("state_persistence")
 
 local Inventory = {}
 Inventory.__index = Inventory
-Inventory.HOTBAR_SIZE = 9
-Inventory.SLOT_COUNT = 36
+Inventory.HOTBAR_SIZE = 13
+Inventory.SLOT_COUNT = 52
+Inventory.LAYOUT_VERSION = 2
 Inventory.CREATIVE_COLUMNS = 9
 Inventory.CREATIVE_ROWS = 5
 
@@ -106,6 +107,7 @@ function Inventory.new(gameMode, options)
     craftingGridSize = 2,
     furnace = {burnTime=0,burnTotal=0,cookTime=0,cookTotal=10},
     recipeBook = options.recipeBook or recipeBook(),
+    layoutVersion = Inventory.LAYOUT_VERSION,
     cursor = nil,
     selected = 1,
     search = "",
@@ -558,7 +560,16 @@ function Inventory:saveState()
 end
 
 function Inventory:restoreState(saved)
+  local legacyLayout = type(saved) == "table" and
+    (tonumber(saved.layoutVersion) or 1) < Inventory.LAYOUT_VERSION
   persistence.restore(self, saved, PERSISTENCE_OPTIONS)
+  if legacyLayout then
+    local oldSlots, migrated = self.slots or {}, {}
+    for index=1,9 do migrated[index] = oldSlots[index] end
+    for index=10,36 do migrated[index + (Inventory.HOTBAR_SIZE - 9)] = oldSlots[index] end
+    self.slots = migrated
+  end
+  self.layoutVersion = Inventory.LAYOUT_VERSION
   self.furnace=self.furnace or {burnTime=0,burnTotal=0,cookTime=0,cookTotal=10}
   self:normalizeSelected()
   return self

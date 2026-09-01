@@ -668,11 +668,17 @@ local function appendSlider(meshes, width, height, scale, button, mouseX, mouseY
     4, 5, colorFromRgb(0xC4A07B))
 end
 
-local function appendTextBox(meshes, width, height, scale, x, y, w, h, text)
-  appendScaledRect(meshes.color, width, height, scale, x - 1, y - 1, w + 2, h + 3, TAMARTON.line)
+local function appendTextBox(meshes, width, height, scale, x, y, w, h, text, focused, caret, time)
+  local border = focused and TAMARTON.gold or TAMARTON.line
+  appendScaledRect(meshes.color, width, height, scale, x - 1, y - 1, w + 2, h + 3, border)
   appendScaledRect(meshes.color, width, height, scale, x, y, w, h, TAMARTON.panelLight)
   appendScaledRect(meshes.color, width, height, scale, x, y + h - 2, w, 2, TAMARTON.ember)
   appendText(meshes.font, width, height, scale, text, x + 4, y + 6, TAMARTON.paper)
+  if focused and math.floor((time or 0) * 2) % 2 == 0 then
+    local cursor = math.max(0, math.min(caret or #text, #text))
+    local cursorX = x + 4 + textWidth(text:sub(1, cursor))
+    appendScaledRect(meshes.color, width, height, scale, cursorX, y + 4, 1, h - 8, TAMARTON.gold)
+  end
 end
 
 local function appendStandaloneIcon(vertices, width, height, x, y, nativeWidth, nativeHeight)
@@ -711,15 +717,21 @@ local function appendStatusBars(meshes, width, height, state)
 end
 
 local function appendHotbar(vertices, width, height, selectedSlot)
-  local scale = 2
-  local hotbarW = 182 * scale
-  local hotbarH = 22 * scale
+  local hotbarW = Inventory.HOTBAR_SIZE * 40 + 4
+  local hotbarH = 44
   local x = math.floor((width - hotbarW) * 0.5)
   local y = height - 58
-  selectedSlot = math.max(1, math.min(selectedSlot or 1, 9))
+  selectedSlot = math.max(1, math.min(selectedSlot or 1, Inventory.HOTBAR_SIZE))
 
-  appendSprite(vertices, width, height, x, y, hotbarW, hotbarH, 0, 0, 182, 22, 256, 256, COLORS.white)
-  appendSprite(vertices, width, height, x - 2 + (selectedSlot - 1) * 20 * scale, y - 2, 24 * scale, 22 * scale, 0, 22, 24, 22, 256, 256, COLORS.white)
+  appendRect(vertices,width,height,x,y,hotbarW,hotbarH,TAMARTON.line)
+  appendRect(vertices,width,height,x+2,y+2,hotbarW-4,hotbarH-4,TAMARTON.panelLight)
+  for index=1,Inventory.HOTBAR_SIZE do
+    local slotX=x+4+(index-1)*40
+    appendRect(vertices,width,height,slotX, y+4,36,36,colorFromRgb(0x0A0D24,0.96))
+  end
+  local selectedX=x+2+(selectedSlot-1)*40
+  appendRect(vertices,width,height,selectedX,y+2,40,40,TAMARTON.gold)
+  appendRect(vertices,width,height,selectedX+3,y+5,34,34,colorFromRgb(0x15192B,0.98))
 end
 
 local function appendCrosshair(vertices, width, height)
@@ -815,8 +827,10 @@ local function buildMeshes(width, height, selectedSlot, state, time, notice)
   if not state or state.worldGameMode ~= "creative" then appendStatusBars(meshes, width, height, state) end
   appendHotbar(meshes.widgets, width, height, selectedSlot)
   appendCrosshair(meshes.crosshair, width, height)
-  local center, x, y = math.floor(width*0.5), math.floor(width*0.5)-174, height-54
-  for index=1,9 do
+  local center = math.floor(width*0.5)
+  local hotbarW = Inventory.HOTBAR_SIZE * 40 + 4
+  local x, y = math.floor((width-hotbarW)*0.5)+4, height-54
+  for index=1,Inventory.HOTBAR_SIZE do
     local stack = hotbarStack(index)
     appendInventoryItem(meshes.terrain,width,height,x+(index-1)*40+5,y+5,30,stack)
     appendStackCount(meshes.font,width,height,stack,x+(index-1)*40+5,y+5,30)
@@ -921,6 +935,20 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
       appendCenteredText(meshes.font, width, height, scale, "NO WORLDS CHARTED", cx, 74, TAMARTON.paper)
       appendCenteredText(meshes.font, width, height, scale, "Create one to begin the expedition", cx, 90, TAMARTON.muted)
     end
+    local listLayout = uiMenu.worldListLayout(logicalWidth, logicalHeight,
+      #(menuState.savedWorlds or {}), menuState.worldListScroll)
+    if listLayout.maxScroll > 0 then
+      local trackX = listLayout.x + listLayout.width + 5
+      local trackHeight = listLayout.visibleRows * listLayout.rowHeight - 2
+      local thumbHeight = math.max(12, math.floor(trackHeight * listLayout.visibleRows /
+        math.max(1, #(menuState.savedWorlds or {}))))
+      local thumbY = listLayout.top + math.floor((trackHeight - thumbHeight) *
+        listLayout.scroll / listLayout.maxScroll)
+      appendScaledRect(meshes.color, width, height, scale, trackX, listLayout.top, 3,
+        trackHeight, TAMARTON.line)
+      appendScaledRect(meshes.color, width, height, scale, trackX, thumbY, 3,
+        thumbHeight, TAMARTON.ember)
+    end
     if menuState.statusMessage and menuState.statusMessage ~= "" then
       appendCenteredText(meshes.font, width, height, scale, menuState.statusMessage, cx, logicalHeight - 68, TEXT_MUTED)
     end
@@ -934,12 +962,15 @@ local function buildMenuMeshes(width, height, screen, mouseX, mouseY, menuState,
     appendCenteredText(meshes.font, width, height, scale, "SHAPE A NEW WORLD", cx, 20, TAMARTON.gold)
     if menuState.moreWorldOptions then
       appendText(meshes.font, width, height, scale, "Seed for the World Generator", cx - 100, 47, TEXT_MUTED)
-      appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, menuState.worldSeedText or "")
+      appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20,
+        menuState.worldSeedText or "", menuState.activeTextField == "world_seed",
+        menuState.textCaret, time)
       appendText(meshes.font, width, height, scale, "Leave blank for a random seed", cx - 100, 84, TEXT_MUTED)
     else
       local worldName = menuState.worldNameText or "New World"
       appendText(meshes.font, width, height, scale, "World Name", cx - 100, 47, TEXT_MUTED)
-      appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, worldName)
+      appendTextBox(meshes, width, height, scale, cx - 100, 60, 200, 20, worldName,
+        menuState.activeTextField == "world_name", menuState.textCaret, time)
       appendText(meshes.font, width, height, scale, "Will be saved in: " .. worldName, cx - 100, 85, TEXT_MUTED)
       if (menuState.worldGameMode or "survival") == "creative" then
         appendText(meshes.font, width, height, scale, "Unlimited resources and free flying", cx - 100, 152, TEXT_MUTED)
@@ -1109,9 +1140,9 @@ local function buildLoadingMeshes(width, height, loadingState)
   return meshes
 end
 
-local function inventoryLayout(width, height, creative)
+local function inventoryLayout(width, height, screen)
   local scale = 2
-  local w, h = creative and 390 or 352, creative and 272 or 332
+  local w, h = 262 * scale, screen == "creative_inventory" and 272 or 166 * scale
   return {x=math.floor((width-w)/2),y=math.floor((height-h)/2),w=w,h=h,scale=scale}
 end
 
@@ -1183,7 +1214,7 @@ end
 
 function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
   local creative = screen == "creative_inventory"
-  local layout = inventoryLayout(width,height,creative)
+  local layout = inventoryLayout(width,height,screen)
   if creative then
     for _,tab in ipairs(CREATIVE_TABS) do
       if pointIn(mouseX,mouseY,layout.x+tab.x,layout.y-54,56,58) then
@@ -1195,13 +1226,13 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
     end
     local activeTab = state and state.creativeTab or "building"
     if activeTab == "inventory" then
-      for row=0,2 do for col=0,8 do
+      for row=0,2 do for col=0,Inventory.HOTBAR_SIZE-1 do
         local x,y=layout.x+18+col*36,layout.y+44+row*36
         if pointIn(mouseX,mouseY,x,y,32,32) then
-          return {kind="slot",index=10+row*9+col,x=x,y=y,w=32,h=32}
+          return {kind="slot",index=Inventory.HOTBAR_SIZE+1+row*Inventory.HOTBAR_SIZE+col,x=x,y=y,w=32,h=32}
         end
       end end
-      for col=0,8 do
+      for col=0,Inventory.HOTBAR_SIZE-1 do
         local x,y=layout.x+18+col*36,layout.y+176
         if pointIn(mouseX,mouseY,x,y,32,32) then
           return {kind="slot",index=col+1,x=x,y=y,w=32,h=32}
@@ -1227,7 +1258,7 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
       local ratio = math.max(0,math.min(1,(mouseY-(layout.y+51))/146))
       return {kind="creative_scroll",scroll=math.floor(ratio*maximum+0.5)}
     end
-    for col=0,8 do
+    for col=0,Inventory.HOTBAR_SIZE-1 do
       local x,y=layout.x+18+col*36,layout.y+224
       if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1,x=x,y=y,w=32,h=32} end
     end
@@ -1261,11 +1292,13 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
     end
   end
 
-  for row=0,2 do for col=0,8 do
+  for row=0,2 do for col=0,Inventory.HOTBAR_SIZE-1 do
     local x,y=layout.x+16+col*36,layout.y+168+row*36
-    if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=10+row*9+col,x=x,y=y,w=32,h=32} end
+    if pointIn(mouseX,mouseY,x,y,32,32) then
+      return {kind="slot",index=Inventory.HOTBAR_SIZE+1+row*Inventory.HOTBAR_SIZE+col,x=x,y=y,w=32,h=32}
+    end
   end end
-  for col=0,8 do
+  for col=0,Inventory.HOTBAR_SIZE-1 do
     local x,y=layout.x+16+col*36,layout.y+284
     if pointIn(mouseX,mouseY,x,y,32,32) then return {kind="slot",index=col+1,x=x,y=y,w=32,h=32} end
   end
@@ -1280,13 +1313,28 @@ function hud.inventorySlotAt(screen, width, height, mouseX, mouseY, state)
   if pointIn(mouseX,mouseY,offhand.x,offhand.y,offhand.w,offhand.h) then
     return {kind="offhand",x=offhand.x,y=offhand.y,w=offhand.w,h=offhand.h}
   end
+  if screen == "inventory" then
+    local regions = {
+      {"head",124,17,11,11}, {"left_arm",117,29,6,14},
+      {"body",124,29,11,18}, {"right_arm",136,29,6,14},
+      {"left_leg",124,48,5,16}, {"right_leg",130,48,5,16}
+    }
+    for _, region in ipairs(regions) do
+      local rect=inventoryRect(layout,region[2],region[3],1)
+      rect.w,rect.h=region[4]*layout.scale,region[5]*layout.scale
+      if pointIn(mouseX,mouseY,rect.x,rect.y,rect.w,rect.h) then
+        return {kind="body_region",region=region[1],x=rect.x,y=rect.y,w=rect.w,h=rect.h}
+      end
+    end
+  end
   for row=0,1 do for col=0,1 do
-    local rect=inventoryRect(layout,98+col*18,18+row*18,16)
+    local sourceX = screen == "inventory" and 169 or 98
+    local rect=inventoryRect(layout,sourceX+col*18,18+row*18,16)
     if pointIn(mouseX,mouseY,rect.x,rect.y,rect.w,rect.h) then
       return {kind="craft",index=1+row*2+col,x=rect.x,y=rect.y,w=rect.w,h=rect.h}
     end
   end end
-  local result=inventoryRect(layout,154,28,16)
+  local result=inventoryRect(layout,screen == "inventory" and 226 or 154,28,16)
   if pointIn(mouseX,mouseY,result.x,result.y,result.w,result.h) then
     return {kind="result",x=result.x,y=result.y,w=result.w,h=result.h}
   end
@@ -1295,10 +1343,28 @@ end
 
 local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time)
   local creative = screen == "creative_inventory"
-  local layout = inventoryLayout(width,height,creative)
-  local meshes={panel={},creativePanel={},creativeTabs={},color={},overlay={},terrain={},font={},skin={}}
+  local layout = inventoryLayout(width,height,screen)
+  local meshes={panel={},bodyMask={},creativePanel={},creativeTabs={},color={},overlay={},terrain={},font={},skin={}}
   appendRect(meshes.color,width,height,0,0,width,height,{0.01,0.015,0.05,0.58})
-  appendInventoryPanel(meshes.color,width,height,layout.x,layout.y,layout.w,layout.h)
+  if screen == "inventory" then
+    appendSprite(meshes.panel,width,height,layout.x,layout.y,layout.w,layout.h,
+      0,0,262,166,262,166,COLORS.white)
+    local regions = {
+      {"head",125,18,9,9}, {"left_arm",118,30,4,12},
+      {"body",125,30,9,16}, {"right_arm",137,30,4,12},
+      {"left_leg",125,49,3,14}, {"right_leg",131,49,3,14}
+    }
+    for _, region in ipairs(regions) do
+      local name,sx,sy,sw,sh=region[1],region[2],region[3],region[4],region[5]
+      local color=state.bodyDamage and state.bodyDamage:color(name) or
+        {0.47,0.49,0.52,1.0}
+      appendSprite(meshes.bodyMask,width,height,
+        layout.x+sx*layout.scale,layout.y+sy*layout.scale,
+        sw*layout.scale,sh*layout.scale,sx,sy,sw,sh,262,166,color)
+    end
+  else
+    appendInventoryPanel(meshes.color,width,height,layout.x,layout.y,layout.w,layout.h)
+  end
   if creative then
     local activeTab = state.creativeTab or "building"
     for index,tab in ipairs(CREATIVE_TABS) do
@@ -1337,8 +1403,8 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
     if activeTab == "inventory" then
       appendInventoryHeading(meshes.font,width,height,"PLAYER INVENTORY",
         layout.x+18,layout.y+10,TAMARTON.gold)
-      for row=0,2 do for col=0,8 do
-        local index=10+row*9+col
+      for row=0,2 do for col=0,Inventory.HOTBAR_SIZE-1 do
+        local index=Inventory.HOTBAR_SIZE+1+row*Inventory.HOTBAR_SIZE+col
         local x,y=layout.x+18+col*36,layout.y+44+row*36
         local stack=state.inventory.slots[index]
         appendInventorySlot(meshes.color,width,height,x,y,32,32,false)
@@ -1346,7 +1412,7 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
         appendStackCount(meshes.font,width,height,stack,x+2,y+1,28)
       end end
       appendText(meshes.font,width,height,1,"HOTBAR",layout.x+18,layout.y+162,TAMARTON.muted)
-      for col=0,8 do
+      for col=0,Inventory.HOTBAR_SIZE-1 do
         local x,y=layout.x+18+col*36,layout.y+176
         local stack=state.inventory.slots[col+1]
         appendInventorySlot(meshes.color,width,height,x,y,32,32,true)
@@ -1379,7 +1445,7 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
       appendRect(meshes.color,width,height,layout.x+357,layout.y+39,10,170,colorFromRgb(0x090C24))
       appendRect(meshes.overlay,width,height,layout.x+356,layout.y+39+math.floor(ratio*140),12,30,
         maximum>0 and TAMARTON.ember or colorFromRgb(0x3A3A52))
-      for col=0,8 do
+      for col=0,Inventory.HOTBAR_SIZE-1 do
         local x,y=layout.x+18+col*36,layout.y+224
         local stack=state.inventory.slots[col+1]
         appendInventorySlot(meshes.color,width,height,x,y,32,32,true)
@@ -1391,27 +1457,25 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
     local heading=screen=="crafting_table" and "WORKBENCH" or
       (screen=="furnace" and "KILN" or "FIELD PACK")
     local headingY=screen=="inventory" and layout.y+145 or layout.y+14
-    appendInventoryHeading(meshes.font,width,height,heading,layout.x+18,headingY,TAMARTON.gold)
+    if screen ~= "inventory" then
+      appendInventoryHeading(meshes.font,width,height,heading,layout.x+18,headingY,TAMARTON.gold)
+    end
     if screen ~= "crafting_table" and screen ~= "furnace" then
-      appendInventorySteve(meshes.skin,width,height,layout,mouseX,mouseY,time)
-      appendText(meshes.font,width,height,1,"ASSEMBLE",layout.x+196,layout.y+14,TAMARTON.muted)
-      for row=0,3 do
-        local rect=inventoryRect(layout,8,8+row*18,16)
-        appendInventorySlot(meshes.color,width,height,rect.x,rect.y,rect.w,rect.h,false)
+      if screen ~= "inventory" then
+        appendInventorySteve(meshes.skin,width,height,layout,mouseX,mouseY,time)
       end
-      local offhand=inventoryRect(layout,77,62,16)
-      appendInventorySlot(meshes.color,width,height,offhand.x,offhand.y,offhand.w,offhand.h,true)
     end
     local inv=state.inventory
-    for row=0,2 do for col=0,8 do
-      local index=10+row*9+col local x,y=layout.x+16+col*36,layout.y+168+row*36
-      appendInventorySlot(meshes.color,width,height,x,y,32,32,false)
+    for row=0,2 do for col=0,Inventory.HOTBAR_SIZE-1 do
+      local index=Inventory.HOTBAR_SIZE+1+row*Inventory.HOTBAR_SIZE+col
+      local x,y=layout.x+16+col*36,layout.y+168+row*36
+      if screen ~= "inventory" then appendInventorySlot(meshes.color,width,height,x,y,32,32,false) end
       local stack=inv.slots[index] appendInventoryItem(meshes.terrain,width,height,x,y,32,stack)
       appendStackCount(meshes.font,width,height,stack,x,y,32)
     end end
-    for col=0,8 do
+    for col=0,Inventory.HOTBAR_SIZE-1 do
       local stack=inv.slots[col+1] local x,y=layout.x+16+col*36,layout.y+284
-      appendInventorySlot(meshes.color,width,height,x,y,32,32,true)
+      if screen ~= "inventory" then appendInventorySlot(meshes.color,width,height,x,y,32,32,true) end
       appendInventoryItem(meshes.terrain,width,height,x,y,32,stack)
       appendStackCount(meshes.font,width,height,stack,x,y,32)
     end
@@ -1445,24 +1509,37 @@ local function buildInventoryMeshes(width,height,screen,state,mouseX,mouseY,time
       end
     else
       local gridSize=screen=="crafting_table" and 3 or 2
-      local gridX,gridY=screen=="crafting_table" and 30 or 98,screen=="crafting_table" and 17 or 18
+      local gridX,gridY=screen=="crafting_table" and 30 or 169,screen=="crafting_table" and 17 or 18
       for row=0,gridSize-1 do for col=0,gridSize-1 do
         local rect=inventoryRect(layout,gridX+col*18,gridY+row*18,16)
-        appendInventorySlot(meshes.color,width,height,rect.x,rect.y,rect.w,rect.h,false)
+        if screen ~= "inventory" then
+          appendInventorySlot(meshes.color,width,height,rect.x,rect.y,rect.w,rect.h,false)
+        end
         local stack=inv.crafting[1+row*gridSize+col]
         appendInventoryItem(meshes.terrain,width,height,rect.x,rect.y,rect.w,stack)
         appendStackCount(meshes.font,width,height,stack,rect.x,rect.y,rect.w)
       end end
-      local result=inventoryRect(layout,screen=="crafting_table" and 124 or 154,screen=="crafting_table" and 35 or 28,16)
-      appendInventorySlot(meshes.color,width,height,result.x,result.y,result.w,result.h,true)
-      appendText(meshes.font,width,height,1,"OUTPUT",result.x-8,result.y-18,TAMARTON.muted)
+      local result=inventoryRect(layout,screen=="crafting_table" and 124 or 226,screen=="crafting_table" and 35 or 28,16)
+      if screen ~= "inventory" then
+        appendInventorySlot(meshes.color,width,height,result.x,result.y,result.w,result.h,true)
+        appendText(meshes.font,width,height,1,"OUTPUT",result.x-8,result.y-18,TAMARTON.muted)
+      end
       local resultStack=inv:craftResult()
       appendInventoryItem(meshes.terrain,width,height,result.x,result.y,result.w,resultStack)
       appendStackCount(meshes.font,width,height,resultStack,result.x,result.y,result.w)
     end
   end
   local hovered=hud.inventorySlotAt(screen,width,height,mouseX or -1,mouseY or -1,state)
-  if hovered and hovered.x then
+  if hovered and hovered.kind == "body_region" and state.bodyDamage then
+    local label=hovered.region:gsub("_"," "):upper().."  "..
+      tostring(math.floor(state.bodyDamage:condition(hovered.region)*100+0.5)).."%  "..
+      state.bodyDamage:injuryState(hovered.region):gsub("_"," "):upper()
+    local tipX,tipY=math.min(width-textWidth(label)-12,(mouseX or 0)+12),
+      math.max(4,(mouseY or 0)-16)
+    appendRect(meshes.overlay,width,height,tipX-4,tipY-3,textWidth(label)+8,13,
+      {0.01,0.015,0.03,0.94})
+    appendText(meshes.font,width,height,1,label,tipX,tipY,TAMARTON.paper)
+  elseif hovered and hovered.x then
     appendRect(meshes.overlay,width,height,hovered.x,hovered.y,hovered.w,hovered.h,
       colorFromRgb(0xC79A68, 0.16))
   end
@@ -1542,13 +1619,7 @@ local function upload(vertices)
   }
 end
 
-local function createTexture(path, repeatWrap, linear, roundedGuiCorners)
-  local img = texture.loadPng(path)
-  if not img then
-    error("Failed to load HUD texture: " .. path)
-  end
-  if roundedGuiCorners then texture.applyGuiCornerTransparency(img) end
-
+local function uploadTextureImage(img, repeatWrap, linear)
   local tex = ffi.new("GLuint[1]")
   gl.glGenTextures(1, tex)
   gl.glBindTexture(GL_TEXTURE_2D, tex[0])
@@ -1560,6 +1631,40 @@ local function createTexture(path, repeatWrap, linear, roundedGuiCorners)
   gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.w, img.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.data)
 
   return {id = tex, image = img}
+end
+
+local function createTexture(path, repeatWrap, linear, roundedGuiCorners)
+  local img = texture.loadPng(path)
+  if not img then
+    error("Failed to load HUD texture: " .. path)
+  end
+  if roundedGuiCorners then texture.applyGuiCornerTransparency(img) end
+  return uploadTextureImage(img, repeatWrap, linear)
+end
+
+local function createInventoryTextures(path)
+  local source = texture.loadPng(path)
+  if not source then error("Failed to load inventory texture: " .. path) end
+  local bytes = source.w * source.h * 4
+  local panelData = ffi.new("uint8_t[?]", bytes)
+  local maskData = ffi.new("uint8_t[?]", bytes)
+  ffi.copy(panelData, source.data, bytes)
+
+  for pixel=0,source.w*source.h-1 do
+    local offset=pixel*4
+    local red=source.data[offset] > 200 and source.data[offset+1] < 80 and
+      source.data[offset+2] < 80 and source.data[offset+3] > 0
+    if red then
+      panelData[offset],panelData[offset+1],panelData[offset+2]=120,125,133
+      maskData[offset],maskData[offset+1],maskData[offset+2],maskData[offset+3]=255,255,255,255
+    else
+      maskData[offset],maskData[offset+1],maskData[offset+2],maskData[offset+3]=0,0,0,0
+    end
+  end
+
+  local panel={w=source.w,h=source.h,data=panelData}
+  local mask={w=source.w,h=source.h,data=maskData}
+  return uploadTextureImage(panel,false,false),uploadTextureImage(mask,false,false)
 end
 
 local function heldTextureFor(self,path)
@@ -1620,6 +1725,8 @@ end
 function hud.create(skinPath)
   local shader = createShader()
   local heldShader = createHeldShader()
+  local inventoryTexture, bodyMaskTexture = createInventoryTextures(
+    "assets/textures/gui/container/inventory_new.png")
   local function heldUniform(name) return gl.glGetUniformLocation(heldShader, name) end
   return setmetatable({
     shader = shader,
@@ -1655,6 +1762,8 @@ function hud.create(skinPath)
       crosshair = createTexture("assets/textures/gui/icons/crosshair.png"),
       font = createTexture("assets/textures/font/ascii.png"),
       skin = createTexture(skinPath or "assets/textures/entity/steve.png"),
+      inventory = inventoryTexture,
+      bodyMask = bodyMaskTexture,
       panoramaFaces = {},
       white = createTexture("assets/textures/gui/widgets.png")
     },
@@ -1758,6 +1867,7 @@ end
 -- the mining swing, the equip lift and camera sway are all uniforms, so this
 -- runs every frame without touching a vertex buffer.
 function hud:drawHeldItem(width, height, time, selectedSlot, state, atlasTexture, environment)
+  if state and (state.perspective or 0) ~= 0 then return end
   local stack = state and state.inventory and state.inventory.slots and state.inventory.slots[selectedSlot or 1]
   if not stack then return end
   local model = heldModelFor(self, stack)
@@ -1903,7 +2013,8 @@ function hud:drawInventory(width,height,screen,state,mouseX,mouseY,atlasTexture,
     local raw=buildInventoryMeshes(width,height,screen,state,mouseX or 0,mouseY or 0,time or 0)
     rendering.releaseGroup(self.inventoryMeshes)
     self.inventoryMeshes={
-      panel=upload(raw.panel),creativePanel=upload(raw.creativePanel),creativeTabs=upload(raw.creativeTabs),
+      panel=upload(raw.panel),bodyMask=upload(raw.bodyMask),
+      creativePanel=upload(raw.creativePanel),creativeTabs=upload(raw.creativeTabs),
       color=upload(raw.color),overlay=upload(raw.overlay),terrain=upload(raw.terrain),font=upload(raw.font),skin=upload(raw.skin)
     }
     self.inventoryKey=key
@@ -1911,6 +2022,8 @@ function hud:drawInventory(width,height,screen,state,mouseX,mouseY,atlasTexture,
   gl.glDisable(GL_DEPTH_TEST) gl.glEnable(GL_BLEND) gl.glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA) gl.glDepthMask(0)
   gl.glUseProgram(self.shader) gl.glUniform1f(self.timeLocation,0) gl.glUniform1i(self.textureLocation,0)
   self:drawMesh(self.inventoryMeshes.color,self.textures.white)
+  self:drawMesh(self.inventoryMeshes.panel,self.textures.inventory)
+  self:drawMesh(self.inventoryMeshes.bodyMask,self.textures.bodyMask)
   self:drawMesh(self.inventoryMeshes.overlay,self.textures.white)
   self:drawMesh(self.inventoryMeshes.skin,self.textures.skin)
   if atlasTexture then self:drawMesh(self.inventoryMeshes.terrain,atlasTexture) end
@@ -1924,7 +2037,10 @@ function hud:ensureMenuMeshes(width, height, screen, mouseX, mouseY, menuState, 
   local logicalMouseY = mouseY / scale
   local hovered = hud.menuButtonAt(screen, width, height, mouseX, mouseY, menuState) or "none"
   local panoramaFrame = screen == "main" and math.floor((time or 0.0) * 20.0) or 0
-  local key = table.concat({screen or "none", width, height, hovered, uiMenu.stateKey(menuState), panoramaFrame}, ":")
+  local textFrame = screen == "create_world" and menuState.activeTextField and
+    math.floor((time or 0.0) * 2.0) or 0
+  local key = table.concat({screen or "none", width, height, hovered,
+    uiMenu.stateKey(menuState), panoramaFrame, textFrame}, ":")
   if self.menuMeshes and self.menuKey == key then
     return
   end
@@ -2106,6 +2222,35 @@ function hud.menuButtonAt(screen, width, height, mouseX, mouseY, menuState)
   end
 
   return nil
+end
+
+function hud.menuTextFieldAt(screen, width, height, mouseX, mouseY, menuState)
+  if not screen then return nil end
+  local scale = guiScale(width, height)
+  local logicalWidth = math.floor(width / scale)
+  local logicalHeight = math.floor(height / scale)
+  local logicalMouseX = mouseX / scale
+  local logicalMouseY = mouseY / scale
+  for _, field in ipairs(uiMenu.textFields(screen, logicalWidth, logicalHeight, menuState)) do
+    if isHovered(field, logicalMouseX, logicalMouseY) then
+      local value = tostring((menuState or {})[field.valueKey] or "")
+      local targetX = math.max(0, logicalMouseX - field.x - 4)
+      field.caret = #value
+      for index = 0, #value do
+        local before = textWidth(value:sub(1, index))
+        local after = index < #value and textWidth(value:sub(1, index + 1)) or before
+        if targetX <= (before + after) * 0.5 then field.caret = index break end
+      end
+      return field
+    end
+  end
+  return nil
+end
+
+function hud.worldListLayout(width, height, menuState)
+  local scale = guiScale(width, height)
+  return uiMenu.worldListLayout(math.floor(width / scale), math.floor(height / scale),
+    #((menuState and menuState.savedWorlds) or {}), menuState and menuState.worldListScroll)
 end
 
 function hud.menuSliderValueAt(screen, width, height, mouseX, mouseY, menuState, activeSlider)

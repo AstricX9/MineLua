@@ -23,9 +23,9 @@ inventory.cursor={item="flint",count=1}
 assert(not inventory:swapFurnace("furnace_fuel"),"non-fuel items should be rejected from the fuel slot")
 
 local width,height=800,600
-local input=hud.inventorySlotAt("furnace",width,height,350,180,{inventory=inventory})
-local fuel=hud.inventorySlotAt("furnace",width,height,350,250,{inventory=inventory})
-local output=hud.inventorySlotAt("furnace",width,height,470,220,{inventory=inventory})
+local input=hud.inventorySlotAt("furnace",width,height,252,170,{inventory=inventory})
+local fuel=hud.inventorySlotAt("furnace",width,height,252,242,{inventory=inventory})
+local output=hud.inventorySlotAt("furnace",width,height,372,206,{inventory=inventory})
 assert(input and input.kind=="furnace_input","furnace input slot should be interactive")
 assert(fuel and fuel.kind=="furnace_fuel","furnace fuel slot should be interactive")
 assert(output and output.kind=="furnace_output","furnace output slot should be interactive")

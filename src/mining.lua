@@ -114,13 +114,15 @@ end
 -- Advances one frame of breaking against the current target and reports whether
 -- it gives way. Chopping only moves when a blow lands, so wood jumps a crack
 -- stage per swing; everything else still wears down continuously.
-function Mining.advanceBreak(state, block, item, gameMode, dt, landedBlow)
+function Mining.advanceBreak(state, block, item, gameMode, dt, landedBlow, strengthMultiplier)
   local chops = Mining.chopsRequired(block, item, gameMode)
   state.breakProgress = state.breakProgress or 0
   if chops then
     state.breakDuration = chops * Mining.CHOP_INTERVAL
     if landedBlow then
-      state.breakProgress = math.min(state.breakDuration, state.breakProgress + Mining.CHOP_INTERVAL)
+      local strength = math.max(0.1, math.min(1.0, tonumber(strengthMultiplier) or 1.0))
+      state.breakProgress = math.min(state.breakDuration,
+        state.breakProgress + Mining.CHOP_INTERVAL * strength)
     end
   else
     state.breakDuration = Mining.breakDuration(block, item, gameMode)

@@ -18,6 +18,35 @@ local function bindingLabel(menuState, name, fallback)
   return bindings[name] or fallback
 end
 
+function menu.worldListLayout(logicalWidth, logicalHeight, worldCount, scroll)
+  local listTop = 36
+  local listBottom = logicalHeight - 78
+  local rowHeight = 36
+  local visibleRows = math.max(1, math.floor((listBottom - listTop) / rowHeight))
+  local maxScroll = math.max(0, (worldCount or 0) - visibleRows)
+  return {
+    x = math.floor(logicalWidth * 0.5) - 160,
+    top = listTop,
+    bottom = listBottom,
+    width = 320,
+    rowHeight = rowHeight,
+    visibleRows = visibleRows,
+    scroll = math.max(0, math.min(math.floor(scroll or 0), maxScroll)),
+    maxScroll = maxScroll
+  }
+end
+
+function menu.textFields(screen, logicalWidth, logicalHeight, menuState)
+  if screen ~= "create_world" then return {} end
+  local cx = math.floor(logicalWidth * 0.5)
+  if menuState and menuState.moreWorldOptions then
+    return {{id = "world_seed", x = cx - 100, y = 60, w = 200, h = 20,
+      valueKey = "worldSeedText", limit = 19, numeric = true}}
+  end
+  return {{id = "world_name", x = cx - 100, y = 60, w = 200, h = 20,
+    valueKey = "worldNameText", limit = 32}}
+end
+
 function menu.settingsLayout(logicalWidth, logicalHeight)
   local navX = math.max(16, math.floor(logicalWidth * 0.05))
   local navW = math.min(104, math.max(82, math.floor(logicalWidth * 0.24)))
@@ -89,24 +118,17 @@ function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
     }
   elseif screen == "select_world" then
     local worlds = menuState.savedWorlds or {}
-    local listTop = 36
-    local listBottom = logicalHeight - 78
-    local rowHeight = 36
-    local perPage = math.max(1, math.floor((listBottom - listTop) / rowHeight))
-    local pageCount = math.max(1, math.ceil(#worlds / perPage))
-    local page = math.max(1, math.min(menuState.worldListPage or 1, pageCount))
-    local first = (page - 1) * perPage + 1
-    local last = math.min(#worlds, first + perPage - 1)
+    local layout = menu.worldListLayout(logicalWidth, logicalHeight, #worlds,
+      menuState.worldListScroll)
+    local first = layout.scroll + 1
+    local last = math.min(#worlds, first + layout.visibleRows - 1)
     local buttons = {}
     for index = first, last do
       buttons[#buttons + 1] = {
-        id = "select_saved_world_" .. index, label = "", x = cx - 160,
-        y = listTop + (index - first) * rowHeight, w = 320, h = 34, worldIndex = index
+        id = "select_saved_world_" .. index, label = "", x = layout.x,
+        y = layout.top + (index - first) * layout.rowHeight,
+        w = layout.width, h = 34, worldIndex = index
       }
-    end
-    if pageCount > 1 then
-      buttons[#buttons + 1] = {id = "previous_world_page", label = "<", x = cx - 184, y = listTop, w = 20, h = 20, enabled = page > 1}
-      buttons[#buttons + 1] = {id = "next_world_page", label = ">", x = cx + 164, y = listTop, w = 20, h = 20, enabled = page < pageCount}
     end
     buttons[#buttons + 1] = {id = "play_selected_world", label = "Enter Selected World", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil, style = "primary"}
     buttons[#buttons + 1] = {id = "create_world", label = "Create a World", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
@@ -215,8 +237,9 @@ function menu.stateKey(menuState)
     menuState.worldGameMode or "survival", menuState.worldGeneratorType or "default",
     worldProfiles.id(menuState.worldId), menuState.worldNameText or "",
     menuState.moreWorldOptions and "more" or "simple", menuState.worldSeedText or "",
+    tostring(menuState.activeTextField or ""), tostring(menuState.textCaret or 0),
     tostring(menuState.generateStructures), tostring(menuState.allowCheats), tostring(menuState.bonusChest),
-    tostring(menuState.worldListVersion or 0), tostring(menuState.selectedWorldIndex or 0), tostring(menuState.worldListPage or 1),
+    tostring(menuState.worldListVersion or 0), tostring(menuState.selectedWorldIndex or 0), tostring(menuState.worldListScroll or 0),
     menuState.menuParentScreen or "none", tostring(menuState.soundVolume),
     tostring(menuState.invertMouse), tostring(menuState.sensitivity), tostring(menuState.fovDegrees),
     tostring(menuState.renderDistance), tostring(menuState.vsync),

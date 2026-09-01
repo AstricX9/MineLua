@@ -32,6 +32,8 @@ local showcase = require("showcase")
 local inputBindings = require("input_bindings")
 local motionBlur = require("motion_blur")
 local userSettings = require("user_settings")
+local textInput = require("text_input")
+local BodyDamage = require("body_damage")
 local astronomy = {
   ephemeris = require("sky_ephemeris"),
   catalog = require("star_catalog"),
@@ -2043,8 +2045,19 @@ local function rebuildChangedBlockMeshes(world,pendingEntries,changed)
 end
 
 local function createCharacterMesh()
-  local player = character.createPlayer({8, 6, 8})
-  return uploadMesh(player:createMesh())
+  local player = character.createPlayer({0, 0, 0})
+  return uploadMesh(player:createMesh(), character.VERTEX_STRIDE_FLOATS, true)
+end
+
+local function characterModel(playerCamera)
+  local front = playerCamera:getHorizontalFront()
+  local feetY = playerCamera.position[2] - (playerCamera.eyeHeight or 1.62)
+  return {
+    -front[3], 0, front[1], 0,
+    0, 1, 0, 0,
+    front[1], 0, front[3], 0,
+    playerCamera.position[1], feetY, playerCamera.position[3], 1
+  }
 end
 
 local function releaseDroppedItemMeshes(meshes)
@@ -2433,7 +2446,7 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
   local localZ = blockZ - chunkZ * 16
   local biomeName = terrain.biomeAt(blockX, blockZ)
   local generation = terrain.debugFieldsAt(blockX, blockZ, TERRAIN_MAX_H)
-  local target = world:raycast(pos, (playerCamera.getViewFront or playerCamera.getFront)(playerCamera), playerCamera.reach or 6.0)
+  local target = world:raycast(pos, playerCamera:getFront(), playerCamera.reach or 6.0)
   local targetLine = "Looking at: none"
   if target then
     targetLine = string.format(
@@ -2576,6 +2589,7 @@ local function createDisplayState()
     screenshotRequested = false,
     pickWasDown = false,
     f4WasDown = false,
+    f5WasDown = false,
     escapeWasDown = false,
     breakWasDown = false,
     breakTarget = nil,
@@ -2631,9 +2645,12 @@ local function createDisplayState()
     selectedWorldIndex = nil,
     pendingDeleteWorld = nil,
     deleteWorldRequested = nil,
-    worldListPage = 1,
+    worldListScroll = 0,
     worldListVersion = 0,
     createTextKeyWasDown = {},
+    textInputCharacters = {},
+    activeTextField = nil,
+    textCaret = 0,
     hasWorld = false,
     menuParentScreen = nil,
     currentWorldSave = nil,
@@ -2649,6 +2666,9 @@ local function createDisplayState()
     selectedSlot = 1,
     hotbarScroll = 0.0,
     inventory = Inventory.new("survival"),
+    bodyDamage = BodyDamage.new(),
+    health = 20,
+    hunger = 20,
     inventoryVersion = 1,
     inventoryWasDown = false,
     inventoryClickWasDown = false,
@@ -2719,7 +2739,8 @@ end
 local function playerSnapshot(state, playerCamera)
   return {
     camera = playerCamera:saveState(),
-    inventory = state.inventory:saveState()
+    inventory = state.inventory:saveState(),
+    bodyDamage = state.bodyDamage and state.bodyDamage:saveState() or nil
   }
 end
 
@@ -2751,9 +2772,30 @@ local function restorePlayer(state, playerCamera, savedPlayer)
   if type(savedPlayer.inventory) == "table" then
     state.inventory:restoreState(savedPlayer.inventory)
   end
+  if type(savedPlayer.bodyDamage) == "table" then
+    state.bodyDamage:restoreState(savedPlayer.bodyDamage)
+  end
 
   state.selectedSlot = state.inventory:normalizeSelected()
+  state.health = state.bodyDamage:vitality() * 20
   return true
+end
+
+function game.applyPlayerDamage(state, hitHeight, side, amount, protection)
+  if not state or not state.bodyDamage or state.worldGameMode == "creative" then
+    return nil, 0
+  end
+  local region, applied, injury = state.bodyDamage:applyHit(
+    hitHeight, side, amount, protection)
+  state.health = state.bodyDamage:vitality() * 20
+  return region, applied, injury
+end
+
+function game.damagePlayerRegion(state, region, amount, protection)
+  if not state or not state.bodyDamage or state.worldGameMode == "creative" then return 0 end
+  local applied, injury = state.bodyDamage:applyDamage(region, amount, protection)
+  state.health = state.bodyDamage:vitality() * 20
+  return applied, injury
 end
 
 local function syncCursorMode(window, state, playerCamera)
@@ -2829,54 +2871,192 @@ end
 local function updateWorldCreationTextInput(window, state)
   if state.screen ~= "create_world" then
     state.createTextKeyWasDown = {}
+    state.textInputCharacters = {}
+    state.activeTextField = nil
+    return
+  end
+
+  local fieldId = state.moreWorldOptions and "world_seed" or "world_name"
+  if state.activeTextField ~= fieldId then
+    state.textInputCharacters = {}
+    state.createTextKeyWasDown = {}
     return
   end
 
   local previous = state.createTextKeyWasDown or {}
   local current = {}
-  local editingSeed = state.moreWorldOptions == true
+  local editingSeed = fieldId == "world_seed"
   local text = editingSeed and (state.worldSeedText or "") or (state.worldNameText or "New World")
   local limit = editingSeed and 19 or 32
 
-  local function appendKey(key, character)
-    local down = glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
-    current[key] = down
-    if down and not previous[key] and #text < limit then
+  local caret = math.max(0, math.min(state.textCaret or #text, #text))
+  for _, character in ipairs(state.textInputCharacters or {}) do
+    if (not editingSeed and character:match("^[ -~]$")) or
+        (editingSeed and (character:match("^%d$") or (character == "-" and caret == 0 and not text:find("-", 1, true)))) then
       if not editingSeed and state.worldNamePristine then
-        text = ""
+        text, caret = "", 0
         state.worldNamePristine = false
       end
-      text = text .. character
+      text, caret = textInput.insert(text, caret, character, limit)
     end
   end
+  state.textInputCharacters = {}
 
-  if editingSeed then
-    for digit = 0, 9 do appendKey(48 + digit, tostring(digit)) end
-    local minusDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_MINUS) == glfw.GLFW_PRESS
-    current.minus = minusDown
-    if minusDown and not previous.minus and text == "" then text = "-" end
-  else
-    local shift = glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_SHIFT) == glfw.GLFW_PRESS or
-      glfw.glfwGetKey(window, 344) == glfw.GLFW_PRESS
-    for code = 65, 90 do appendKey(code, string.char(shift and code or (code + 32))) end
-    for digit = 0, 9 do appendKey(48 + digit, tostring(digit)) end
-    appendKey(glfw.GLFW_KEY_SPACE, " ")
-    appendKey(glfw.GLFW_KEY_MINUS, shift and "_" or "-")
+  local function pressed(name, key)
+    local down = glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
+    current[name] = down
+    return down and not previous[name]
   end
 
-  local backspaceDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_BACKSPACE) == glfw.GLFW_PRESS
-  current.backspace = backspaceDown
-  if backspaceDown and not previous.backspace then
+  if pressed("backspace", glfw.GLFW_KEY_BACKSPACE) then
     if not editingSeed and state.worldNamePristine then
-      text = ""
+      text, caret = "", 0
       state.worldNamePristine = false
     else
-      text = text:sub(1, -2)
+      text, caret = textInput.backspace(text, caret)
     end
   end
+  if pressed("delete", glfw.GLFW_KEY_DELETE) then text, caret = textInput.delete(text, caret) end
+  if pressed("left", glfw.GLFW_KEY_LEFT) then caret = textInput.move(text, caret, "left") end
+  if pressed("right", glfw.GLFW_KEY_RIGHT) then caret = textInput.move(text, caret, "right") end
+  if pressed("home", glfw.GLFW_KEY_HOME) then caret = textInput.move(text, caret, "home") end
+  if pressed("end", glfw.GLFW_KEY_END) then caret = textInput.move(text, caret, "end") end
 
   if editingSeed then state.worldSeedText = text else state.worldNameText = text end
+  state.textCaret = caret
   state.createTextKeyWasDown = current
+end
+
+local function createCharacterShader()
+  return shaderModule.fromSource([[
+#version 460 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec3 aColor;
+layout (location = 3) in vec2 aTexCoord;
+layout (location = 4) in vec3 aInfo;
+out vec3 vNormal;
+out vec3 vColor;
+out vec2 vTexCoord;
+uniform mat4 uProjection;
+uniform mat4 uView;
+uniform mat4 uModel;
+// phase, movement amount, elapsed time, crouch amount
+uniform vec4 uAnim0;
+// head pitch, vertical velocity, grounded, attack phase
+uniform vec4 uAnim1;
+
+void rotateX(inout vec3 point, inout vec3 normal, vec3 pivot, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  vec3 p = point - pivot;
+  point = pivot + vec3(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+  normal = vec3(normal.x, normal.y * c - normal.z * s,
+    normal.y * s + normal.z * c);
+}
+
+void rotateZ(inout vec3 point, inout vec3 normal, vec3 pivot, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  vec3 p = point - pivot;
+  point = pivot + vec3(p.x * c - p.y * s, p.x * s + p.y * c, p.z);
+  normal = vec3(normal.x * c - normal.y * s,
+    normal.x * s + normal.y * c, normal.z);
+}
+
+void rotateY(inout vec3 point, inout vec3 normal, vec3 pivot, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  vec3 p = point - pivot;
+  point = pivot + vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+  normal = vec3(normal.x * c + normal.z * s, normal.y,
+    -normal.x * s + normal.z * c);
+}
+
+void main() {
+  vec3 point = aPos;
+  vec3 normal = aNormal;
+  int part = int(aInfo.x + 0.5);
+  float moveAmount = clamp(uAnim0.y, 0.0, 1.0);
+  float crouch = clamp(uAnim0.w, 0.0, 1.0);
+  float idle = 1.0 - smoothstep(0.025, 0.16, moveAmount);
+  float gait = sin(uAnim0.x) * moveAmount;
+  float stride = gait * mix(0.82, 0.52, crouch);
+  float breathe = sin(uAnim0.z * 1.65) * idle;
+  float weightShift = sin(uAnim0.z * 0.72) * idle;
+  float airborne = 1.0 - clamp(uAnim1.z, 0.0, 1.0);
+
+  if (part == 1) {
+    float headPitch = -clamp(uAnim1.x, -1.25, 1.25) + breathe * 0.018;
+    rotateX(point, normal, vec3(0.0, 1.5, 0.0), headPitch);
+    rotateY(point, normal, vec3(0.0, 1.5, 0.0),
+      sin(uAnim0.z * 0.43) * idle * 0.028);
+  } else if (part == 3) {
+    float attack = sin(clamp(uAnim1.w, 0.0, 1.0) * 3.14159265);
+    rotateX(point, normal, vec3(-0.375, 1.5, 0.0),
+      -stride - attack * 1.75 - airborne * 0.20 + breathe * 0.028);
+    rotateZ(point, normal, vec3(-0.375, 1.5, 0.0),
+      -0.035 - weightShift * 0.018);
+  } else if (part == 4) {
+    rotateX(point, normal, vec3(0.375, 1.5, 0.0),
+      stride - airborne * 0.20 - breathe * 0.028);
+    rotateZ(point, normal, vec3(0.375, 1.5, 0.0),
+      0.035 - weightShift * 0.018);
+  } else if (part == 5) {
+    rotateX(point, normal, vec3(-0.125, 0.75, 0.0),
+      stride + airborne * 0.16 - crouch * 0.12);
+  } else if (part == 6) {
+    rotateX(point, normal, vec3(0.125, 0.75, 0.0),
+      -stride - airborne * 0.16 - crouch * 0.12);
+  }
+
+  // The crouch is a hierarchical upper-body pose rather than only a lowered
+  // camera: hips settle, the torso leans, and the head retains its own aim.
+  if (part <= 4) {
+    point.y -= crouch * 0.17;
+    point.z += crouch * 0.055;
+    rotateX(point, normal, vec3(0.0, 0.75, 0.0), crouch * 0.30);
+    rotateZ(point, normal, vec3(0.0, 0.75, 0.0), weightShift * 0.010);
+    point.y += breathe * 0.008;
+  }
+
+  // Alternating heel lift keeps the legs visibly separate at the quiet end of
+  // a stride and gives the model a little grounded weight without foot IK.
+  if (part == 5 || part == 6) {
+    float lift = max(0.0, part == 5 ? -gait : gait) * 0.045;
+    point.y += lift * (1.0 - crouch * 0.45);
+  }
+
+  vNormal = mat3(uModel) * normal;
+  vColor = aColor;
+  vTexCoord = aTexCoord;
+  gl_Position = uProjection * uView * uModel * vec4(point, 1.0);
+}
+]], [[
+#version 460 core
+in vec3 vNormal;
+in vec3 vColor;
+in vec2 vTexCoord;
+out vec4 FragColor;
+uniform sampler2D tex0;
+uniform vec3 lightDir;
+uniform vec3 ambientColor;
+uniform vec3 lightColor;
+vec3 srgbToLinear(vec3 color) {
+  return pow(max(color, vec3(0.0)), vec3(2.2));
+}
+vec3 linearToSrgb(vec3 color) {
+  return pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
+}
+void main() {
+  vec4 texel = texture(tex0, vTexCoord);
+  if (texel.a < 0.5) discard;
+  float diffuse = max(dot(normalize(vNormal), normalize(-lightDir)), 0.0);
+  vec3 lighting = ambientColor * 0.88 + lightColor * (0.22 + diffuse * 0.78);
+  vec3 lit = srgbToLinear(texel.rgb * vColor) * max(lighting, vec3(0.08));
+  FragColor = vec4(linearToSrgb(lit), texel.a);
+}
+]])
 end
 
 function game.refreshSavedWorldList(state)
@@ -2889,7 +3069,7 @@ function game.refreshSavedWorldList(state)
       if entry.path == selectedPath then state.selectedWorldIndex = index break end
     end
   end
-  state.worldListPage = 1
+  state.worldListScroll = 0
   state.worldListVersion = (state.worldListVersion or 0) + 1
   state.refreshWorldListRequested = false
 end
@@ -2971,6 +3151,16 @@ local function updateDebugInput(window, state)
     state.debugSampleTimer = 999.0
   end
   state.f3WasDown = f3Down
+end
+
+local function updatePerspectiveInput(window, state, playerCamera)
+  local f5Down = glfw.glfwGetKey(window, glfw.GLFW_KEY_F5) == glfw.GLFW_PRESS
+  if f5Down and not state.f5WasDown and state.hasWorld and not state.screen and
+      not state.devMenuOpen then
+    state.perspective = playerCamera:cyclePerspective()
+  end
+  state.f5WasDown = f5Down
+  state.perspective = playerCamera.perspective or 0
 end
 
 local function refreshCreativeFilter(state)
@@ -3208,6 +3398,19 @@ local function updateMenuInput(window, state, playerCamera, locP)
   end
 
   if state.refreshWorldListRequested then game.refreshSavedWorldList(state) end
+
+  if state.screen == "select_world" then
+    local scrollDelta = state.hotbarScroll or 0.0
+    local scrollSteps = scrollDelta > 0 and math.floor(scrollDelta) or math.ceil(scrollDelta)
+    if scrollSteps ~= 0 then
+      local layout = hud.worldListLayout(windowWidth, windowHeight, state)
+      state.worldListScroll = math.max(0, math.min(layout.maxScroll,
+        (state.worldListScroll or 0) - scrollSteps))
+      state.hotbarScroll = scrollDelta - scrollSteps
+    end
+  else
+    state.hotbarScroll = 0.0
+  end
   updateWorldCreationTextInput(window, state)
 
   local xpos = ffi.new("double[1]")
@@ -3221,15 +3424,23 @@ local function updateMenuInput(window, state, playerCamera, locP)
 
   local clickDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
   if clickDown then
+    local textField = not state.menuClickWasDown and hud.menuTextFieldAt(
+      state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
     local slider, value = hud.menuSliderValueAt(
       state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY,
       state, state.activeMenuSlider
     )
-    if slider then
+    if textField then
+      state.activeTextField = textField.id
+      state.textCaret = textField.caret or 0
+      state.createTextKeyWasDown = {}
+      if textField.id == "world_name" then state.worldNamePristine = false end
+    elseif slider then
       state.activeMenuSlider = slider
       uiFlow.applySlider(state, slider, value)
       state.userSettingsDirty = true
     elseif not state.menuClickWasDown then
+      if state.screen == "create_world" then state.activeTextField = nil end
       local action = hud.menuButtonAt(state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
       local previousSettings = userSettings.stateKey(state)
       local command = uiFlow.applyAction(state, action)
@@ -3296,12 +3507,15 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
   -- The swing runs before the break loop so a chop can bite at the moment the
   -- animation says the blade arrives, rather than on the button press.
   local heldStack=state.inventory.slots[state.selectedSlot]
-  local landedBlow=heldItem.updateSwing(state, dt,
+  local actionSpeed = state.bodyDamage and state.bodyDamage:actionMultiplier() or 1.0
+  local strength = state.bodyDamage and state.bodyDamage:strengthMultiplier() or 1.0
+  local actionDt = dt * actionSpeed
+  local landedBlow=heldItem.updateSwing(state, actionDt,
     breakDown or (placeDown and not state.placeWasDown),
     heldItem.isHeavy(Mining.tool(heldStack and heldStack.item)))
 
   if breakDown then
-    local hit = world:raycast(playerCamera.position, (playerCamera.getViewFront or playerCamera.getFront)(playerCamera), playerCamera.reach or graphics.player.reach or 6.0)
+    local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
     if hit and world.isProtectedBlock and world:isProtectedBlock(hit.x, hit.y, hit.z) then
       hit = nil
     end
@@ -3313,7 +3527,8 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
         state.breakProgress=0
       end
       local held=heldStack
-      local broke=Mining.advanceBreak(state,definition,held and held.item,state.worldGameMode,dt,landedBlow)
+      local broke=Mining.advanceBreak(state,definition,held and held.item,
+        state.worldGameMode,actionDt,landedBlow,strength)
       state.breakTargetPosition={x=hit.x,y=hit.y,z=hit.z}
       if landedBlow and not broke and audioEngine then
         audioEngine:playBlock(definition, "hit",
@@ -3322,7 +3537,7 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
       if broke and (state.worldGameMode~="creative" or not state.breakWasDown) then
         local tree,changed
         local canHarvest=state.worldGameMode=="creative" or Mining.canHarvest(definition,held and held.item)
-        if FallingTrees.isLog(definition) and canHarvest then tree,changed=fallingTrees:start(world,hit.x,hit.y,hit.z,(playerCamera.getViewFront or playerCamera.getFront)(playerCamera)) end
+        if FallingTrees.isLog(definition) and canHarvest then tree,changed=fallingTrees:start(world,hit.x,hit.y,hit.z,playerCamera:getFront()) end
         if tree and audioEngine then
           audioEngine:playTreeFall(tree.impactPosition,1.35,tree.secondsToImpact)
         end
@@ -3353,7 +3568,7 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
   end
 
   if placeDown and not state.placeWasDown then
-    local hit = world:raycast(playerCamera.position, (playerCamera.getViewFront or playerCamera.getFront)(playerCamera), playerCamera.reach or graphics.player.reach or 6.0)
+    local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
     if hit and hit.id == blocks.crafting_table then
       state.inventory:setCraftingGridSize(3)
       state.screen = "crafting_table"
@@ -3389,7 +3604,7 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
     local removed = state.inventory:removeAt(state.selectedSlot,
       wholeStack and carried and carried.count or 1)
     if removed then
-      local front = (playerCamera.getViewFront or playerCamera.getFront)(playerCamera)
+      local front = playerCamera:getFront()
       droppedItems:spawn(removed.item, removed.count, {
         playerCamera.position[1] + front[1] * 0.8,
         playerCamera.position[2] - 0.25,
@@ -3403,7 +3618,7 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
   -- from the backpack when it is not already on the hotbar.
   local pickDown = inputBindings.actionDown(window, state.controlBindings, "pick")
   if pickDown and not state.pickWasDown then
-    local hit = world:raycast(playerCamera.position, (playerCamera.getViewFront or playerCamera.getFront)(playerCamera), playerCamera.reach or graphics.player.reach or 6.0)
+    local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
     local definition = hit and blocks.list[hit.id]
     if definition and definition.key then
       local slot = state.inventory:pickBlock(definition.key)
@@ -3522,6 +3737,7 @@ function game.run()
     updateRuntimeAtmosphereSettings(previewAtmosphereSettings, 0.0, activeWorldProfile)
 
     local atlasTex = createTextureAtlas()
+    local characterTexture = createImageTexture(character.DEFAULT_SKIN, true)
     local moonTexture = createImageTexture("assets/textures/environment/moon_phases.png", true)
     local underwaterOverlayTexture = createImageTexture("assets/textures/blocks/water_overlay.png", false, true)
     effects.miningOverlay = require("mining_overlay").create()
@@ -3541,7 +3757,7 @@ function game.run()
     local fallingTreeMeshes = {}
     local distantTerrain = createDistantTerrain()
     local currentWaterLevel = WATER_LEVEL
-    local characterMesh = graphics.player.showDebugBody and createCharacterMesh() or nil
+    local characterMesh = createCharacterMesh()
     local skyMesh = uploadSkyMesh()
     local cloudMesh, cloudShadowTexture = createCloudMesh("assets/textures/environment/clouds.png")
     -- Where the cloud sheet is this frame, shared by the terrain and water
@@ -3566,7 +3782,8 @@ function game.run()
       godRays = effects.createGodRaysShader(),
       volumetricFog = effects.createVolumetricFogShaders(
         FOG_GRID.width, FOG_GRID.height, FOG_GRID.depth),
-      worldgenPreview = createWorldgenPreviewShader()
+      worldgenPreview = createWorldgenPreviewShader(),
+      character = createCharacterShader()
     }
     local nightSky = {
       state = astronomy.field.create({
@@ -3579,6 +3796,7 @@ function game.run()
     local cloudShader, dielectricShader, waterShader = programs.cloud, programs.dielectric, programs.water
     local atmospherePostShader = programs.atmospherePost
     local volumetricFogShaders, worldgenPreviewShader = programs.volumetricFog, programs.worldgenPreview
+    local characterShader = programs.character
     effects.eyeAdaptationRuntime = {
       shader = effects.createEyeAdaptationShader(),
       state = effects.createEyeAdaptation()
@@ -3613,6 +3831,17 @@ function game.run()
       waterCascadeSizes = gl.glGetUniformLocation(shader, "waterCascadeSizes"),
       waterNormalWeights = gl.glGetUniformLocation(shader, "waterNormalWeights"),
       causticStrength = gl.glGetUniformLocation(shader, "causticStrength")
+    }
+    local characterLocations = {
+      projection = gl.glGetUniformLocation(characterShader, "uProjection"),
+      view = gl.glGetUniformLocation(characterShader, "uView"),
+      model = gl.glGetUniformLocation(characterShader, "uModel"),
+      texture = gl.glGetUniformLocation(characterShader, "tex0"),
+      light = gl.glGetUniformLocation(characterShader, "lightDir"),
+      ambient = gl.glGetUniformLocation(characterShader, "ambientColor"),
+      lightColor = gl.glGetUniformLocation(characterShader, "lightColor"),
+      anim0 = gl.glGetUniformLocation(characterShader, "uAnim0"),
+      anim1 = gl.glGetUniformLocation(characterShader, "uAnim1")
     }
     local shadowLocations = {
       model = gl.glGetUniformLocation(shadowShader, "uModel"),
@@ -3823,6 +4052,17 @@ function game.run()
     end)
     displayState.scrollCallback = scrollCallback
     glfw.glfwSetScrollCallback(window, scrollCallback)
+    local charCallback = ffi.cast("GLFWcharfun", function(_, codepoint)
+      local value = tonumber(codepoint)
+      -- The bundled bitmap font contains the printable Latin range. GLFW's
+      -- character callback still gives us layout-aware punctuation/case,
+      -- unlike polling physical key codes.
+      if value and value >= 32 and value <= 126 then
+        displayState.textInputCharacters[#displayState.textInputCharacters + 1] = string.char(value)
+      end
+    end)
+    displayState.charCallback = charCallback
+    glfw.glfwSetCharCallback(window, charCallback)
     local lastTime = glfw.glfwGetTime()
     local lastPlayerSaveTime = lastTime
 
@@ -3835,6 +4075,7 @@ function game.run()
       updateDevMenuInput(window, displayState, devMenu)
       updateFullscreenInput(window, displayState, terrainLocations.projection, playerCamera, devMenu)
       updateDebugInput(window, displayState)
+      updatePerspectiveInput(window, displayState, playerCamera)
       devMenu:processExportRequest()
       if devMenu:consumePreviewRebuildRequest() then
         worldgenPreviewMesh = rebuildWorldgenPreview(
@@ -3897,9 +4138,12 @@ function game.run()
             currentWaterLevel = WATER_LEVEL
           end
           playerCamera = camera.new(playerOptionsForGameMode(job.config.gameMode, activeWorldProfile))
+          playerCamera.perspective = game.startPerspective or 0
           playerCamera:placeAtSpawn(world, job.spawnX, job.spawnZ)
           displayState.worldGameMode = job.config.gameMode
           displayState.inventory = Inventory.new(job.config.gameMode)
+          displayState.bodyDamage = BodyDamage.new()
+          displayState.health = 20
           displayState.selectedSlot = 1
           restorePlayer(displayState, playerCamera, job.savedPlayer)
           if game.startHold then
@@ -3924,6 +4168,7 @@ function game.run()
           worldgenPreviewState.centerX = playerCamera.position[1]
           worldgenPreviewState.centerZ = playerCamera.position[3]
           displayState.hasWorld = true
+          displayState.perspective = playerCamera.perspective
           displayState.screen = nil
           displayState.loadingJob = nil
           displayState.pendingTerrainEntries = job.streamingEntries or {}
@@ -4081,6 +4326,17 @@ function game.run()
             worldgenPreviewState.meshCenterZ = worldgenPreviewState.centerZ
           end
         elseif not displayState.screen or displayState.inventoryOverlayOpen then
+          local body = displayState.bodyDamage
+          if body then
+            body:update(dt)
+            local trauma = body:headEffect()
+            playerCamera.movementMultiplier = body:movementMultiplier()
+            playerCamera.sprintConditionMultiplier = body:sprintMultiplier()
+            playerCamera.damageShake = trauma.shake
+            displayState.headDamageBlur = trauma.blur
+            displayState.staminaRecoveryMultiplier = body:recoveryMultiplier()
+            displayState.health = body:vitality() * 20
+          end
           playerCamera.mouseSensitivity = (graphics.player.mouseSensitivity or 0.085) *
             math.max(0.1, (displayState.sensitivity or 100) / 100.0)
           playerCamera.invertMouse = displayState.invertMouse == true
@@ -4091,6 +4347,12 @@ function game.run()
           -- visible cursor owns mouse look and gameplay clicks.
           playerCamera:update(dt, window, world,
             not displayState.devMenuOpen and not displayState.inventoryOverlayOpen)
+          if body and displayState.worldGameMode ~= "creative" and
+              playerCamera.lastLandingImpact then
+            body:applyFall(playerCamera.lastLandingImpact)
+            displayState.health = body:vitality() * 20
+          end
+          playerCamera:updatePerspectiveObstruction(world)
           heldItem.updateMotion(displayState.heldMotion, playerCamera, dt)
           if not displayState.devMenuOpen and not displayState.inventoryOverlayOpen then
             updateBlockEditInput(window, displayState, world,
@@ -4115,6 +4377,9 @@ function game.run()
           end
         else
           displayState.hotbarScroll = 0.0
+        end
+        if displayState.screen and displayState.hasWorld then
+          playerCamera:updatePerspectiveObstruction(world)
         end
         audioEngine:update(dt, playerCamera, world, displayState.soundVolume)
         if displayState.hasWorld and currentTime - lastPlayerSaveTime >= PLAYER_AUTOSAVE_INTERVAL then
@@ -4193,7 +4458,7 @@ function game.run()
           graphics.shadows.cascadeMapSizes, SHADOW.near, SHADOW.far)
         if not previewMode then
           effects.renderShadowPass(shadowShader, shadowMap, shadowLocations,
-            visibleNearMeshes, characterMesh, effects.lightSpaceMatrices, model,
+            visibleNearMeshes, nil, effects.lightSpaceMatrices, model,
             windowWidth, windowHeight, atlasTex)
         end
         effects.renderVolumetricFog(volumetricFog, volumetricFogShaders, activeCamera,
@@ -4239,7 +4504,7 @@ function game.run()
         end
         local carriedPosition = viewPosition
         if not previewMode then
-          local carriedFront = (playerCamera.getViewFront or playerCamera.getFront)(playerCamera)
+          local carriedFront = playerCamera:getFront()
           local carriedRight = playerCamera:getRight()
           carriedPosition = {
             viewPosition[1] + carriedFront[1] * 0.35 + carriedRight[1] * 0.28,
@@ -4319,8 +4584,32 @@ function game.run()
           for _, mesh in ipairs(visibleMeshes) do
             rendering.draw(mesh)
           end
-          if characterMesh then
+          if characterMesh and playerCamera:isThirdPerson() then
+            local playerModel = characterModel(playerCamera)
+            local animation = character.animationState(playerCamera, displayState, currentTime)
+            gl.glUseProgram(characterShader)
+            gl.glUniformMatrix4fv(characterLocations.projection, 1, 0,
+              ffi.new("float[16]", projection))
+            gl.glUniformMatrix4fv(characterLocations.view, 1, 0,
+              ffi.new("float[16]", view))
+            gl.glUniformMatrix4fv(characterLocations.model, 1, 0,
+              ffi.new("float[16]", playerModel))
+            gl.glUniform1i(characterLocations.texture, 0)
+            gl.glUniform3f(characterLocations.light, sunDir[1], sunDir[2], sunDir[3])
+            gl.glUniform3f(characterLocations.ambient,
+              sky.ambient[1], sky.ambient[2], sky.ambient[3])
+            gl.glUniform3f(characterLocations.lightColor,
+              sky.lightColor[1], sky.lightColor[2], sky.lightColor[3])
+            gl.glUniform4f(characterLocations.anim0,
+              animation.anim0[1], animation.anim0[2], animation.anim0[3], animation.anim0[4])
+            gl.glUniform4f(characterLocations.anim1,
+              animation.anim1[1], animation.anim1[2], animation.anim1[3], animation.anim1[4])
+            gl.glActiveTexture(GL.TEXTURE0)
+            gl.glBindTexture(GL.TEXTURE_2D, characterTexture[0])
             rendering.draw(characterMesh)
+            gl.glUseProgram(shader)
+            gl.glActiveTexture(GL.TEXTURE0)
+            gl.glBindTexture(GL.TEXTURE_2D, atlasTex[0])
           end
           drawDroppedItems(droppedItems, droppedItemMeshes, terrainLocations.model, model)
           drawFallingTrees(fallingTrees,fallingTreeMeshes,terrainLocations.model,model)
@@ -4404,7 +4693,8 @@ function game.run()
           previewMode and 0.0 or displayState.underwaterAmount,
           localSkyVisibility,
           previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings,
-          displayState.screen == "pause" and 1.15 or 0.0,
+          math.max(displayState.screen == "pause" and 1.15 or 0.0,
+            displayState.headDamageBlur or 0.0),
           underwaterOverlayTexture, currentTime, bloomTexture, activePostSettings,
           volumetricFog, effects.eyeExposureTexture, effects.godRaysTexture,
           {motionX, motionY})
