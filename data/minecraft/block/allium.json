@@ -1,0 +1,14 @@
+{
+  "name": "Allium",
+  "texture": "./textures/blocks/flower_allium.png",
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "flower": true,
+    "cross": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true
+  }
+}

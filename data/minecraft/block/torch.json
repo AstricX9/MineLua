@@ -1,0 +1,17 @@
+{
+  "name": "Torch",
+  "itemSprite": true,
+  "texture": "./textures/blocks/torch_on.png",
+  "hardness": 0.0,
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "extrudedSprite": true,
+    "spriteThickness": 0.125,
+    "renderHeight": 0.625,
+    "targetable": true,
+    "breakable": true,
+    "emission": [14, 11, 7],
+    "soundMaterial": "wood"
+  }
+}

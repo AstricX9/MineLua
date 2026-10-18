@@ -9,6 +9,9 @@ function Chunk.new()
   local self = setmetatable({}, Chunk)
   self.blocks = {}
   self.skyLight = {}
+  -- RGB block light is packed as three four-bit channels. Unlike skylight it
+  -- is emitted by blocks and remains coloured after propagation.
+  self.blockLight = {}
 
   return self
 end
@@ -36,6 +39,26 @@ end
 function Chunk:getSkyLight(x, y, z)
   local index = x + y * 16 + z * 16 * 256 + 1
   return self.skyLight[index] or 0
+end
+
+function Chunk:clearBlockLight()
+  self.blockLight = {}
+end
+
+function Chunk:setBlockLight(x, y, z, red, green, blue)
+  local index = x + y * 16 + z * 16 * 256 + 1
+  red = math.max(0, math.min(15, math.floor((red or 0) + 0.5)))
+  green = math.max(0, math.min(15, math.floor((green or 0) + 0.5)))
+  blue = math.max(0, math.min(15, math.floor((blue or 0) + 0.5)))
+  local packed = red + green * 16 + blue * 256
+  self.blockLight[index] = packed > 0 and packed or nil
+end
+
+function Chunk:getBlockLight(x, y, z)
+  local index = x + y * 16 + z * 16 * 256 + 1
+  local packed = self.blockLight[index] or 0
+  return packed % 16, math.floor(packed / 16) % 16,
+    math.floor(packed / 256) % 16
 end
 
 return Chunk

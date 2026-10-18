@@ -1,0 +1,128 @@
+{
+  "format": "minelua-player",
+  "savedAt": 1788072701000,
+  "state": {
+    "camera": {
+      "acceleration": 55,
+      "airAcceleration": 14,
+      "airFriction": 2,
+      "allowFlight": true,
+      "bobPhase": 0,
+      "bodyRadius": 0.3,
+      "coyoteTime": 0.1,
+      "coyoteTimer": 0,
+      "crouchEyeHeight": 1.24,
+      "crouchSpeed": 2.4,
+      "crouching": false,
+      "eyeHeight": 1.62,
+      "firstMouse": false,
+      "flightToggleWasDown": false,
+      "flyAcceleration": 24,
+      "flyFriction": 18,
+      "flySpeed": 9.5,
+      "flying": true,
+      "fovOffset": 0,
+      "gravity": 15.5,
+      "groundFriction": 46,
+      "groundSnap": 0.36,
+      "grounded": false,
+      "invertMouse": false,
+      "jumpBuffer": 0,
+      "jumpBufferTime": 0.12,
+      "jumpSpeed": 6.6,
+      "jumpWasDown": false,
+      "landingViewOffset": 0,
+      "lastX": 0,
+      "lastY": 0,
+      "mouseSensitivity": 0.085,
+      "mouseSmoothing": 42,
+      "mouseTurnVelocity": 0,
+      "moveInputX": 0,
+      "moveInputZ": 0,
+      "pitch": 5,
+      "position": [
+        2.5,
+        112.62,
+        28.5
+      ],
+      "reach": 8,
+      "sprintSpeed": 7.2,
+      "sprinting": false,
+      "standEyeHeight": 1.62,
+      "stepHeight": 0.6,
+      "stepViewOffset": 0,
+      "swimAcceleration": 18,
+      "swimSinkSpeed": 0.65,
+      "swimUpSpeed": 4.6,
+      "targetPitch": 5,
+      "targetYaw": -100,
+      "velocity": [
+        0,
+        0,
+        0
+      ],
+      "velocityY": 0,
+      "viewBobPitch": 0,
+      "viewBobX": 0,
+      "viewBobY": 0,
+      "viewBobbingEnabled": true,
+      "viewRoll": 0,
+      "walkSpeed": 5.1,
+      "yaw": -100
+    },
+    "inventory": {
+      "crafting": {
+      },
+      "craftingGridSize": 2,
+      "furnace": {
+        "burnTime": 0,
+        "burnTotal": 0,
+        "cookTime": 0,
+        "cookTotal": 10
+      },
+      "gameMode": "creative",
+      "recipeHint": "Break gravel for flint, then gather sticks from leaves or wood.",
+      "search": "",
+      "selected": 1,
+      "slots": [
+        {
+          "count": 64,
+          "item": "grass"
+        },
+        {
+          "count": 64,
+          "item": "dirt"
+        },
+        {
+          "count": 64,
+          "item": "stone"
+        },
+        {
+          "count": 64,
+          "item": "sand"
+        },
+        {
+          "count": 64,
+          "item": "gravel"
+        },
+        {
+          "count": 64,
+          "item": "cobblestone"
+        },
+        {
+          "count": 64,
+          "item": "oak_planks"
+        },
+        {
+          "count": 64,
+          "item": "oak_log"
+        },
+        {
+          "count": 64,
+          "item": "oak_leaves"
+        }
+      ]
+    }
+  },
+  "version": 1
+}

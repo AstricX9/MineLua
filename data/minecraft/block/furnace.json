@@ -1,0 +1,13 @@
+{
+  "name": "Furnace",
+  "texture": {
+    "top": "./textures/blocks/furnace_top.png",
+    "side": "./textures/blocks/furnace_side.png",
+    "bottom": "./textures/blocks/furnace_top.png",
+    "front": "./textures/blocks/furnace_front_off.png",
+    "back": "./textures/blocks/furnace_side.png"
+  },
+  "properties": {
+    "solid": true
+  }
+}

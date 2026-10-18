@@ -1,0 +1,13 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    "AA",
+    "AA"
+  ],
+  "key": {
+    "A": "#minecraft:planks"
+  },
+  "result": {
+    "id": "minecraft:crafting_table"
+  }
+}

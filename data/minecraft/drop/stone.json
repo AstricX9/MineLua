@@ -1,0 +1,13 @@
+{
+  "block": "minecraft:stone",
+  "drops": [
+    {
+      "item": "minecraft:cobblestone",
+      "count": 1,
+      "tool": {
+        "type": "pickaxe",
+        "min_tier": 1
+      }
+    }
+  ]
+}

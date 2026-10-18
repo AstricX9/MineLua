@@ -1,0 +1,14 @@
+{
+  "name": "Dandelion",
+  "texture": "./textures/blocks/flower_dandelion.png",
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "flower": true,
+    "cross": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Living Birch Log (Z Axis)",
+  "texture": {"top": "./textures/blocks/log_birch_top.png", "bottom": "./textures/blocks/log_birch_top.png", "side": "./textures/blocks/log_birch.png"},
+  "hardness": 2.0,
+  "preferredTool": "axe",
+  "requiredToolTier": 1,
+  "properties": {"solid": true, "aliveTree": true, "logAxis": "z", "hidden": true, "drop": "birch_log", "soundMaterial": "wood"}
+}

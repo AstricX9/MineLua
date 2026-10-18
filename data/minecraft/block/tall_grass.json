@@ -1,0 +1,16 @@
+{
+  "name": "Tall Grass",
+  "texture": "./textures/blocks/tallgrass.png",
+  "colormap": "./textures/colormap/grass.png",
+  "biomeTint": true,
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "cross": true,
+    "randomTransform": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true
+  }
+}

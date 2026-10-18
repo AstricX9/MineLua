@@ -1,93 +1,229 @@
 local menu = {}
+local worldProfiles = require("world_profiles")
+local renderDistance = require("render_distance")
+
+menu.RENDER_DISTANCE_MIN = renderDistance.MIN_CHUNKS
+menu.RENDER_DISTANCE_MAX = renderDistance.MAX_CHUNKS
+
+local function onOff(value)
+  return value == false and "OFF" or "ON"
+end
+
+local function percent(value)
+  return tostring(math.floor((value or 0) + 0.5)) .. "%"
+end
+
+local function bindingLabel(menuState, name, fallback)
+  local bindings = menuState.controlBindings or {}
+  return bindings[name] or fallback
+end
+
+function menu.worldListLayout(logicalWidth, logicalHeight, worldCount, scroll)
+  local listTop = 36
+  local listBottom = logicalHeight - 78
+  local rowHeight = 36
+  local visibleRows = math.max(1, math.floor((listBottom - listTop) / rowHeight))
+  local maxScroll = math.max(0, (worldCount or 0) - visibleRows)
+  return {
+    x = math.floor(logicalWidth * 0.5) - 160,
+    top = listTop,
+    bottom = listBottom,
+    width = 320,
+    rowHeight = rowHeight,
+    visibleRows = visibleRows,
+    scroll = math.max(0, math.min(math.floor(scroll or 0), maxScroll)),
+    maxScroll = maxScroll
+  }
+end
+
+function menu.textFields(screen, logicalWidth, logicalHeight, menuState)
+  if screen ~= "create_world" then return {} end
+  local cx = math.floor(logicalWidth * 0.5)
+  if menuState and menuState.moreWorldOptions then
+    return {{id = "world_seed", x = cx - 100, y = 60, w = 200, h = 20,
+      valueKey = "worldSeedText", limit = 19, numeric = true}}
+  end
+  return {{id = "world_name", x = cx - 100, y = 60, w = 200, h = 20,
+    valueKey = "worldNameText", limit = 32}}
+end
+
+function menu.settingsLayout(logicalWidth, logicalHeight)
+  local navX = math.max(16, math.floor(logicalWidth * 0.05))
+  local navW = math.min(104, math.max(82, math.floor(logicalWidth * 0.24)))
+  local contentX = navX + navW + 12
+  return {
+    navX = navX,
+    navW = navW,
+    contentX = contentX,
+    contentW = logicalWidth - contentX - 20,
+    doneY = logicalHeight - 40
+  }
+end
+
+local SETTINGS_PAGES = {
+  {key = "general", id = "settings_general", label = "General"},
+  {key = "visuals", id = "settings_video", label = "Visuals"},
+  {key = "controls", id = "settings_controls", label = "Controls"},
+  {key = "resources", id = "settings_resources", label = "Resources"}
+}
+
+local function settingsButtons(logicalWidth, logicalHeight, active)
+  local layout = menu.settingsLayout(logicalWidth, logicalHeight)
+  local buttons = {}
+  for index = 1, #SETTINGS_PAGES do
+    local page = SETTINGS_PAGES[index]
+    local selected = page.key == active
+    buttons[#buttons + 1] = {
+      id = selected and "noop" or page.id,
+      label = page.label,
+      x = layout.navX,
+      y = 52 + (index - 1) * 26,
+      w = layout.navW,
+      h = 22,
+      style = selected and "nav_active" or "nav"
+    }
+  end
+  buttons[#buttons + 1] = {
+    id = "settings_done", label = "Done", x = layout.navX, y = layout.doneY,
+    w = layout.navW, h = 22, style = "primary"
+  }
+  return buttons, layout
+end
 
 function menu.buttons(screen, logicalWidth, logicalHeight, menuState)
   menuState = menuState or {}
   local cx = math.floor(logicalWidth * 0.5)
 
   if screen == "main" then
-    local y = math.floor(logicalHeight / 4 + 48)
+    local panelWidth = math.min(144, math.max(128, math.floor(logicalWidth * 0.36)))
+    local x = logicalWidth - panelWidth - 16
+    local y = math.max(72, math.floor(logicalHeight * 0.32))
     return {
-      {id = "singleplayer", label = "Singleplayer", x = cx - 100, y = y, w = 200, h = 20},
-      {id = "multiplayer", label = "Multiplayer", x = cx - 100, y = y + 24, w = 200, h = 20, enabled = false},
-      {id = "texture_packs", label = "Texture Packs", x = cx - 100, y = y + 48, w = 200, h = 20, enabled = false},
-      {id = "options", label = "Options...", x = cx - 100, y = y + 84, w = 98, h = 20},
-      {id = "quit", label = "Quit Game", x = cx + 2, y = y + 84, w = 98, h = 20}
+      {id = "singleplayer", label = "Explore Worlds", x = x, y = y, w = panelWidth, h = 22, style = "primary"},
+      {id = "create_world", label = "Create a World", x = x, y = y + 27, w = panelWidth, h = 22},
+      {id = "multiplayer", label = "Online Play", x = x, y = y + 54, w = panelWidth, h = 22},
+      {id = "texture_packs", label = "Resource Library", x = x, y = y + 81, w = panelWidth, h = 22},
+      {id = "options", label = "Settings", x = x, y = y + 116, w = math.floor((panelWidth - 5) * 0.5), h = 20},
+      {id = "quit", label = "Exit", x = x + math.ceil((panelWidth + 5) * 0.5), y = y + 116,
+        w = math.floor((panelWidth - 5) * 0.5), h = 20, style = "quiet"}
     }
   elseif screen == "pause" then
     local y = math.floor(logicalHeight / 4 + 24)
     return {
-      {id = "back_to_game", label = "Back to game", x = cx - 100, y = y, w = 200, h = 20},
-      {id = "noop", label = "Achievements", x = cx - 100, y = y + 24, w = 98, h = 20, enabled = false},
-      {id = "noop", label = "Stats", x = cx + 2, y = y + 24, w = 98, h = 20, enabled = false},
-      {id = "options", label = "Options...", x = cx - 100, y = y + 72, w = 200, h = 20},
-      {id = "quit_to_title", label = "Save and quit to title", x = cx - 100, y = y + 96, w = 200, h = 20}
+      {id = "back_to_game", label = "Return to World", x = cx - 100, y = y, w = 200, h = 22, style = "primary"},
+      {id = "achievements", label = "Milestones", x = cx - 100, y = y + 28, w = 98, h = 20},
+      {id = "stats", label = "Field Record", x = cx + 2, y = y + 28, w = 98, h = 20},
+      {id = "options", label = "Settings", x = cx - 100, y = y + 76, w = 200, h = 20},
+      {id = "quit_to_title", label = "Leave World", x = cx - 100, y = y + 102, w = 200, h = 20, style = "quiet"}
     }
   elseif screen == "select_world" then
+    local worlds = menuState.savedWorlds or {}
+    local layout = menu.worldListLayout(logicalWidth, logicalHeight, #worlds,
+      menuState.worldListScroll)
+    local first = layout.scroll + 1
+    local last = math.min(#worlds, first + layout.visibleRows - 1)
+    local buttons = {}
+    for index = first, last do
+      buttons[#buttons + 1] = {
+        id = "select_saved_world_" .. index, label = "", x = layout.x,
+        y = layout.top + (index - first) * layout.rowHeight,
+        w = layout.width, h = 34, worldIndex = index
+      }
+    end
+    buttons[#buttons + 1] = {id = "play_selected_world", label = "Enter Selected World", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil, style = "primary"}
+    buttons[#buttons + 1] = {id = "create_world", label = "Create a World", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
+    buttons[#buttons + 1] = {id = "delete_selected_world", label = "Delete", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20, enabled = worlds[menuState.selectedWorldIndex or 0] ~= nil}
+    buttons[#buttons + 1] = {id = "back_main", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20}
+    return buttons
+  elseif screen == "confirm_delete_world" then
     return {
-      {id = "start_survival", label = "Survival World", x = cx - 100, y = 64, w = 200, h = 20},
-      {id = "start_creative", label = "Creative World", x = cx - 100, y = 88, w = 200, h = 20},
-      {id = "create_world", label = "Create New World", x = cx - 100, y = 124, w = 200, h = 20},
-      {id = "back_main", label = "Cancel", x = cx - 100, y = logicalHeight - 28, w = 200, h = 20}
+      {id = "confirm_delete_world", label = "Delete Forever", x = cx - 155, y = logicalHeight - 52, w = 150, h = 20, style = "danger"},
+      {id = "cancel_delete_world", label = "Cancel", x = cx + 5, y = logicalHeight - 52, w = 150, h = 20}
     }
   elseif screen == "create_world" then
     local mode = menuState.worldGameMode or "survival"
     local generator = menuState.worldGeneratorType or "default"
-    local modeLabel = mode == "creative" and "Game Mode: Creative" or "Game Mode: Survival"
-    local generatorLabel = generator == "superflat" and "World Type: Superflat" or "World Type: Default"
-    local moreLabel = menuState.moreWorldOptions and "Done" or "More World Options..."
+    local modeLabel = mode == "creative" and "Play Style: Creative" or "Play Style: Survival"
+    local generatorNames = {default = "Natural", superflat = "Superflat", showcase = "Texture Showcase"}
+    local generatorLabel = "Terrain Form: " .. (generatorNames[generator] or "Natural")
+    local profile = worldProfiles.get(menuState.worldId)
+    local worldLabel = "World: " .. profile.name
     local buttons = {
-      {id = "start_world", label = "Create New World", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20},
-      {id = "back_select", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20},
-      {id = mode == "creative" and "mode_survival" or "mode_creative", label = modeLabel, x = cx - 100, y = 100, w = 200, h = 20},
-      {id = "toggle_more_world_options", label = moreLabel, x = cx - 100, y = 148, w = 200, h = 20}
+      {id = "start_world", label = "Begin This World", x = cx - 155, y = logicalHeight - 28, w = 150, h = 20, style = "primary"},
+      {id = "back_select", label = "Cancel", x = cx + 5, y = logicalHeight - 28, w = 150, h = 20}
     }
 
     if menuState.moreWorldOptions then
-      buttons[#buttons + 1] = {id = "toggle_generator", label = generatorLabel, x = cx - 100, y = 124, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_structures", label = "Settlements: " .. onOff(menuState.generateStructures), x = cx - 155, y = 100, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_generator", label = generatorLabel, x = cx + 5, y = 100, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "cycle_world", label = worldLabel, x = cx - 100, y = 124, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_cheats", label = "Allow Cheats: " .. onOff(menuState.allowCheats), x = cx - 155, y = 148, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_bonus_chest", label = "Bonus Chest: " .. onOff(menuState.bonusChest), x = cx + 5, y = 148, w = 150, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "Done", x = cx - 75, y = 176, w = 150, h = 20}
+    else
+      buttons[#buttons + 1] = {id = mode == "creative" and "mode_survival" or "mode_creative", label = modeLabel, x = cx - 100, y = 100, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "cycle_world", label = worldLabel, x = cx - 100, y = 128, w = 200, h = 20}
+      buttons[#buttons + 1] = {id = "toggle_more_world_options", label = "World Details", x = cx - 100, y = 164, w = 200, h = 20}
     end
 
     return buttons
   elseif screen == "options" then
-    return {
-      {id = "noop", label = "Invert Mouse: OFF", x = cx - 155, y = math.floor(logicalHeight / 6) + 24, w = 150, h = 20},
-      {id = "noop", label = "Difficulty: Normal", x = cx + 5, y = math.floor(logicalHeight / 6) + 48, w = 150, h = 20},
-      {id = "video", label = "Video Settings...", x = cx - 100, y = math.floor(logicalHeight / 6) + 108, w = 200, h = 20},
-      {id = "controls", label = "Controls...", x = cx - 100, y = math.floor(logicalHeight / 6) + 132, w = 200, h = 20},
-      {id = "done_options", label = "Done", x = cx - 100, y = math.floor(logicalHeight / 6) + 168, w = 200, h = 20}
-    }
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "general")
+    buttons[#buttons + 1] = {id = "cycle_sound", kind = "setting", label = "World Sound", valueLabel = percent(menuState.soundVolume), x = layout.contentX, y = 56, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_sensitivity", kind = "setting", label = "Look Speed", valueLabel = percent(menuState.sensitivity), x = layout.contentX, y = 102, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_invert_mouse", kind = "setting", label = "Invert Look", valueLabel = onOff(menuState.invertMouse), x = layout.contentX, y = 128, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_fov", kind = "setting", label = "View Angle", valueLabel = tostring(menuState.fovDegrees or 70) .. " deg", x = layout.contentX, y = 154, w = layout.contentW, h = 22}
+    return buttons
   elseif screen == "video" then
-    local y0 = math.floor(logicalHeight / 6)
-    return {
-      {id = "noop", label = "Graphics: Fancy", x = cx - 155, y = y0, w = 150, h = 20},
-      {id = "noop", label = "Render Distance: Far", x = cx + 5, y = y0, w = 150, h = 20},
-      {id = "noop", label = "Smooth Lighting: ON", x = cx - 155, y = y0 + 24, w = 150, h = 20},
-      {id = "noop", label = "Performance: Balanced", x = cx + 5, y = y0 + 24, w = 150, h = 20},
-      {id = "noop", label = "3D Anaglyph: OFF", x = cx - 155, y = y0 + 48, w = 150, h = 20},
-      {id = "noop", label = "View Bobbing: ON", x = cx + 5, y = y0 + 48, w = 150, h = 20},
-      {id = "noop", label = "GUI Scale: Auto", x = cx - 155, y = y0 + 72, w = 150, h = 20},
-      {id = "noop", label = "Advanced OpenGL: OFF", x = cx + 5, y = y0 + 72, w = 150, h = 20},
-      {id = "noop", label = "Clouds: ON", x = cx + 5, y = y0 + 96, w = 150, h = 20},
-      {id = "noop", label = "Particles: All", x = cx - 155, y = y0 + 120, w = 150, h = 20},
-      {id = "done_child", label = "Done", x = cx - 100, y = y0 + 168, w = 200, h = 20}
-    }
+    local selectedRenderDistance = renderDistance.clamp(menuState.renderDistance, 8)
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "visuals")
+    local gap = 6
+    local columnW = math.floor((layout.contentW - gap) * 0.5)
+    local left, right = layout.contentX, layout.contentX + columnW + gap
+    buttons[#buttons + 1] = {id = "render_distance", kind = "slider", presentation = "setting", label = "Horizon", valueLabel = tostring(selectedRenderDistance) .. " ch", value = selectedRenderDistance, minValue = menu.RENDER_DISTANCE_MIN, maxValue = menu.RENDER_DISTANCE_MAX, x = left, y = 56, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "cycle_particles", kind = "setting", label = "Particles", valueLabel = menuState.particles or "All", x = right, y = 56, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_clouds", kind = "setting", label = "Clouds", valueLabel = onOff(menuState.clouds), x = left, y = 96, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_bloom", kind = "setting", label = "Sky Bloom", valueLabel = onOff(menuState.bloom), x = right, y = 96, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_view_bobbing", kind = "setting", label = "View Motion", valueLabel = onOff(menuState.viewBobbing), x = left, y = 136, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_motion_blur_dropdown", kind = "setting", label = "Motion Blur", valueLabel = menuState.motionBlur or "Off", x = right, y = 136, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_vsync", kind = "setting", label = "VSync", valueLabel = onOff(menuState.vsync), x = left, y = 176, w = columnW, h = 22}
+    buttons[#buttons + 1] = {id = "toggle_fullscreen", kind = "setting", label = "Fullscreen", valueLabel = onOff(menuState.fullscreen), x = right, y = 176, w = columnW, h = 22}
+    if menuState.openDropdown == "motion_blur" then
+      local levels = {"Off", "Low", "Medium", "High"}
+      for index, level in ipairs(levels) do
+        buttons[#buttons + 1] = {
+          id = "set_motion_blur_" .. level:lower(), label = level,
+          x = right, y = 46 + (index - 1) * 22, w = columnW, h = 20,
+          style = level == menuState.motionBlur and "nav_active" or "quiet"
+        }
+      end
+    end
+    return buttons
   elseif screen == "controls" then
-    local y0 = math.floor(logicalHeight / 6)
-    return {
-      {id = "noop", label = "Button 1", x = cx - 155, y = y0, w = 70, h = 20},
-      {id = "noop", label = "W", x = cx - 155, y = y0 + 24, w = 70, h = 20},
-      {id = "noop", label = "S", x = cx - 155, y = y0 + 48, w = 70, h = 20},
-      {id = "noop", label = "SPACE", x = cx - 155, y = y0 + 72, w = 70, h = 20},
-      {id = "noop", label = "Q", x = cx - 155, y = y0 + 96, w = 70, h = 20},
-      {id = "noop", label = "T", x = cx - 155, y = y0 + 120, w = 70, h = 20},
-      {id = "noop", label = "Button 3", x = cx - 155, y = y0 + 144, w = 70, h = 20},
-      {id = "noop", label = "Button 2", x = cx + 5, y = y0, w = 70, h = 20},
-      {id = "noop", label = "A", x = cx + 5, y = y0 + 24, w = 70, h = 20},
-      {id = "noop", label = "D", x = cx + 5, y = y0 + 48, w = 70, h = 20},
-      {id = "noop", label = "LSHIFT", x = cx + 5, y = y0 + 72, w = 70, h = 20},
-      {id = "noop", label = "E", x = cx + 5, y = y0 + 96, w = 70, h = 20},
-      {id = "noop", label = "TAB", x = cx + 5, y = y0 + 120, w = 70, h = 20},
-      {id = "done_child", label = "Done", x = cx - 100, y = y0 + 168, w = 200, h = 20}
-    }
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "controls")
+    local gap = 6
+    local columnW = math.floor((layout.contentW - gap) * 0.5)
+    local left, right = layout.contentX, layout.contentX + columnW + gap
+    local movement = {{"forward", "Forward", "W"}, {"back", "Back", "S"}, {"left", "Left", "A"}, {"right", "Right", "D"}, {"jump", "Jump", "SPACE"}, {"sneak", "Sneak", "CTRL"}, {"inventory", "Field Pack", "E"}}
+    local actions = {{"attack", "Primary", "MOUSE1"}, {"use", "Use / Place", "MOUSE2"}, {"pick", "Sample", "MOUSE3"}, {"drop", "Drop Item", "Q"}}
+    for index = 1, #movement do
+      local entry = movement[index]
+      buttons[#buttons + 1] = {id = "bind_" .. entry[1], kind = "setting", label = entry[2], valueLabel = bindingLabel(menuState, entry[1], entry[3]), x = left, y = 52 + (index - 1) * 24, w = columnW, h = 20}
+    end
+    for index = 1, #actions do
+      local entry = actions[index]
+      buttons[#buttons + 1] = {id = "bind_" .. entry[1], kind = "setting", label = entry[2], valueLabel = bindingLabel(menuState, entry[1], entry[3]), x = right, y = 52 + (index - 1) * 24, w = columnW, h = 20}
+    end
+    return buttons
+  elseif screen == "texture_packs" then
+    local buttons, layout = settingsButtons(logicalWidth, logicalHeight, "resources")
+    buttons[#buttons + 1] = {id = "noop", kind = "setting", label = "Tamarton Base Set", valueLabel = "ACTIVE", x = layout.contentX, y = 56, w = layout.contentW, h = 22}
+    buttons[#buttons + 1] = {id = "create_texture_showcase", label = "Create Texture Preview World", x = layout.contentX, y = 96, w = layout.contentW, h = 22, style = "primary"}
+    return buttons
+  elseif screen == "multiplayer" then
+    return {{id = "back_main", label = "Done", x = cx - 100, y = logicalHeight - 28, w = 200, h = 20}}
+  elseif screen == "achievements" or screen == "stats" then
+    return {{id = "back_pause", label = "Done", x = cx - 100, y = logicalHeight - 28, w = 200, h = 20}}
   end
 
   return {}
@@ -95,12 +231,25 @@ end
 
 function menu.stateKey(menuState)
   menuState = menuState or {}
+  local bindings = menuState.controlBindings or {}
+  local stats = menuState.stats or {}
   return table.concat({
-    menuState.worldGameMode or "survival",
-    menuState.worldGeneratorType or "default",
-    menuState.moreWorldOptions and "more" or "simple",
-    menuState.worldSeedText or "",
-    menuState.menuParentScreen or "none"
+    menuState.worldGameMode or "survival", menuState.worldGeneratorType or "default",
+    worldProfiles.id(menuState.worldId), menuState.worldNameText or "",
+    menuState.moreWorldOptions and "more" or "simple", menuState.worldSeedText or "",
+    tostring(menuState.activeTextField or ""), tostring(menuState.textCaret or 0),
+    tostring(menuState.generateStructures), tostring(menuState.allowCheats), tostring(menuState.bonusChest),
+    tostring(menuState.worldListVersion or 0), tostring(menuState.selectedWorldIndex or 0), tostring(menuState.worldListScroll or 0),
+    menuState.menuParentScreen or "none", tostring(menuState.soundVolume),
+    tostring(menuState.invertMouse), tostring(menuState.sensitivity), tostring(menuState.fovDegrees),
+    tostring(menuState.renderDistance), tostring(menuState.vsync),
+    tostring(menuState.viewBobbing), tostring(menuState.motionBlur), tostring(menuState.openDropdown),
+    tostring(menuState.fullscreen), tostring(menuState.clouds), tostring(menuState.bloom),
+    tostring(menuState.particles), bindings.attack or "", bindings.use or "", bindings.forward or "",
+    bindings.back or "", bindings.left or "", bindings.right or "", bindings.jump or "",
+    bindings.sneak or "", bindings.pick or "", bindings.drop or "", bindings.inventory or "", tostring(menuState.statusMessage or ""),
+    tostring(stats.blocksMined or 0), tostring(stats.blocksPlaced or 0),
+    tostring(math.floor((stats.distance or 0) * 10)), tostring(math.floor(stats.playTime or 0))
   }, "/")
 end
 

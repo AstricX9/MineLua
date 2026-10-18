@@ -4,110 +4,172 @@ local GL = require("gl")
 local atmosphere = require("atmosphere")
 local blocks = require("blocks")
 local camera = require("camera")
+local carriedLight = require("carried_light")
 local character = require("character")
+local DistantTerrain = require("distant_terrain")
+local DevMenu = require("dev_menu")
+local DroppedItems = require("dropped_items")
 local effects = require("render_effects")
 local graphics = require("graphics_settings")
 local hud = require("hud")
+local Inventory = require("inventory")
 local math3d = require("math3d")
 local rendering = require("rendering")
 local saves = require("saves")
 local shaderModule = require("shader")
+local heldItem = require("held_item")
 local spawnLoading = require("spawn_loading")
 local terrain = require("terrain")
 local texture = require("texture")
 local uiFlow = require("ui_flow")
 local voxel = require("voxel")
+local lighting = require("lighting")
 local World = require("world")
 local worldInteraction = require("world_interaction")
+local worldProfiles = require("world_profiles")
+local renderDistance = require("render_distance")
+local showcase = require("showcase")
+local inputBindings = require("input_bindings")
+local motionBlur = require("motion_blur")
+local userSettings = require("user_settings")
+local textInput = require("text_input")
+local BodyDamage = require("body_damage")
+local astronomy = {
+  ephemeris = require("sky_ephemeris"),
+  catalog = require("star_catalog"),
+  field = require("star_field")
+}
 
 local game = {}
+game.AudioEngine = require("audio_engine")
 
 local gl = GL.gl
-
-local GL_COLOR_BUFFER_BIT = 0x00004000
-local GL_DEPTH_BUFFER_BIT = 0x00000100
-local GL_DEPTH_TEST = 0x0B71
-local GL_LESS = 0x0201
-local GL_BLEND = 0x0BE2
-local GL_SRC_ALPHA = 0x0302
-local GL_ONE_MINUS_SRC_ALPHA = 0x0303
-local GL_TEXTURE_2D = 0x0DE1
-local GL_TEXTURE_MIN_FILTER = 0x2801
-local GL_TEXTURE_MAG_FILTER = 0x2800
-local GL_NEAREST = 0x2600
-local GL_RGBA = 0x1908
-local GL_UNSIGNED_BYTE = 0x1401
-local GL_ARRAY_BUFFER = 0x8892
-local GL_STATIC_DRAW = 0x88E4
-local GL_FLOAT = 0x1406
-local GL_TEXTURE0 = 0x84C0
-local GL_TEXTURE1 = 0x84C1
-local GL_TEXTURE2 = 0x84C2
-local GL_TEXTURE3 = 0x84C3
-local GL_TEXTURE4 = 0x84C4
-local GL_TEXTURE5 = 0x84C5
-local GL_TEXTURE_CUBE_MAP = 0x8513
-local GL_TEXTURE_CUBE_MAP_POSITIVE_X = 0x8515
-local GL_TEXTURE_WRAP_S = 0x2802
-local GL_TEXTURE_WRAP_T = 0x2803
-local GL_TEXTURE_WRAP_R = 0x8072
-local GL_LINEAR = 0x2601
-local GL_CLAMP_TO_EDGE = 0x812F
-local GL_REPEAT = 0x2901
-local GL_TEXTURE_CUBE_MAP_SEAMLESS = 0x884F
-local GL_FRAMEBUFFER = 0x8D40
 
 local WINDOW_W = graphics.window.width
 local WINDOW_H = graphics.window.height
 local windowWidth = WINDOW_W
 local windowHeight = WINDOW_H
 local CAMERA_FOV = math.rad(graphics.window.fovDegrees)
+-- Set graphics.window.vsync = false (data/config/settings.json) to uncap the frame rate
+-- and have the debug screen report real frame cost instead of the refresh rate.
+local VSYNC_ENABLED = graphics.window.vsync ~= false
 local CAMERA_NEAR = 0.1
 local CAMERA_FAR = math.max(graphics.world.visualDistance or 4096.0, 4096.0)
 local TERRAIN_MAX_H = graphics.world.terrainMaxHeight
+-- Full voxel meshes stay deliberately local. The menu's Render Distance is
+-- the outer generated/LOD square, not a request for tens of thousands of full
+-- meshes when set to 128.
 local CHUNK_RENDER_RADIUS = graphics.world.chunkRenderRadius
 local SIMPLE_VERTEX_STRIDE_FLOATS = 11
 local TERRAIN_VERTEX_STRIDE_FLOATS = voxel.STRIDE_FLOATS or 14
 local FOG_START = graphics.atmosphere.fogStart
 local FOG_END = graphics.atmosphere.fogEnd
 local SUN_CYCLE_SPEED = graphics.atmosphere.sunCycleSpeed
-local SHADOW_MAP_SIZE = graphics.shadows.mapSize
-local SHADOW_DISTANCE = graphics.shadows.distance
-local SHADOW_NEAR = graphics.shadows.near
-local SHADOW_FAR = graphics.shadows.far
+local SHADOW = {
+  mapSize = graphics.shadows.mapSize,
+  near = graphics.shadows.near,
+  far = graphics.shadows.far
+}
+graphics.shadows.cascadeSplits = graphics.shadows.cascadeSplits or {20.0, 56.0, 132.0}
+graphics.shadows.cascadeMapSizes = graphics.shadows.cascadeMapSizes or {
+  SHADOW.mapSize, SHADOW.mapSize, SHADOW.mapSize
+}
 local WATER_LEVEL = graphics.water.level
-local WATER_RADIUS = math.min(graphics.water.radius, (CHUNK_RENDER_RADIUS + 0.5) * 16.0)
-local CLOUD_CELL_SIZE = 12.0
-local CLOUD_MESH_CELLS = 256
-local CLOUD_BOTTOM = graphics.atmosphere.cloudBottom or 132.0
-local CLOUD_TOP = graphics.atmosphere.cloudTop or (CLOUD_BOTTOM + 4.0)
-local CLOUD_ALPHA = 0.76
+local WATER_NEAR_TESSELLATION = graphics.water.nearTessellation or 2
+local DISTANT_CHUNK_RADIUS = graphics.world.distantChunkRadius or 24
+local CLOUD = {
+  cellSize = 12.0,
+  meshCells = 256,
+  bottom = graphics.atmosphere.cloudBottom or 132.0,
+  alpha = 0.76
+}
+local CLOUD_SHADOW_INTERNAL_FORMAT = 0x8229  -- GL_R8
+CLOUD.top = graphics.atmosphere.cloudTop or (CLOUD.bottom + 4.0)
+local FOG_GRID = {
+  width = graphics.atmosphere.volumetricGridWidth or 160,
+  height = graphics.atmosphere.volumetricGridHeight or 90,
+  depth = graphics.atmosphere.volumetricGridDepth or 64
+}
 local PERFORMANCE = graphics.performance or {}
-local TERRAIN_WORK_BUDGET = PERFORMANCE.terrainWorkBudget or 10
-local CHUNK_QUEUE_BUDGET = PERFORMANCE.chunkQueueBudget or 2
-local CHUNK_QUEUE_BACKLOG = PERFORMANCE.chunkQueueBacklog or math.max(CHUNK_QUEUE_BUDGET * 3, 4)
-local LIGHTING_STEP_BUDGET = PERFORMANCE.lightingStepBudget or 10
-local LOADING_CHUNK_BUDGET = PERFORMANCE.loadingChunkBudget or 2
-local LOADING_LIGHTING_STEP_BUDGET = PERFORMANCE.loadingLightingStepBudget or 14
-local LOADING_MESH_BUDGET = PERFORMANCE.loadingMeshBudget or 2
-local LOADING_REQUIRED_RADIUS = PERFORMANCE.loadingRequiredRadius or PERFORMANCE.initialSpawnRadius or 1
-local LOADING_HALO_RADIUS = math.max(LOADING_REQUIRED_RADIUS, PERFORMANCE.loadingHaloRadius or 2)
+local POST = graphics.post or {}
+local SKY = graphics.sky or {}
+-- Per-frame work allowances, all of them tunable from the performance block of
+-- data/config/settings.json. Grouped rather than kept as separate locals: the
+-- main chunk of this file is close to LuaJIT's 200 local variable ceiling.
+local BUDGET = {
+  distantGenerationSteps = PERFORMANCE.distantGenerationSteps or 64,
+  distantBuild = PERFORMANCE.distantBuildBudget or 2,
+  distantFrameMs = PERFORMANCE.distantFrameBudgetMs or 3.0,
+  distantRing = PERFORMANCE.distantQueueRingBudget or 4,
+  terrainWork = PERFORMANCE.terrainWorkBudget or 10,
+  -- Step counts are a poor budget: a single step ranges from under 1 ms to
+  -- about 20 ms, so a fixed count of them produces wildly uneven frames. The
+  -- step count stays as an upper bound; this is what actually caps the frame.
+  terrainFrame = (PERFORMANCE.terrainFrameBudgetMs or 6.0) / 1000.0,
+  chunkQueue = PERFORMANCE.chunkQueueBudget or 2,
+  lightingStep = PERFORMANCE.lightingStepBudget or 10,
+  loadingChunk = PERFORMANCE.loadingChunkBudget or 2,
+  loadingLightingStep = PERFORMANCE.loadingLightingStepBudget or 14,
+  loadingMesh = PERFORMANCE.loadingMeshBudget or 2,
+  loadingRequiredRadius = PERFORMANCE.loadingRequiredRadius or PERFORMANCE.initialSpawnRadius or 1
+}
+BUDGET.chunkBacklog = PERFORMANCE.chunkQueueBacklog or math.max(BUDGET.chunkQueue * 3, 4)
+BUDGET.loadingHaloRadius = math.max(BUDGET.loadingRequiredRadius, PERFORMANCE.loadingHaloRadius or 2)
 local DEFAULT_SPAWN_X = 16.5
 local DEFAULT_SPAWN_Z = 16.5
+local PLAYER_AUTOSAVE_INTERVAL = 10.0
+local TWO_PI = math.pi * 2.0
+
+local function timeOfDayForSimulationTime(time, cycleSpeed)
+  local phase = (time * (cycleSpeed or SUN_CYCLE_SPEED)) % TWO_PI
+  return (phase / TWO_PI * 24.0 + 6.0) % 24.0
+end
+
+local function simulationTimeForTimeOfDay(hour, cycleSpeed)
+  local phase = ((hour - 6.0) / 24.0) * TWO_PI
+  return phase / (cycleSpeed or SUN_CYCLE_SPEED)
+end
+
+local function updateRuntimeAtmosphereSettings(runtime, strength, worldProfile, selectedRenderDistance)
+  for key, value in pairs(graphics.atmosphere) do
+    runtime[key] = value
+  end
+
+  strength = math.max(0.0, math.min(strength or 1.0, 3.0))
+  local densityScale = worldProfile and worldProfile.atmosphere and
+    (worldProfile.atmosphere.fogDensityScale or 1.0) or 1.0
+  local scaledStrength = strength * densityScale
+  runtime.heightFogDensity = (graphics.atmosphere.heightFogDensity or 0.0045) * scaledStrength
+  runtime.horizonFog = (graphics.atmosphere.horizonFog or 0.24) * scaledStrength
+  runtime.distanceFogDensity = (graphics.atmosphere.distanceFogDensity or 0.0015) * scaledStrength
+  runtime.airScatter = (graphics.atmosphere.airScatter or 0.12) * scaledStrength
+
+  local authoredOpacity = graphics.atmosphere.fogMaxOpacity or graphics.atmosphere.maxFogAmount or 0.82
+  runtime.fogMaxOpacity = 1.0 - ((1.0 - authoredOpacity) ^ scaledStrength)
+  runtime.maxFogAmount = runtime.fogMaxOpacity
+
+  if selectedRenderDistance then
+    runtime.fogStart, runtime.fogEnd = renderDistance.fogRange(
+      selectedRenderDistance, graphics.atmosphere.fogStart)
+    runtime.volumetricFar = runtime.fogEnd
+  end
+end
 
 local function createShaderProgram()
   local vertSource = [[
-#version 330 core
+#version 460 core
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec3 aColor;
 layout (location = 3) in vec2 aTexCoord;
 layout (location = 4) in vec3 aInfo;
+layout (location = 5) in vec3 aBlockLight;
 out vec3 vColor;
 out vec3 vNormal;
 out vec3 vFragPos;
 out vec2 vTexCoord;
 out vec3 vInfo;
+out vec3 vBlockLight;
 uniform mat4 uProjection;
 uniform mat4 uView;
 uniform mat4 uModel;
@@ -128,30 +190,51 @@ void main() {
   vColor = aColor;
   vTexCoord = aTexCoord;
   vInfo = aInfo;
+  vBlockLight = aBlockLight;
   gl_Position = uProjection * uView * vec4(worldPosition, 1.0);
 }
 ]]
 
   local fragSource = [[
-#version 330 core
+#version 460 core
 in vec3 vColor;
 in vec3 vNormal;
 in vec3 vFragPos;
 in vec2 vTexCoord;
 in vec3 vInfo;
+in vec3 vBlockLight;
 out vec4 FragColor;
 uniform vec3 lightDir;
 uniform vec3 viewPos;
 uniform sampler2D tex0;
-uniform sampler2D shadowMap;
+uniform sampler2D shadowMap0;
+uniform sampler2D shadowMap1;
+uniform sampler2D shadowMap2;
 uniform vec3 ambientColor;
 uniform vec3 lightColor;
 uniform vec3 moonLightColor;
 uniform vec3 lightingParams;
+uniform vec3 carriedLightPosition;
+uniform vec3 carriedLightEmission;
+uniform sampler3D carriedLightVolume;
+uniform vec4 carriedVolume;  // xyz = world corner of voxel 0, w = 1 / volume size
+uniform sampler2D cloudShadowMap;
+uniform vec4 cloudShadow;    // xy = sheet origin in world, z = 1 / sheet span, w = cloud base
+uniform float cloudShadowStrength;
 uniform vec3 faceLight;
 uniform float exposure;
 uniform float shadowStrength;
-uniform mat4 lightSpaceMatrix;
+uniform mat4 lightSpaceMatrix0;
+uniform mat4 lightSpaceMatrix1;
+uniform mat4 lightSpaceMatrix2;
+uniform vec3 shadowSplits;
+uniform float shadowSoftness;
+uniform float waterLevel;
+uniform sampler2D waterNormalMap;
+uniform vec3 waterCascadeSizes;
+uniform vec3 waterNormalWeights;
+uniform float causticStrength;
+uniform float time;
 
 vec3 srgbToLinear(vec3 color) {
   return pow(max(color, vec3(0.0)), vec3(2.2));
@@ -174,8 +257,36 @@ float fixedFaceShade(vec3 normal, float material) {
   return 0.80;
 }
 
+// How much of the sun reaches this point past the cloud deck.
+//
+// The cloud sheet is a flat layer of cells, so this is just where the sun ray
+// crosses its altitude, looked up in the same cell mask the sheet is drawn
+// from. The mask is pre-blurred and wraps, so one tap gives a soft edge that
+// tiles with the clouds above it.
+float cloudShadowAt(vec3 worldPosition, vec3 sunDirection) {
+  if (cloudShadowStrength <= 0.0) return 1.0;
+
+  // Grazing sun smears the projection across the whole sheet, and by then there
+  // is little direct light left to remove, so fade the effect out instead.
+  float elevation = smoothstep(0.05, 0.25, sunDirection.y);
+  if (elevation <= 0.0) return 1.0;
+
+  float travel = (cloudShadow.w - worldPosition.y) / max(sunDirection.y, 1e-3);
+  // Above the deck there is nothing overhead to cast anything.
+  if (travel <= 0.0) return 1.0;
+
+  vec2 hit = worldPosition.xz + sunDirection.xz * travel;
+  float coverage = texture(cloudShadowMap, (hit - cloudShadow.xy) * cloudShadow.z).r;
+  return 1.0 - coverage * cloudShadowStrength * elevation;
+}
+
 float shadowAt(vec3 normal, vec3 light, float diff) {
-  vec4 lightSpacePos = lightSpaceMatrix * vec4(vFragPos, 1.0);
+  float cameraDistance = length(vFragPos.xz - viewPos.xz);
+  int cascade = cameraDistance < shadowSplits.x ? 0 :
+    (cameraDistance < shadowSplits.y ? 1 : 2);
+  mat4 lightMatrix = cascade == 0 ? lightSpaceMatrix0 :
+    (cascade == 1 ? lightSpaceMatrix1 : lightSpaceMatrix2);
+  vec4 lightSpacePos = lightMatrix * vec4(vFragPos, 1.0);
   vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
   projCoords = projCoords * 0.5 + 0.5;
 
@@ -184,16 +295,56 @@ float shadowAt(vec3 normal, vec3 light, float diff) {
   }
 
   float bias = max(0.0025 * (1.0 - dot(normal, light)), 0.0007);
-  vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+  vec2 texelSize = cascade == 0 ? 1.0 / vec2(textureSize(shadowMap0, 0)) :
+    (cascade == 1 ? 1.0 / vec2(textureSize(shadowMap1, 0)) :
+      1.0 / vec2(textureSize(shadowMap2, 0)));
   float shadow = 0.0;
-  for (int x = -1; x <= 1; ++x) {
-    for (int y = -1; y <= 1; ++y) {
-      float closestDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+  float radius = shadowSoftness * (0.72 + float(cascade) * 0.52);
+  for (int x = -2; x <= 2; ++x) {
+    for (int y = -2; y <= 2; ++y) {
+      vec2 uv = projCoords.xy + vec2(x, y) * texelSize * radius;
+      float closestDepth = cascade == 0 ? texture(shadowMap0, uv).r :
+        (cascade == 1 ? texture(shadowMap1, uv).r : texture(shadowMap2, uv).r);
       shadow += projCoords.z - bias > closestDepth ? 1.0 : 0.0;
     }
   }
+  float farFade = 1.0 - smoothstep(shadowSplits.z * 0.88, shadowSplits.z, cameraDistance);
+  return shadow / 25.0 * smoothstep(0.02, 0.18, diff) * farFade;
+}
 
-  return shadow / 9.0 * smoothstep(0.02, 0.18, diff);
+float voxelCaustics(vec3 worldPosition, vec3 surfaceNormal, vec3 sunlight) {
+  float waterDepth = waterLevel - worldPosition.y;
+  if (waterDepth <= 0.02 || sunlight.y <= 0.015) return 0.0;
+
+  // Trace the sun into water using the physical air/water index ratio, then
+  // evaluate the animated surface above this voxel rather than screen UVs.
+  // This keeps the projection fixed to block faces as the camera moves.
+  vec3 transmitted = refract(-sunlight, vec3(0.0, 1.0, 0.0), 1.0 / 1.333);
+  float verticalTravel = max(-transmitted.y, 0.08);
+  vec2 surfacePosition = worldPosition.xz - transmitted.xz * (waterDepth / verticalTravel);
+
+  vec4 wave0 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.x + vec2(0.17, 0.61));
+  vec4 wave1 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.y + vec2(0.73, 0.29));
+  vec4 wave2 = texture(waterNormalMap, surfacePosition / waterCascadeSizes.z + vec2(0.41, 0.83));
+  vec2 waveSlope = wave0.xz * waterNormalWeights.x +
+    wave1.xz * waterNormalWeights.y + wave2.xz * waterNormalWeights.z;
+
+  // The FFT stores its horizontal deformation Jacobian in alpha. Compressed
+  // surface patches concentrate refracted light; narrow, domain-warped ridges
+  // fill in the characteristic moving caustic network between fold events.
+  float compression = 1.0 - clamp(min(wave0.a, min(wave1.a, wave2.a)), 0.0, 1.0);
+  vec2 warped = surfacePosition + waveSlope * mix(2.2, 0.45, exp(-waterDepth * 0.05));
+  float ridge0 = pow(1.0 - abs(sin(dot(warped, normalize(vec2(0.82, 0.57))) * 1.72 + time * 1.18)), 12.0);
+  float ridge1 = pow(1.0 - abs(sin(dot(warped, normalize(vec2(-0.31, 0.95))) * 1.31 - time * 0.91)), 12.0);
+  float ridge2 = pow(1.0 - abs(sin(dot(warped, normalize(vec2(0.98, -0.18))) * 2.08 + time * 1.43)), 14.0);
+  float network = clamp((ridge0 + ridge1 + ridge2) * 0.52, 0.0, 1.0);
+  float focusing = max(network * (0.45 + compression * 1.4),
+    smoothstep(0.055, 0.52, compression) * 0.82);
+
+  float depthFade = exp(-waterDepth * 0.052);
+  float daylight = smoothstep(0.015, 0.22, sunlight.y);
+  float receiving = 0.18 + 0.82 * max(dot(surfaceNormal, -transmitted), 0.0);
+  return clamp(focusing * depthFade * daylight * receiving, 0.0, 1.35);
 }
 
 void main() {
@@ -210,25 +361,64 @@ void main() {
   if(texColor.a < 0.5) discard;
   vec3 albedo = srgbToLinear(texColor.rgb) * srgbToLinear(vColor);
 
-  float voxelLight = vInfo.z > 0.0 ? clamp(vInfo.z, 0.0, 1.0) : 1.0;
-  if (material > 0.5) {
-    voxelLight = max(voxelLight, 0.34);
-  }
+  float voxelLight = clamp(vInfo.z, 0.0, 1.0);
 
   float sunDiffuse = material > 1.5 ? mix(0.88, 1.0, diff) : mix(0.68, 1.0, diff);
   float faceShadeValue = fixedFaceShade(normalize(vNormal), material);
-  float shadowAmount = shadowAt(norm, light, diff) * shadowStrength;
-  float shadowVisibility = mix(1.0, 0.45, clamp(shadowAmount, 0.0, 1.0));
+  float shadowCoverage = shadowAt(norm, light, diff);
+  float shadowAmount = clamp(shadowCoverage * shadowStrength, 0.0, 1.0);
+  // Fully shadowed ground kept only 45% of its sunlight, which reads as a hole
+  // rather than as shade once the sky term is this dim. Sky light already falls
+  // off correctly on its own; the direct term does not need to do the work
+  // twice.
+  float solidShadowVisibility = mix(1.0, 0.66, shadowAmount);
+  // Crossed foliage has a deliberately bright, upward-facing lighting model.
+  // Let complete daytime coverage remove its direct light, so it does not glow
+  // against the ground beneath an occluder.
+  float foliageMask = step(1.5, material);
   float daylight = lightingParams.x;
-  float ambientFloor = lightingParams.z;
+  float foliageShadowVisibility = 1.0 - shadowCoverage * daylight;
+  float shadowVisibility = mix(solidShadowVisibility, foliageShadowVisibility, foliageMask);
 
+  // The directional shadow map removes sunlight, not hemispherical sky light.
+  // Keeping those terms separate prevents dense crossed foliage from mutually
+  // shadowing itself to pure black while voxel AO can still reach zero.
   vec3 skyContribution = ambientColor * voxelLight;
-  vec3 sunContribution = lightColor * faceShadeValue * sunDiffuse * shadowVisibility * voxelLight;
+  vec3 blockContribution = vBlockLight * 1.18;
+  // A held emitter follows the player without rewriting voxel light or
+  // remeshing chunks every frame. Each RGB channel loses one authored light
+  // level per metre, matching the existing block-light propagation curve.
+  //
+  // Distance alone cannot see walls, so the carried light used to shine through
+  // them: sealing yourself into a room lit the terrain outside it. The
+  // occlusion volume is a flood fill from the hand through the real voxels, and
+  // taking the longer of the two distances keeps the smooth analytic falloff
+  // close in while never reaching further than light actually can.
+  vec3 carriedCell = (vFragPos + normalize(vNormal) * 0.5 - carriedVolume.xyz) *
+    carriedVolume.w;
+  float carriedReach = 0.0;
+  if (all(greaterThanEqual(carriedCell, vec3(0.0))) &&
+      all(lessThanEqual(carriedCell, vec3(1.0)))) {
+    carriedReach = texture(carriedLightVolume, carriedCell).r * 15.0;
+  }
+  float carriedDistance = max(length(vFragPos - carriedLightPosition),
+    15.0 - carriedReach);
+  vec3 carriedLevel = max(carriedLightEmission - vec3(carriedDistance), vec3(0.0));
+  vec3 carriedDarkness = vec3(1.0) - clamp(carriedLevel / 15.0, 0.0, 1.0);
+  vec3 carriedContribution = (vec3(1.0) - carriedDarkness) /
+    (carriedDarkness * 3.0 + vec3(1.0)) * 1.18;
+  blockContribution += carriedContribution;
+  float cloudShade = cloudShadowAt(vFragPos, light);
+  vec3 sunContribution = lightColor * faceShadeValue * sunDiffuse * shadowVisibility *
+    voxelLight * cloudShade;
   vec3 moonContribution = moonLightColor * mix(0.76, 1.0, max(dot(norm, -light), 0.0)) * faceShadeValue * voxelLight;
-  vec3 totalLight = skyContribution + sunContribution + moonContribution;
-  totalLight = max(totalLight, vec3(ambientFloor));
+  vec3 totalLight = skyContribution + sunContribution + moonContribution + blockContribution;
 
   vec3 litColor = albedo * totalLight * exposure;
+  float caustic = voxelCaustics(vFragPos, norm, light) * daylight * shadowVisibility *
+    voxelLight * cloudShade;
+  vec3 causticColor = srgbToLinear(vec3(0.52, 0.90, 1.0));
+  litColor += albedo * lightColor * causticColor * caustic * causticStrength;
   vec3 finalColor = linearToSrgb(litColor);
   float luminance = dot(finalColor, vec3(0.2126, 0.7152, 0.0722));
   float nightSaturation = mix(0.55, 1.0, daylight);
@@ -242,7 +432,7 @@ end
 
 local function createSkyShaderProgram()
   local vertSource = [[
-#version 330 core
+#version 460 core
 layout (location = 0) in vec3 aPos;
 out vec2 vUv;
 void main() {
@@ -252,7 +442,7 @@ void main() {
 ]]
 
   local fragSource = [[
-#version 330 core
+#version 460 core
 in vec2 vUv;
 out vec4 FragColor;
 uniform vec3 sunDir;
@@ -263,17 +453,23 @@ uniform vec3 cameraUp;
 uniform vec3 cameraPosition;
 uniform vec3 cameraProjection;
 uniform vec3 skyTuning;
+uniform vec3 skyParams;   // scatterStrength, unused, sunIntensity
 uniform vec3 fogColor;
 uniform sampler2D moonTex;
-uniform sampler2D sunTex;
-uniform sampler2D cloudTex;
+uniform vec3 sunDisc;
+uniform vec3 scatteringPlanet;   // radius, atmosphere height, surface datum
+uniform vec3 scatteringScale;    // molecular height, dust height, anisotropy
+uniform vec3 scatteringRayleigh;
+uniform vec3 scatteringDust;
+uniform vec3 aureoleColor;
+uniform vec3 aureoleParams;      // focus, strength, unused
+uniform float multipleScatter;   // share of in-scattering redistributed isotropically
+uniform vec3 moonDirection;      // where the moon actually is, in body coordinates
+uniform vec4 moonParams;         // angular radius, surface radiance, earthshine, unused
+uniform vec3 galacticPole;       // body-frame galactic pole, for the Milky Way
+uniform vec3 galacticCentre;     // body-frame direction of Sagittarius A*
+uniform vec2 milkyWay;           // brightness, angular half-width in radians
 
-const float Br = 0.0025;
-const float Bm = 0.0003;
-const float g = 0.9800;
-const vec3 nitrogen = vec3(0.650, 0.570, 0.475);
-const vec3 Kr = Br / pow(nitrogen, vec3(4.0));
-const vec3 Km = Bm / pow(nitrogen, vec3(0.84));
 const mat3 cloudMatrix = mat3(
    0.0,  1.60,  1.20,
   -1.6,  0.72, -0.96,
@@ -316,31 +512,148 @@ float fbm(vec3 p) {
   return f;
 }
 
-float hash2(vec2 p) {
-  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-  p3 += dot(p3, p3.yzx + 33.33);
-  return fract((p3.x + p3.y) * p3.z);
+
+// ---------------------------------------------------------------------------
+// Rayleigh + Mie single scattering (Nishita). The view ray is marched through
+// the atmosphere; at each step a second march toward the sun gives the optical
+// depth light travelled to get there. Sunset reds, the blue zenith and horizon
+// brightening all fall out of the wavelength dependence rather than being
+// authored -- Rayleigh scatters blue ~5.7x more strongly than red, so a long
+// grazing path through air has the blue removed from it.
+// ---------------------------------------------------------------------------
+const float PI_SKY = 3.14159265359;
+const int SCATTER_VIEW_SAMPLES = @VIEW_SAMPLES@;
+const int SCATTER_LIGHT_SAMPLES = @LIGHT_SAMPLES@;
+
+// Distance to the far intersection with a sphere centred on the origin.
+float raySphereFar(vec3 origin, vec3 dir, float radius) {
+  float b = dot(origin, dir);
+  float c = dot(origin, origin) - radius * radius;
+  float d = b * b - c;
+  if (d < 0.0) return -1.0;
+  return -b + sqrt(d);
 }
 
-float stars(vec3 dir) {
-  vec2 uv = vec2(atan(dir.z, dir.x) * 0.1591549 + 0.5, asin(clamp(dir.y, -1.0, 1.0)) * 0.3183099 + 0.5);
-  vec2 grid = floor(uv * vec2(360.0, 160.0));
-  vec2 cell = fract(uv * vec2(360.0, 160.0)) - 0.5;
-  float rnd = hash2(grid);
-  float star = 1.0 - smoothstep(0.0, 0.030, length(cell - vec2(hash2(grid + 17.0), hash2(grid + 41.0)) * 0.72 + 0.14));
-  return star * step(0.986, rnd) * mix(0.45, 1.35, hash2(grid + 91.0));
+// Distance to the near intersection, or -1 when the ray misses or starts past it.
+float raySphereNear(vec3 origin, vec3 dir, float radius) {
+  float b = dot(origin, dir);
+  float c = dot(origin, origin) - radius * radius;
+  float d = b * b - c;
+  if (d < 0.0) return -1.0;
+  float t = -b - sqrt(d);
+  return t > 0.0 ? t : -1.0;
 }
 
-vec3 moonTexture(vec2 uv) {
-  float r = length(uv);
-  float shade = 1.0 - smoothstep(0.72, 1.0, r);
-  float craters = 0.0;
-  craters += (1.0 - smoothstep(0.02, 0.22, length(uv - vec2(-0.24, 0.20)))) * 0.35;
-  craters += (1.0 - smoothstep(0.03, 0.18, length(uv - vec2(0.30, -0.12)))) * 0.28;
-  craters += (1.0 - smoothstep(0.02, 0.12, length(uv - vec2(0.08, 0.34)))) * 0.20;
-  craters += (1.0 - smoothstep(0.02, 0.10, length(uv - vec2(-0.12, -0.30)))) * 0.18;
-  float grain = fbm(vec3(uv * 5.0, 2.5)) * 0.22;
-  return vec3(0.78, 0.80, 0.76) * (shade + grain - craters);
+vec3 atmosphericScattering(vec3 rayDir, vec3 sunDirection, float observerAltitude, float sunIntensity) {
+  float planetRadius = scatteringPlanet.x;
+  float atmosphereRadius = planetRadius + scatteringPlanet.y;
+  vec3 origin = vec3(0.0, planetRadius + observerAltitude, 0.0);
+
+  float rayLength = raySphereFar(origin, rayDir, atmosphereRadius);
+  if (rayLength <= 0.0) return vec3(0.0);
+
+  // Looking down into the planet: stop at the surface.
+  float groundHit = raySphereNear(origin, rayDir, planetRadius);
+  if (groundHit > 0.0) rayLength = min(rayLength, groundHit);
+
+  float mu = dot(rayDir, sunDirection);
+  float phaseRayleigh = 3.0 / (16.0 * PI_SKY) * (1.0 + mu * mu);
+  float dustG = scatteringScale.z;
+  float g2 = dustG * dustG;
+  float phaseMie = 3.0 / (8.0 * PI_SKY) * ((1.0 - g2) * (1.0 + mu * mu)) /
+                   ((2.0 + g2) * pow(max(1.0 + g2 - 2.0 * dustG * mu, 1e-4), 1.5));
+
+  // Single scattering alone puts all the light in the direction the phase
+  // function points, which is wrong wherever the atmosphere is optically thick
+  // enough for a photon to bounce more than once: Mars' dust has an optical
+  // depth of a few tenths and a strongly forward-peaked lobe, so a single
+  // bounce leaves the anti-solar sky black instead of butterscotch. Light that
+  // has scattered repeatedly has lost its memory of the sun's direction, so the
+  // corresponding share of the phase function is redistributed isotropically.
+  // Both phase functions integrate to one over the sphere, so this moves energy
+  // around the sky without inventing any.
+  float isotropic = 1.0 / (4.0 * PI_SKY);
+  float ms = clamp(multipleScatter, 0.0, 1.0);
+  phaseMie = mix(phaseMie, isotropic, ms);
+  phaseRayleigh = mix(phaseRayleigh, isotropic, ms);
+
+  float stepSize = rayLength / float(SCATTER_VIEW_SAMPLES);
+  float travelled = 0.0;
+  float opticalDepthR = 0.0;
+  float opticalDepthM = 0.0;
+  vec3 accumR = vec3(0.0);
+  vec3 accumM = vec3(0.0);
+
+  for (int i = 0; i < SCATTER_VIEW_SAMPLES; i++) {
+    vec3 samplePos = origin + rayDir * (travelled + stepSize * 0.5);
+    float height = length(samplePos) - planetRadius;
+
+    float densityR = exp(-height / scatteringScale.x) * stepSize;
+    float densityM = exp(-height / scatteringScale.y) * stepSize;
+    opticalDepthR += densityR;
+    opticalDepthM += densityM;
+
+    // second march: how much air the sunlight crossed to reach this sample
+    float lightLength = raySphereFar(samplePos, sunDirection, atmosphereRadius);
+    float lightStep = lightLength / float(SCATTER_LIGHT_SAMPLES);
+    float lightTravelled = 0.0;
+    float lightDepthR = 0.0;
+    float lightDepthM = 0.0;
+    bool occluded = false;
+
+    for (int j = 0; j < SCATTER_LIGHT_SAMPLES; j++) {
+      vec3 lightPos = samplePos + sunDirection * (lightTravelled + lightStep * 0.5);
+      float lightHeight = length(lightPos) - planetRadius;
+      if (lightHeight < 0.0) { occluded = true; break; }
+      lightDepthR += exp(-lightHeight / scatteringScale.x) * lightStep;
+      lightDepthM += exp(-lightHeight / scatteringScale.y) * lightStep;
+      lightTravelled += lightStep;
+    }
+
+    if (!occluded) {
+      vec3 tau = scatteringRayleigh * (opticalDepthR + lightDepthR) +
+                 scatteringDust * 1.1 * (opticalDepthM + lightDepthM);
+      vec3 transmittance = exp(-tau);
+      accumR += transmittance * densityR;
+      accumM += transmittance * densityM;
+    }
+
+    travelled += stepSize;
+  }
+
+  return sunIntensity * (accumR * scatteringRayleigh * phaseRayleigh +
+                         accumM * scatteringDust * phaseMie);
+}
+
+// Transmittance from the observer to the top of the atmosphere. The scattering
+// march already computes this for the light rays it traces; the sun disc needs
+// it along the view ray instead, so that the same air that turns the sky red at
+// dusk dims and reddens the disc itself rather than a tint being authored for
+// it. Returns black once the ray meets the planet, which is what makes the sun
+// set instead of sitting on the horizon.
+vec3 sunTransmittance(vec3 rayDir, float observerAltitude) {
+  float planetRadius = scatteringPlanet.x;
+  float atmosphereRadius = planetRadius + scatteringPlanet.y;
+  vec3 origin = vec3(0.0, planetRadius + observerAltitude, 0.0);
+
+  float rayLength = raySphereFar(origin, rayDir, atmosphereRadius);
+  if (rayLength <= 0.0) return vec3(0.0);
+  if (raySphereNear(origin, rayDir, planetRadius) > 0.0) return vec3(0.0);
+
+  float stepSize = rayLength / float(SCATTER_LIGHT_SAMPLES);
+  float travelled = 0.0;
+  float depthR = 0.0;
+  float depthM = 0.0;
+
+  for (int i = 0; i < SCATTER_LIGHT_SAMPLES; i++) {
+    vec3 samplePos = origin + rayDir * (travelled + stepSize * 0.5);
+    float height = max(length(samplePos) - planetRadius, 0.0);
+    depthR += exp(-height / scatteringScale.x) * stepSize;
+    depthM += exp(-height / scatteringScale.y) * stepSize;
+    travelled += stepSize;
+  }
+
+  return exp(-(scatteringRayleigh * depthR + scatteringDust * 1.1 * depthM));
 }
 
 void main() {
@@ -351,7 +664,6 @@ void main() {
     cameraUp * p.y * cameraProjection.y
   );
   vec3 sun = normalize(sunDir);
-  vec3 moon = -sun;
   float dayAmount = smoothstep(-0.08, 0.22, sun.y);
   float nightAmount = 1.0 - smoothstep(-0.18, 0.08, sun.y);
   float horizonWarmth = 1.0 - smoothstep(-0.03, 0.34, abs(sun.y));
@@ -359,64 +671,106 @@ void main() {
   vec3 skyPos = normalize(vec3(pos.x, max(pos.y, 0.015), pos.z));
 
   float altitude = smoothstep(0.0, 0.92, skyPos.y);
-  float twilightAmount = 1.0 - smoothstep(0.08, 0.44, abs(sun.y));
-  float horizon = 1.0 - smoothstep(0.015, 0.30, pos.y);
-  vec3 nightSky = mix(vec3(0.060, 0.095, 0.150), vec3(0.015, 0.028, 0.080), altitude);
-  vec3 daySky = mix(vec3(0.66, 0.82, 1.00), vec3(0.16, 0.40, 0.86), pow(altitude, 0.72));
-  daySky = mix(daySky, vec3(0.74, 0.88, 1.0), horizon * dayAmount * 0.45);
-  vec3 twilightSky = mix(vec3(0.86, 0.42, 0.24), vec3(0.17, 0.15, 0.34), altitude);
-  vec3 color = mix(nightSky, daySky, dayAmount);
-  color = mix(color, twilightSky, twilightAmount * smoothstep(0.0, 0.72, skyPos.y) * 0.62);
 
-  float mu = max(dot(skyPos, sun), 0.0);
-  float rayleigh = 3.0 / (8.0 * 3.14159) * (1.0 + mu * mu);
-  vec3 mie = (Kr + Km * (1.0 - g * g) / (2.0 + g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 0.02), 1.5)) / (Br + Bm);
-  vec3 scatter = rayleigh * mie * 0.045 * dayAmount;
-  color += scatter;
+  // The physical model produces daylight only; it correctly falls to black once
+  // the sun is below the horizon, so the authored night sky sits underneath it
+  // rather than being cross-faded against it.
+  float observerAltitude = max(cameraPosition.y - scatteringPlanet.z, 1.0);
+  vec3 scattered = atmosphericScattering(skyPos, sun, observerAltitude, skyParams.z);
+  vec3 nightSky = mix(fogColor * 1.7, fogColor * 0.55, altitude);
+  vec3 color = nightSky * nightAmount + scattered * skyParams.x;
 
-  float moonVisible = smoothstep(-0.06, 0.08, moon.y) * nightAmount;
-  vec3 moonBasisUp = abs(moon.y) > 0.96 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-  vec3 moonRight = normalize(cross(moonBasisUp, moon));
-  vec3 moonUp = normalize(cross(moon, moonRight));
-  vec2 moonUv = vec2(dot(skyPos, moonRight), dot(skyPos, moonUp)) / 0.052;
-  vec2 moonSampleUv = moonUv * 0.5 + 0.5;
-  vec2 moonAtlasUv = vec2(moonSampleUv.x * 0.25, moonSampleUv.y * 0.5);
-  vec4 moonTextureColor = texture(moonTex, moonAtlasUv);
-  float moonSquare = step(max(abs(moonUv.x), abs(moonUv.y)), 1.0);
-  float moonLuma = max(max(moonTextureColor.r, moonTextureColor.g), moonTextureColor.b);
-  float moonMask = moonSquare * moonVisible * moonTextureColor.a * smoothstep(0.025, 0.11, moonLuma);
-  color = mix(color, moonTextureColor.rgb, moonMask);
+  // The Milky Way is the galactic disc seen from inside it, so it is a band
+  // about the galactic plane, brightest toward the centre in Sagittarius and
+  // broken along its length by the dust lanes that lie in front of it.
+  if (milkyWay.x > 0.0) {
+    float galacticLatitude = asin(clamp(dot(skyPos, galacticPole), -1.0, 1.0));
+    float band = exp(-pow(galacticLatitude / max(milkyWay.y, 1.0e-3), 2.0));
+    float bulge = 0.42 + 0.58 * pow(max(dot(skyPos, galacticCentre), 0.0), 1.7);
+    float lanes = 0.50 + 0.50 * fbm(skyPos * 7.0);
+    color += vec3(0.74, 0.78, 0.96) * band * bulge * lanes * milkyWay.x * nightAmount;
+  }
 
+  // The moon is a sphere at a known place, lit by the sun from wherever the sun
+  // is: the phase is not chosen, it is the terminator falling where the
+  // geometry puts it. Which also means the crescent always points at the sun.
+  if (moonParams.x > 0.0) {
+    vec3 moonBasisUp = abs(moonDirection.y) > 0.96 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+    vec3 moonRight = normalize(cross(moonBasisUp, moonDirection));
+    vec3 moonUp = normalize(cross(moonDirection, moonRight));
+    vec2 moonUv = vec2(dot(skyPos, moonRight), dot(skyPos, moonUp)) / moonParams.x;
+    float moonRadiusSquared = dot(moonUv, moonUv);
+    if (moonRadiusSquared <= 1.0) {
+      // Outward normal on the hemisphere that faces us.
+      vec3 normal = normalize(
+        moonRight * moonUv.x + moonUp * moonUv.y -
+        moonDirection * sqrt(max(1.0 - moonRadiusSquared, 0.0)));
+      float toSun = max(dot(normal, sun), 0.0);
+      float toObserver = max(dot(normal, -moonDirection), 0.0);
+      // Lommel-Seeliger: a regolith of loose dust reflects almost evenly across
+      // the disc, which is why a full moon is a flat disc and not a shaded ball.
+      float reflectance = toSun / max(toSun + toObserver, 1.0e-3);
+      // Earthshine on the dark side: the old moon in the new moon's arms.
+      reflectance = max(reflectance, moonParams.z * (1.0 - toSun));
+      vec2 albedoUv = (moonUv * 0.5 + 0.5) * vec2(0.25, 0.5);
+      vec3 albedo = texture(moonTex, albedoUv).rgb;
+      float edge = 1.0 - smoothstep(0.94, 1.0, moonRadiusSquared);
+      color += albedo * reflectance * moonParams.y * edge *
+        sunTransmittance(skyPos, observerAltitude);
+    }
+  }
+
+  // Aureole only -- the disc itself is added after tone mapping, below. This
+  // term uses skyPos rather than pos so the glow survives once the disc has
+  // dropped under the horizon, which is what a sunset looks like.
   float sunAmount = max(dot(skyPos, sun), 0.0);
-  vec3 sunTint = mix(vec3(1.0, 0.58, 0.28), vec3(1.0, 0.96, 0.82), dayAmount);
-  vec3 sunBasisUp = abs(sun.y) > 0.96 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
-  vec3 sunRight = normalize(cross(sunBasisUp, sun));
-  vec3 sunUp = normalize(cross(sun, sunRight));
-  vec2 sunUv = vec2(dot(skyPos, sunRight), dot(skyPos, sunUp)) / 0.044;
-  vec2 sunSampleUv = sunUv * 0.5 + 0.5;
-  vec4 sunTextureColor = texture(sunTex, sunSampleUv);
-  float sunSquare = step(max(abs(sunUv.x), abs(sunUv.y)), 1.0);
-  float sunLuma = max(max(sunTextureColor.r, sunTextureColor.g), sunTextureColor.b);
-  float sunImageMask = sunTextureColor.a * sunSquare * smoothstep(0.025, 0.11, sunLuma);
-  color += sunTint * pow(sunAmount, 420.0) * 0.16 * max(dayAmount, 0.15) * skyTuning.z;
-  color = mix(color, sunTextureColor.rgb * sunTint * 1.18, sunImageMask * smoothstep(-0.06, 0.08, sun.y) * skyTuning.z);
+  color += aureoleColor * pow(sunAmount, aureoleParams.x) * aureoleParams.y *
+    max(dayAmount, 0.15) * skyTuning.z;
 
-  color += vec3(0.82, 0.88, 1.0) * stars(pos) * nightAmount * smoothstep(0.0, 0.18, pos.y);
-  color = mix(color, vec3(0.98, 0.38, 0.18), horizonWarmth * smoothstep(0.0, 0.12, skyPos.y) * 0.15);
+  color = mix(color, fogColor * 1.08, horizonWarmth * smoothstep(0.0, 0.12, skyPos.y) * 0.15);
   color += noise(skyPos * 1000.0) * 0.006;
   color = vec3(1.0) - exp(-color * skyTuning.x);
   color = pow(color, vec3(1.08));
+
+  // The disc goes in after the sky's own tone map, so it keeps values above 1.0
+  // in the half-float target. Folded in before, it would be rolled off to white
+  // along with the sky and bloom would have nothing to pick up.
+  //
+  // Nothing here is sampled: the edge is the true angular radius, the shading
+  // across it is the linear limb-darkening law, and the colour is whatever the
+  // atmosphere lets through along that ray.
+  float sunAngularRadius = max(sunDisc.x, 0.0002);
+  float sunAngle = acos(clamp(dot(pos, sun), -1.0, 1.0));
+  // fwidth has to be evaluated outside the branch: derivatives are undefined
+  // in non-uniform control flow.
+  float limbWidth = max(fwidth(sunAngle), 1.0e-5);
+  float discMask = 1.0 - smoothstep(sunAngularRadius - limbWidth, sunAngularRadius + limbWidth, sunAngle);
+  if (discMask > 0.0) {
+    float discRadius = clamp(sunAngle / sunAngularRadius, 0.0, 1.0);
+    float mu = sqrt(max(1.0 - discRadius * discRadius, 0.0));
+    // Coefficients near 610/550/470 nm. Red is darkened least, so the rim runs
+    // warm and the centre stays white without a tint being painted on.
+    vec3 limb = vec3(1.0) - vec3(0.397, 0.503, 0.652) * (1.0 - mu);
+    color += limb * sunTransmittance(pos, observerAltitude) * sunDisc.y * discMask;
+  }
+
   color = mix(fogColor, color, skyMask);
   FragColor = vec4(color, 1.0);
 }
 ]]
+
+  -- Sample counts must be compile-time constants for the loops to unroll, so
+  -- they are substituted into the source rather than passed as uniforms.
+  fragSource = fragSource
+    :gsub("@VIEW_SAMPLES@", tostring(SKY.scatterViewSamples or 16))
+    :gsub("@LIGHT_SAMPLES@", tostring(SKY.scatterLightSamples or 8))
 
   return shaderModule.fromSource(vertSource, fragSource)
 end
 
 local function createCloudShaderProgram()
   local vertSource = [[
-#version 330 core
+#version 460 core
 layout (location = 0) in vec3 aPos;
 layout (location = 2) in vec3 aColor;
 out vec3 vColor;
@@ -431,7 +785,7 @@ void main() {
 ]]
 
   local fragSource = [[
-#version 330 core
+#version 460 core
 in vec3 vColor;
 out vec4 FragColor;
 uniform float cloudAlpha;
@@ -444,19 +798,56 @@ void main() {
   return shaderModule.fromSource(vertSource, fragSource)
 end
 
+local function createWorldgenPreviewShader()
+  local vertSource = [[
+#version 460 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec3 aColor;
+out vec3 vNormal;
+out vec3 vColor;
+uniform mat4 uProjection;
+uniform mat4 uView;
+void main() {
+  vNormal = aNormal;
+  vColor = aColor;
+  gl_Position = uProjection * uView * vec4(aPos, 1.0);
+}
+]]
+
+  local fragSource = [[
+#version 460 core
+in vec3 vNormal;
+in vec3 vColor;
+out vec4 FragColor;
+uniform vec3 lightDir;
+void main() {
+  float diffuse = max(dot(normalize(vNormal), normalize(-lightDir)), 0.0);
+  float light = 0.48 + diffuse * 0.52;
+  FragColor = vec4(vColor * light, 1.0);
+}
+]]
+
+  return shaderModule.fromSource(vertSource, fragSource)
+end
+
 local function configureVertexAttributes(strideFloats, hasInfo)
   local stride = strideFloats * 4
-  gl.glVertexAttribPointer(0, 3, GL_FLOAT, 0, stride, nil)
+  gl.glVertexAttribPointer(0, 3, GL.FLOAT, 0, stride, nil)
   gl.glEnableVertexAttribArray(0)
-  gl.glVertexAttribPointer(1, 3, GL_FLOAT, 0, stride, ffi.cast("void*", 3 * 4))
+  gl.glVertexAttribPointer(1, 3, GL.FLOAT, 0, stride, ffi.cast("void*", 3 * 4))
   gl.glEnableVertexAttribArray(1)
-  gl.glVertexAttribPointer(2, 3, GL_FLOAT, 0, stride, ffi.cast("void*", 6 * 4))
+  gl.glVertexAttribPointer(2, 3, GL.FLOAT, 0, stride, ffi.cast("void*", 6 * 4))
   gl.glEnableVertexAttribArray(2)
-  gl.glVertexAttribPointer(3, 2, GL_FLOAT, 0, stride, ffi.cast("void*", 9 * 4))
+  gl.glVertexAttribPointer(3, 2, GL.FLOAT, 0, stride, ffi.cast("void*", 9 * 4))
   gl.glEnableVertexAttribArray(3)
   if hasInfo then
-    gl.glVertexAttribPointer(4, 3, GL_FLOAT, 0, stride, ffi.cast("void*", 11 * 4))
+    gl.glVertexAttribPointer(4, 3, GL.FLOAT, 0, stride, ffi.cast("void*", 11 * 4))
     gl.glEnableVertexAttribArray(4)
+    if strideFloats >= 17 then
+      gl.glVertexAttribPointer(5, 3, GL.FLOAT, 0, stride, ffi.cast("void*", 14 * 4))
+      gl.glEnableVertexAttribArray(5)
+    end
   end
 end
 
@@ -469,8 +860,8 @@ local function uploadMesh(vertices, strideFloats, hasInfo)
   gl.glGenVertexArrays(1, vao)
   gl.glBindVertexArray(vao[0])
   gl.glGenBuffers(1, vbo)
-  gl.glBindBuffer(GL_ARRAY_BUFFER, vbo[0])
-  gl.glBufferData(GL_ARRAY_BUFFER, #vertices * 4, data, GL_STATIC_DRAW)
+  gl.glBindBuffer(GL.ARRAY_BUFFER, vbo[0])
+  gl.glBufferData(GL.ARRAY_BUFFER, #vertices * 4, data, GL.STATIC_DRAW)
   configureVertexAttributes(strideFloats, hasInfo)
 
   return {
@@ -479,6 +870,198 @@ local function uploadMesh(vertices, strideFloats, hasInfo)
     count = #vertices / strideFloats,
     data = data
   }
+end
+
+local PREVIEW_BIOME_COLORS = {
+  ocean = {0.075, 0.30, 0.48},
+  beach = {0.76, 0.69, 0.43},
+  desert = {0.76, 0.62, 0.31},
+  savanna = {0.55, 0.58, 0.24},
+  plains = {0.27, 0.55, 0.24},
+  shrubland = {0.36, 0.49, 0.25},
+  forest = {0.12, 0.37, 0.16},
+  seasonalForest = {0.18, 0.42, 0.17},
+  rainforest = {0.07, 0.32, 0.13},
+  swampland = {0.17, 0.33, 0.22},
+  taiga = {0.22, 0.40, 0.31},
+  tundra = {0.48, 0.54, 0.42},
+  iceDesert = {0.72, 0.78, 0.76},
+  mountains = {0.43, 0.45, 0.42},
+  rockyShore = {0.37, 0.39, 0.38},
+  frozenShore = {0.72, 0.77, 0.76},
+  mars_lowlands = {0.64, 0.30, 0.16},
+  mars_highlands = {0.72, 0.38, 0.22},
+  mars_crater = {0.43, 0.24, 0.18},
+  mars_volcanic = {0.18, 0.16, 0.16},
+  mars_canyon = {0.34, 0.17, 0.12},
+  mars_polar = {0.82, 0.88, 0.90}
+}
+
+local function worldgenPreviewVertices(centerX, centerZ, extent, resolution)
+  local vertices = {}
+  local side = resolution + 1
+  local step = extent / resolution
+  local originX = math.floor((centerX - extent * 0.5) / step) * step
+  local originZ = math.floor((centerZ - extent * 0.5) / step) * step
+  local seaLevel = terrain.SEA_LEVEL
+  local heights = {}
+  local colors = {}
+
+  for z = 0, resolution do
+    for x = 0, resolution do
+      local worldX = originX + x * step
+      local worldZ = originZ + z * step
+      local rawHeight = terrain.heightAt(worldX, worldZ, TERRAIN_MAX_H)
+      local index = z * side + x + 1
+      local underwater = terrain.activeProfile.hasSurfaceWater and rawHeight <= seaLevel
+      heights[index] = underwater and (seaLevel - 0.35) or rawHeight
+      local sourceBiome = terrain.biomeAt(worldX, worldZ)
+      local environment = terrain.environmentAt(worldX, worldZ, rawHeight, sourceBiome)
+      if underwater and environment.freezeWater then
+        colors[index] = {0.64, 0.78, 0.84}
+      elseif underwater then
+        colors[index] = PREVIEW_BIOME_COLORS.ocean
+      elseif environment.hasSnow then
+        colors[index] = {0.88, 0.91, 0.92}
+      else
+        colors[index] = PREVIEW_BIOME_COLORS[environment.biome] or PREVIEW_BIOME_COLORS.plains
+      end
+    end
+  end
+
+  local function sampleHeight(x, z)
+    x = math.max(0, math.min(resolution, x))
+    z = math.max(0, math.min(resolution, z))
+    return heights[z * side + x + 1]
+  end
+
+  local function appendVertex(x, z)
+    local index = z * side + x + 1
+    local normal = math3d.normalize({
+      sampleHeight(x - 1, z) - sampleHeight(x + 1, z),
+      step * 2.0,
+      sampleHeight(x, z - 1) - sampleHeight(x, z + 1)
+    })
+    local color = colors[index]
+    vertices[#vertices + 1] = originX + x * step
+    vertices[#vertices + 1] = heights[index]
+    vertices[#vertices + 1] = originZ + z * step
+    vertices[#vertices + 1] = normal[1]
+    vertices[#vertices + 1] = normal[2]
+    vertices[#vertices + 1] = normal[3]
+    vertices[#vertices + 1] = color[1]
+    vertices[#vertices + 1] = color[2]
+    vertices[#vertices + 1] = color[3]
+    vertices[#vertices + 1] = 0.0
+    vertices[#vertices + 1] = 0.0
+  end
+
+  for z = 0, resolution - 1 do
+    for x = 0, resolution - 1 do
+      appendVertex(x, z)
+      appendVertex(x, z + 1)
+      appendVertex(x + 1, z)
+      appendVertex(x + 1, z)
+      appendVertex(x, z + 1)
+      appendVertex(x + 1, z + 1)
+    end
+  end
+
+  return vertices
+end
+
+local function rebuildWorldgenPreview(previousMesh, stagedSettings, liveSeed, centerX, centerZ)
+  local liveSettings = {}
+  for key, value in pairs(graphics.terrainGeneration) do
+    liveSettings[key] = value
+  end
+
+  for key, value in pairs(stagedSettings) do
+    graphics.terrainGeneration[key] = value
+  end
+  terrain.refreshGenerationSettings()
+  terrain.setSeed(stagedSettings.seed)
+
+  local ok, result = pcall(worldgenPreviewVertices, centerX, centerZ, 3072.0, 64)
+
+  for key in pairs(graphics.terrainGeneration) do
+    graphics.terrainGeneration[key] = nil
+  end
+  for key, value in pairs(liveSettings) do
+    graphics.terrainGeneration[key] = value
+  end
+  terrain.refreshGenerationSettings()
+  terrain.setSeed(liveSeed)
+
+  if not ok then
+    error(result)
+  end
+
+  rendering.release(previousMesh)
+  return uploadMesh(result)
+end
+
+local function updateWorldgenPreviewCamera(state, cameraObject, window, dt, allowEdgePan)
+  local speed = state.distance * 0.70
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_SHIFT) == glfw.GLFW_PRESS then
+    speed = speed * 3.0
+  end
+  local move = speed * math.min(dt, 0.05)
+  local yaw = math.rad(state.yaw)
+  local forwardX, forwardZ = math.cos(yaw), math.sin(yaw)
+  local rightX, rightZ = -forwardZ, forwardX
+
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_W) == glfw.GLFW_PRESS then
+    state.centerX = state.centerX + forwardX * move
+    state.centerZ = state.centerZ + forwardZ * move
+  end
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_S) == glfw.GLFW_PRESS then
+    state.centerX = state.centerX - forwardX * move
+    state.centerZ = state.centerZ - forwardZ * move
+  end
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_D) == glfw.GLFW_PRESS then
+    state.centerX = state.centerX + rightX * move
+    state.centerZ = state.centerZ + rightZ * move
+  end
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_A) == glfw.GLFW_PRESS then
+    state.centerX = state.centerX - rightX * move
+    state.centerZ = state.centerZ - rightZ * move
+  end
+  if allowEdgePan then
+    local cursorX, cursorY = ffi.new("double[1]"), ffi.new("double[1]")
+    local clientWidth, clientHeight = ffi.new("int[1]"), ffi.new("int[1]")
+    glfw.glfwGetCursorPos(window, cursorX, cursorY)
+    glfw.glfwGetWindowSize(window, clientWidth, clientHeight)
+    local edge = 12.0
+    if cursorX[0] <= edge then
+      state.centerX = state.centerX - rightX * move
+      state.centerZ = state.centerZ - rightZ * move
+    elseif cursorX[0] >= clientWidth[0] - edge then
+      state.centerX = state.centerX + rightX * move
+      state.centerZ = state.centerZ + rightZ * move
+    end
+    if cursorY[0] <= edge then
+      state.centerX = state.centerX + forwardX * move
+      state.centerZ = state.centerZ + forwardZ * move
+    elseif cursorY[0] >= clientHeight[0] - edge then
+      state.centerX = state.centerX - forwardX * move
+      state.centerZ = state.centerZ - forwardZ * move
+    end
+  end
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_Q) == glfw.GLFW_PRESS then state.yaw = state.yaw - 55.0 * dt end
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_E) == glfw.GLFW_PRESS then state.yaw = state.yaw + 55.0 * dt end
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_R) == glfw.GLFW_PRESS then state.distance = state.distance * math.exp(-1.5 * dt) end
+  if glfw.glfwGetKey(window, glfw.GLFW_KEY_F) == glfw.GLFW_PRESS then state.distance = state.distance * math.exp(1.5 * dt) end
+  state.distance = math.max(180.0, math.min(2600.0, state.distance))
+
+  yaw = math.rad(state.yaw)
+  local pitch = math.rad(54.0)
+  local horizontalDistance = math.cos(pitch) * state.distance
+  cameraObject.position[1] = state.centerX - math.cos(yaw) * horizontalDistance
+  cameraObject.position[2] = terrain.SEA_LEVEL + 18.0 + math.sin(pitch) * state.distance
+  cameraObject.position[3] = state.centerZ - math.sin(yaw) * horizontalDistance
+  cameraObject.yaw = state.yaw
+  cameraObject.pitch = -54.0
 end
 
 local function uploadTerrainMesh(vertices)
@@ -496,9 +1079,125 @@ local function terrainChunkBounds(entry)
   }
 end
 
+local function saturate(value)
+  return math.max(0.0, math.min(1.0, value))
+end
+
+local function classifyWaterWaves(x, z)
+  local macro = terrain.macroAt(x, z)
+  -- `land` is a continuous continent field, so this naturally eases from full
+  -- ocean fetch through bays and coastal shallows. River/lake masks retain a
+  -- smaller but non-zero animated response inland.
+  local oceanFetch = saturate((0.34 - macro.land) / 0.24)
+  local inlandDynamic = saturate(math.max(macro.river * 0.85, macro.lake * 0.65) * 1.4)
+  local inlandExposure = 0.14 + inlandDynamic * 0.25
+  local inlandShore = 0.42 + inlandDynamic * 0.30
+  local exposure = inlandExposure + (1.0 - inlandExposure) * oceanFetch
+  local shore = inlandShore + (1.0 - inlandShore) * oceanFetch
+  return exposure, shore
+end
+
+local function createWaterWaveSampler(world)
+  local samples = {}
+  local depthSamples = {}
+  local surfaceY = math.floor(WATER_LEVEL)
+
+  local function isWater(id)
+    return id == blocks.water or (blocks.water_still and id == blocks.water_still)
+  end
+
+  local function depthFactorAt(cellX, cellZ)
+    local key = cellX .. "," .. cellZ
+    local cached = depthSamples[key]
+    if cached ~= nil then return cached end
+
+    local depth = 4
+    if world then
+      local surfaceBlock = world:blockAt(cellX, surfaceY, cellZ)
+      if surfaceBlock == nil then
+        -- A vertex on a loaded chunk border can consult an as-yet unloaded
+        -- neighbour. Use the deterministic terrain surface until that chunk
+        -- arrives so the edge is not incorrectly treated as a cliff.
+        depth = math.max(0, surfaceY - terrain.heightAt(cellX, cellZ, TERRAIN_MAX_H, true))
+      elseif not isWater(surfaceBlock) then
+        depth = 0
+      else
+        depth = 0
+        for y = surfaceY, math.max(0, surfaceY - 5), -1 do
+          if not isWater(world:blockAt(cellX, y, cellZ)) then break end
+          depth = depth + 1
+        end
+      end
+    end
+
+    -- One-block-deep water must remain nearly flat or displaced triangles cut
+    -- through the voxel seabed. Full geometric waves return smoothly by four
+    -- blocks of depth; normal-map ripples remain visible in the shallows.
+    local t = saturate((depth - 0.75) / 2.75)
+    cached = t * t * (3.0 - 2.0 * t)
+    depthSamples[key] = cached
+    return cached
+  end
+
+  local function vertexDepthFactor(x, z)
+    if not world then return 1.0 end
+    -- A grid vertex belongs to four water cells. Averaging those cells produces
+    -- a continuous shoreline falloff and identical values on shared chunk edges.
+    return (
+      depthFactorAt(x - 1, z - 1) + depthFactorAt(x, z - 1) +
+      depthFactorAt(x - 1, z) + depthFactorAt(x, z)
+    ) * 0.25
+  end
+
+  local function sample(x, z)
+    local key = x .. "," .. z
+    local value = samples[key]
+    if not value then
+      local exposure, shore = classifyWaterWaves(x, z)
+      local depthFactor = vertexDepthFactor(x, z)
+      -- Macro shoreline classification controls the character of the water;
+      -- actual bathymetry adds a stricter geometric safety limit up close.
+      shore = math.min(shore, 0.025 + depthFactor * 0.975)
+      value = {exposure, shore}
+      samples[key] = value
+    end
+    return value[1], value[2]
+  end
+
+  -- Classification is evaluated only on the integer grid (mostly already in
+  -- terrain.macroAt's generation cache), then bilinearly interpolated onto the
+  -- half-block water tessellation. Shared chunk borders therefore receive the
+  -- exact same values and cannot split into view-dependent wedges.
+  return function(x, z)
+    local x0 = math.floor(x)
+    local z0 = math.floor(z)
+    local tx = x - x0
+    local tz = z - z0
+    local e00, s00 = sample(x0, z0)
+    local e10, s10 = sample(x0 + 1, z0)
+    local e01, s01 = sample(x0, z0 + 1)
+    local e11, s11 = sample(x0 + 1, z0 + 1)
+    local e0 = e00 + (e10 - e00) * tx
+    local e1 = e01 + (e11 - e01) * tx
+    local s0 = s00 + (s10 - s00) * tx
+    local s1 = s01 + (s11 - s01) * tx
+    return e0 + (e1 - e0) * tz, s0 + (s1 - s0) * tz
+  end
+end
+
 local function uploadTerrainChunkMesh(entry, vertices, options)
   options = options or {}
   local mesh = uploadTerrainMesh(vertices)
+  if options.dielectricVertices and #options.dielectricVertices > 0 then
+    mesh.dielectricMesh = uploadTerrainMesh(options.dielectricVertices)
+  end
+  local waterVertices = effects.waterChunkVertices(
+    entry.chunk, entry.offsetX, entry.offsetZ, WATER_LEVEL, blocks.water, blocks.water_still,
+    WATER_NEAR_TESSELLATION, createWaterWaveSampler(options.world)
+  )
+  if #waterVertices > 0 then
+    mesh.waterMesh = uploadMesh(waterVertices)
+  end
   mesh.chunkX = entry.chunkX
   mesh.chunkZ = entry.chunkZ
   mesh.bounds = terrainChunkBounds(entry)
@@ -512,16 +1211,49 @@ local function uploadTerrainChunkMesh(entry, vertices, options)
   return mesh
 end
 
+local function releaseTerrainMesh(mesh)
+  if not mesh then return end
+  rendering.release(mesh.dielectricMesh)
+  rendering.release(mesh.waterMesh)
+  rendering.release(mesh)
+end
+
 local function replaceTerrainMesh(terrainMeshes, key, mesh)
-  rendering.release(terrainMeshes[key])
+  releaseTerrainMesh(terrainMeshes[key])
   terrainMeshes[key] = mesh
 end
 
 local function releaseTerrainMeshes(terrainMeshes)
   for key, mesh in pairs(terrainMeshes) do
-    rendering.release(mesh)
+    releaseTerrainMesh(mesh)
     terrainMeshes[key] = nil
   end
+end
+
+local function createDistantTerrain()
+  return DistantTerrain.new({
+    radius = DISTANT_CHUNK_RADIUS,
+    generationSteps = BUDGET.distantGenerationSteps,
+    buildBudget = BUDGET.distantBuild,
+    frameBudgetMs = BUDGET.distantFrameMs,
+    ringBudget = BUDGET.distantRing,
+    maxHeight = TERRAIN_MAX_H,
+    waterId = blocks.water,
+    stillWaterId = blocks.water_still,
+    now = glfw.glfwGetTime,
+    waveDataAt = createWaterWaveSampler(),
+    upload = function(record, vertices, waterVertices, bounds, step)
+      local mesh = uploadTerrainMesh(vertices)
+      if #waterVertices > 0 then mesh.waterMesh = uploadMesh(waterVertices) end
+      mesh.chunkX = record.chunkX
+      mesh.chunkZ = record.chunkZ
+      mesh.bounds = bounds
+      mesh.distantLod = true
+      mesh.lodStep = step
+      return mesh
+    end,
+    release = releaseTerrainMesh
+  })
 end
 
 local function uploadSkyMesh()
@@ -605,7 +1337,7 @@ local function createCloudMesh(path)
     error("Failed to load cloud texture: " .. path)
   end
 
-  local cells = CLOUD_MESH_CELLS
+  local cells = CLOUD.meshCells
   local filled = {}
   local function sampleValue(x, z)
     local sx = x % img.w
@@ -645,38 +1377,94 @@ local function createCloudMesh(path)
   end
 
   local vertices = {}
-  local half = cells * CLOUD_CELL_SIZE * 0.5
+  local half = cells * CLOUD.cellSize * 0.5
   for x = 0, cells - 1 do
     for z = 0, cells - 1 do
       if filled[x][z] then
-        local x0 = x * CLOUD_CELL_SIZE - half
-        local z0 = z * CLOUD_CELL_SIZE - half
-        local x1 = x0 + CLOUD_CELL_SIZE
-        local z1 = z0 + CLOUD_CELL_SIZE
+        local x0 = x * CLOUD.cellSize - half
+        local z0 = z * CLOUD.cellSize - half
+        local x1 = x0 + CLOUD.cellSize
+        local z1 = z0 + CLOUD.cellSize
         local variation = 0.96 + ((x * 37 + z * 17) % 9) * 0.005
-        appendCloudFace(vertices, x0, CLOUD_BOTTOM, z0, x1, CLOUD_TOP, z1, 0, 1, 0, {variation, variation, variation})
-        appendCloudFace(vertices, x0, CLOUD_BOTTOM, z0, x1, CLOUD_TOP, z1, 0, -1, 0, {0.72, 0.76, 0.82})
-        if not isFilled(x + 1, z) then appendCloudFace(vertices, x0, CLOUD_BOTTOM, z0, x1, CLOUD_TOP, z1, 1, 0, 0, {0.84, 0.87, 0.92}) end
-        if not isFilled(x - 1, z) then appendCloudFace(vertices, x0, CLOUD_BOTTOM, z0, x1, CLOUD_TOP, z1, -1, 0, 0, {0.84, 0.87, 0.92}) end
-        if not isFilled(x, z + 1) then appendCloudFace(vertices, x0, CLOUD_BOTTOM, z0, x1, CLOUD_TOP, z1, 0, 0, 1, {0.84, 0.87, 0.92}) end
-        if not isFilled(x, z - 1) then appendCloudFace(vertices, x0, CLOUD_BOTTOM, z0, x1, CLOUD_TOP, z1, 0, 0, -1, {0.84, 0.87, 0.92}) end
+        appendCloudFace(vertices, x0, CLOUD.bottom, z0, x1, CLOUD.top, z1, 0, 1, 0, {variation, variation, variation})
+        appendCloudFace(vertices, x0, CLOUD.bottom, z0, x1, CLOUD.top, z1, 0, -1, 0, {0.72, 0.76, 0.82})
+        if not isFilled(x + 1, z) then appendCloudFace(vertices, x0, CLOUD.bottom, z0, x1, CLOUD.top, z1, 1, 0, 0, {0.84, 0.87, 0.92}) end
+        if not isFilled(x - 1, z) then appendCloudFace(vertices, x0, CLOUD.bottom, z0, x1, CLOUD.top, z1, -1, 0, 0, {0.84, 0.87, 0.92}) end
+        if not isFilled(x, z + 1) then appendCloudFace(vertices, x0, CLOUD.bottom, z0, x1, CLOUD.top, z1, 0, 0, 1, {0.84, 0.87, 0.92}) end
+        if not isFilled(x, z - 1) then appendCloudFace(vertices, x0, CLOUD.bottom, z0, x1, CLOUD.top, z1, 0, 0, -1, {0.84, 0.87, 0.92}) end
       end
     end
   end
 
-  return uploadMesh(vertices)
+  -- The same cell mask the sheet was built from, as a texture the terrain
+  -- shader can sample along the sun ray. Building it here rather than from the
+  -- source PNG is the point: the patches of shade on the ground are then the
+  -- clouds actually overhead, not an approximation of them.
+  --
+  -- Softened by one cell either way, no more. A cloud shadow's real penumbra is
+  -- a fraction of a block -- the sun is only half a degree wide -- so the only
+  -- softness wanted here is enough to stop the twelve-unit cells reading as
+  -- squares. Bilinear filtering on the sampler supplies most of it; this keeps
+  -- the shapes recognisable as the clouds overhead rather than smearing them
+  -- into an even grey.
+  local coverage = ffi.new("unsigned char[?]", cells * cells)
+  for x = 0, cells - 1 do
+    for z = 0, cells - 1 do
+      local total = 0.0
+      for dx = -1, 1 do
+        for dz = -1, 1 do
+          -- Wrapped, because the sheet wraps: a shadow must not seam where the
+          -- cloud above it does not.
+          if filled[(x + dx) % cells][(z + dz) % cells] then total = total + 1.0 end
+        end
+      end
+      coverage[z * cells + x] = math.floor(total / 9.0 * 255.0 + 0.5)
+    end
+  end
+
+  local shadowTexture = ffi.new("GLuint[1]")
+  gl.glGenTextures(1, shadowTexture)
+  gl.glBindTexture(GL.TEXTURE_2D, shadowTexture[0])
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.REPEAT)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.REPEAT)
+  gl.glTexImage2D(GL.TEXTURE_2D, 0, CLOUD_SHADOW_INTERNAL_FORMAT, cells, cells, 0,
+    GL.RED, GL.UNSIGNED_BYTE, coverage)
+  gl.glBindTexture(GL.TEXTURE_2D, 0)
+
+  return uploadMesh(vertices), shadowTexture[0]
+end
+
+-- Where the cloud sheet sits this frame. drawClouds and the terrain pass both
+-- need it, and they have to agree exactly or the shadows drift off the clouds.
+local function cloudSheetOffset(playerCamera, time)
+  local drift = time * 0.55
+  local span = CLOUD.meshCells * CLOUD.cellSize
+  local offsetX = math.floor((playerCamera.position[1] + drift) / span + 0.5) * span
+  local offsetZ = math.floor((playerCamera.position[3] + drift * 0.12) / span + 0.5) * span
+  return offsetX - drift, offsetZ - drift * 0.12, span
 end
 
 local function createTextureAtlas()
   local atlas = texture.createAtlas()
   blocks.initTextures(atlas)
+  require("items").initTextures(atlas)
 
   local atlasTex = ffi.new("GLuint[1]")
   gl.glGenTextures(1, atlasTex)
-  gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
-  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-  gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlas.w, atlas.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas.pixels)
+  gl.glBindTexture(GL.TEXTURE_2D, atlasTex[0])
+  local maxMipLevel = atlas:getMaxMipLevel()
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER,
+    maxMipLevel > 0 and GL.NEAREST_MIPMAP_LINEAR or GL.NEAREST)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAX_LEVEL, maxMipLevel)
+  gl.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, atlas.w, atlas.h, 0, GL.RGBA, GL.UNSIGNED_BYTE, atlas.pixels)
+  if maxMipLevel > 0 then
+    gl.glGenerateMipmap(GL.TEXTURE_2D)
+  end
 
   return atlasTex
 end
@@ -689,31 +1477,56 @@ local function createImageTexture(path, nearest, repeatWrap)
 
   local tex = ffi.new("GLuint[1]")
   gl.glGenTextures(1, tex)
-  gl.glBindTexture(GL_TEXTURE_2D, tex[0])
-  local filter = nearest and GL_NEAREST or GL_LINEAR
-  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter)
-  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter)
-  local wrap = repeatWrap and GL_REPEAT or GL_CLAMP_TO_EDGE
-  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap)
-  gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap)
-  gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.w, img.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.data)
+  gl.glBindTexture(GL.TEXTURE_2D, tex[0])
+  local filter = nearest and GL.NEAREST or GL.LINEAR
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, filter)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, filter)
+  local wrap = repeatWrap and GL.REPEAT or GL.CLAMP_TO_EDGE
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, wrap)
+  gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, wrap)
+  gl.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, img.w, img.h, 0, GL.RGBA, GL.UNSIGNED_BYTE, img.data)
 
   return tex
 end
 
-local function createTerrainMesh(entry, world)
-  local provisionalLight = not world:lightingReady()
-  return uploadTerrainChunkMesh(entry, voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ, {
-    skyLightAt = function(x, y, z)
-      local level = world:skyLightAt(x, y, z)
-      if provisionalLight and level <= 0 and y >= 0 then
+-- Samplers for meshing one chunk. Both are bound to the 3x3 chunk neighbourhood
+-- so the mesher can cull boundary faces against real neighbours and light their
+-- corners correctly. Provisional light is only used before the world has
+-- finished lighting; it forces dark cells bright so a chunk can be shown early.
+local function meshOptions(world, entry, provisionalLight, yieldStep)
+  local light = world:skyLightSampler(entry.chunkX, entry.chunkZ)
+  local blockLight = world:blockLightSampler(entry.chunkX, entry.chunkZ)
+
+  if provisionalLight then
+    local base = light
+    light = function(x, y, z)
+      local level = base(x, y, z)
+      if level <= 0 and y >= 0 then
         return 15
       end
       return level
     end
-  }), {
+  end
+
+  return {
+    skyLightAt = light,
+    blockLightAt = blockLight,
+    blockAt = world:blockSampler(entry.chunkX, entry.chunkZ),
+    yieldStep = yieldStep
+  }
+end
+
+local function createTerrainMesh(entry, world)
+  local provisionalLight = not world:lightingReady()
+  local vertices, dielectricVertices = voxel.meshChunk(
+    entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ,
+    meshOptions(world, entry, provisionalLight)
+  )
+  return uploadTerrainChunkMesh(entry, vertices, {
+    dielectricVertices = dielectricVertices,
     provisionalLight = provisionalLight,
-    lightRevision = world.lightRevision
+    lightRevision = world.lightRevision,
+    world = world
   })
 end
 
@@ -742,18 +1555,10 @@ local function ensureTerrainMeshThread(world, item)
   end
   local provisionalLight = item.provisionalLight
   item.meshThread = coroutine.create(function()
-    item.vertices = voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ, {
-      skyLightAt = function(x, y, z)
-        local level = world:skyLightAt(x, y, z)
-        if provisionalLight and level <= 0 and y >= 0 then
-          return 15
-        end
-        return level
-      end,
-      yieldStep = function()
+    item.vertices, item.dielectricVertices = voxel.meshChunk(entry.chunk, world.maxHeight, entry.offsetX, entry.offsetZ,
+      meshOptions(world, entry, provisionalLight, function()
         coroutine.yield(false)
-      end
-    })
+      end))
     return true
   end)
 end
@@ -777,33 +1582,66 @@ local function randomWorldSeed()
 end
 
 local function createWorldLoadingJob(config)
+  config.worldId = worldProfiles.id(config.worldId)
+  local worldProfile = worldProfiles.get(config.worldId)
   local seed = tonumber(config.seed) or randomWorldSeed()
-  local spawnX = config.spawnX or DEFAULT_SPAWN_X
-  local spawnZ = config.spawnZ or DEFAULT_SPAWN_Z
-  local plan = spawnLoading.createPlan({
-    centerChunkX = World.chunkCoord(spawnX),
-    centerChunkZ = World.chunkCoord(spawnZ),
-    requiredRadius = math.min(CHUNK_RENDER_RADIUS, LOADING_REQUIRED_RADIUS),
-    haloRadius = math.min(CHUNK_RENDER_RADIUS, LOADING_HALO_RADIUS)
-  })
-  local save = saves.createWorld({
+  local selectedRenderRadius = renderDistance.clamp(config.renderDistance, DISTANT_CHUNK_RADIUS)
+  local chunkRenderRadius = renderDistance.fullDetailRadius(selectedRenderRadius, CHUNK_RENDER_RADIUS)
+  local save = config.existingWorld or saves.createWorld({
     worldName = config.worldName,
     gameMode = config.gameMode,
     generatorType = config.generatorType,
-    seed = seed
+    worldId = config.worldId,
+    seed = seed,
+    generateStructures = config.generateStructures,
+    allowCheats = config.allowCheats,
+    bonusChest = config.bonusChest
   })
-
+  local savedPlayer = config.existingWorld and saves.loadPlayer(save) or nil
+  terrain.setWorldProfile(config.worldId)
+  terrain.setSeed(seed)
+  local preferredX = config.spawnX or DEFAULT_SPAWN_X
+  local preferredZ = config.spawnZ or DEFAULT_SPAWN_Z
+  local savedPosition = savedPlayer and savedPlayer.camera and savedPlayer.camera.position
+  local hasSavedPosition = type(savedPosition) == "table" and
+    tonumber(savedPosition[1]) ~= nil and tonumber(savedPosition[3]) ~= nil
+  if hasSavedPosition then
+    preferredX = tonumber(savedPosition[1])
+    preferredZ = tonumber(savedPosition[3])
+  end
+  local spawnX, spawnZ, spawnColumn
+  if hasSavedPosition then
+    spawnX, spawnZ = preferredX, preferredZ
+  elseif config.generatorType == "superflat" or config.generatorType == "showcase" then
+    spawnX, spawnZ = preferredX, preferredZ
+  else
+    spawnX, spawnZ, spawnColumn = terrain.findSafeSpawn(preferredX, preferredZ, TERRAIN_MAX_H)
+  end
+  if spawnColumn then
+    print(string.format("Spawn: %s at %.1f, %.1f (ground %d)",
+      tostring(spawnColumn.biome), spawnX, spawnZ, spawnColumn.height))
+  end
+  local plan = spawnLoading.createPlan({
+    centerChunkX = World.chunkCoord(spawnX),
+    centerChunkZ = World.chunkCoord(spawnZ),
+    requiredRadius = math.min(chunkRenderRadius, BUDGET.loadingRequiredRadius),
+    haloRadius = math.min(chunkRenderRadius, BUDGET.loadingHaloRadius)
+  })
   local world = World.new({
-    chunkRadius = CHUNK_RENDER_RADIUS,
+    chunkRadius = chunkRenderRadius,
     maxHeight = TERRAIN_MAX_H,
     generatorType = config.generatorType,
+    worldId = config.worldId,
     seed = seed,
+    savePath = save.path,
+    chunkWorkerCount = PERFORMANCE.chunkGenerationWorkers or 0,
     deferInitialChunks = true
   })
 
   return {
     config = config,
     save = save,
+    savedPlayer = savedPlayer,
     world = world,
     terrainMeshes = {},
     plan = plan,
@@ -811,7 +1649,8 @@ local function createWorldLoadingJob(config)
     spawnX = spawnX,
     spawnZ = spawnZ,
     chunkIndex = 1,
-    chunkJob = nil,
+    chunkJobs = {},
+    chunkPollIndex = 1,
     centerEntry = nil,
     spawnMeshItem = nil,
     spawnMeshComplete = false,
@@ -821,46 +1660,60 @@ local function createWorldLoadingJob(config)
     title = "Generating level",
     message = "Building spawn terrain",
     progress = 0.0,
-    seed = seed
+    seed = seed,
+    worldProfile = worldProfile
   }
 end
 
 local function stepWorldLoadingJob(job)
-  local chunkBudget = LOADING_CHUNK_BUDGET
-  local meshBudget = LOADING_MESH_BUDGET
+  local chunkBudget = BUDGET.loadingChunk
+  local meshBudget = BUDGET.loadingMesh
 
-  while chunkBudget > 0 and job.chunkIndex <= #job.coords do
-    if not job.chunkJob then
-      local coord = job.coords[job.chunkIndex]
-      job.chunkJob = job.world:createChunkJob(coord.chunkX, coord.chunkZ)
-    end
+  -- Keep every CPU worker fed. Cached chunks also use this path, but complete
+  -- on their first resume without consuming a worker process.
+  local generationWidth = math.max(1, job.world:chunkWorkerCount())
+  while #job.chunkJobs < generationWidth and job.chunkIndex <= #job.coords do
+    local coord = job.coords[job.chunkIndex]
+    job.chunkJobs[#job.chunkJobs + 1] = job.world:createChunkJob(coord.chunkX, coord.chunkZ)
+    job.chunkIndex = job.chunkIndex + 1
+  end
 
-    local ok, err = coroutine.resume(job.chunkJob.thread)
+  while chunkBudget > 0 and #job.chunkJobs > 0 do
+    if job.chunkPollIndex > #job.chunkJobs then job.chunkPollIndex = 1 end
+    local chunkJob = job.chunkJobs[job.chunkPollIndex]
+    local ok, err = coroutine.resume(chunkJob.thread)
     if not ok then
       error(err)
     end
 
-    if coroutine.status(job.chunkJob.thread) == "dead" then
-      local entry = job.chunkJob.entry
+    if coroutine.status(chunkJob.thread) == "dead" then
+      local entry = chunkJob.entry
       if entry then
         job.generatedChunks = job.generatedChunks + 1
         if spawnLoading.isCenterChunk(job.plan, entry.chunkX, entry.chunkZ) then
           job.centerEntry = entry
         end
       end
-      job.chunkJob = nil
-      job.chunkIndex = job.chunkIndex + 1
+      table.remove(job.chunkJobs, job.chunkPollIndex)
+      if job.chunkIndex <= #job.coords then
+        local coord = job.coords[job.chunkIndex]
+        job.chunkJobs[#job.chunkJobs + 1] = job.world:createChunkJob(coord.chunkX, coord.chunkZ)
+        job.chunkIndex = job.chunkIndex + 1
+      end
+    else
+      job.chunkPollIndex = job.chunkPollIndex + 1
     end
 
     chunkBudget = chunkBudget - 1
   end
 
-  if job.chunkIndex > #job.coords then
+  local terrainComplete = job.generatedChunks >= #job.coords
+  if terrainComplete then
     job.lightingStarted = true
-    job.world:stepLightingJob(LOADING_LIGHTING_STEP_BUDGET)
+    job.world:stepLightingJob(BUDGET.loadingLightingStep)
   end
 
-  if job.chunkIndex > #job.coords and job.world:lightingReady() then
+  if terrainComplete and job.world:lightingReady() then
     job.centerEntry = job.centerEntry or spawnLoading.centerEntry(job.plan, job.world)
     if job.centerEntry and not job.spawnMeshItem then
       job.spawnMeshItem = {
@@ -876,7 +1729,8 @@ local function stepWorldLoadingJob(job)
         local entry = item.entry
         replaceTerrainMesh(job.terrainMeshes, World.chunkKey(entry.chunkX, entry.chunkZ), uploadTerrainChunkMesh(entry, item.vertices, {
           provisionalLight = item.provisionalLight,
-          lightRevision = job.world.lightRevision
+          lightRevision = job.world.lightRevision,
+          world = job.world
         }))
         item.vertices = nil
         item.meshThread = nil
@@ -906,7 +1760,11 @@ local function pendingChunkCoords(item)
   return item.chunkX, item.chunkZ
 end
 
-local function queueChunkRemesh(pendingEntries, entry)
+-- `urgent` marks work the player is waiting to see. The queue is processed from
+-- the front, so without this a remesh caused by placing a block queues behind
+-- every pending chunk generation -- up to BUDGET.chunkBacklog of them, seconds
+-- of work -- and the edit stays invisible until streaming catches up.
+local function queueChunkRemesh(pendingEntries, entry, urgent)
   if not entry then
     return
   end
@@ -915,18 +1773,31 @@ local function queueChunkRemesh(pendingEntries, entry)
   for i = 1, #pendingEntries do
     local chunkX, chunkZ = pendingChunkCoords(pendingEntries[i])
     if chunkX and chunkZ and World.chunkKey(chunkX, chunkZ) == key then
-      pendingEntries[i].entry = pendingEntries[i].entry or entry
-      pendingEntries[i].rebuild = true
+      local item = pendingEntries[i]
+      item.entry = item.entry or entry
+      item.rebuild = true
+      item.urgent = item.urgent or urgent
+      if urgent and i > 1 then
+        table.remove(pendingEntries, i)
+        table.insert(pendingEntries, 1, item)
+      end
       return
     end
   end
 
-  pendingEntries[#pendingEntries + 1] = {
+  local item = {
     chunkX = entry.chunkX,
     chunkZ = entry.chunkZ,
     entry = entry,
-    rebuild = true
+    rebuild = true,
+    urgent = urgent == true
   }
+
+  if urgent then
+    table.insert(pendingEntries, 1, item)
+  else
+    pendingEntries[#pendingEntries + 1] = item
+  end
 end
 
 local function queueProvisionalLightRemeshes(world, terrainMeshes, pendingEntries)
@@ -940,8 +1811,24 @@ local function queueProvisionalLightRemeshes(world, terrainMeshes, pendingEntrie
   end
 end
 
-local function queueTerrainMeshes(world, pendingEntries, x, z, budget, priority)
-  budget = budget or CHUNK_QUEUE_BUDGET
+-- The incremental light update records every chunk it wrote into. Remesh those
+-- and nothing else.
+local function queueLightTouchedRemeshes(world, pendingEntries, urgent)
+  local touched = world:drainLightTouched()
+  local queued = 0
+
+  for _, entry in pairs(touched) do
+    if entry.hasMesh then
+      queueChunkRemesh(pendingEntries, entry, urgent)
+      queued = queued + 1
+    end
+  end
+
+  return queued
+end
+
+local function queueTerrainMeshes(world, pendingEntries, x, z, budget, priority, externallyPending)
+  budget = budget or BUDGET.chunkQueue
   priority = priority or {}
   local centerChunkX = World.chunkCoord(x)
   local centerChunkZ = World.chunkCoord(z)
@@ -962,7 +1849,8 @@ local function queueTerrainMeshes(world, pendingEntries, x, z, budget, priority)
   for chunkX = centerChunkX - world.chunkRadius, centerChunkX + world.chunkRadius do
     for chunkZ = centerChunkZ - world.chunkRadius, centerChunkZ + world.chunkRadius do
       local key = World.chunkKey(chunkX, chunkZ)
-      if not world.chunks[key] and not queued[key] then
+      if not world.chunks[key] and not queued[key] and
+          not (externallyPending and externallyPending(chunkX, chunkZ)) then
         coords[#coords + 1] = {chunkX = chunkX, chunkZ = chunkZ}
       end
     end
@@ -1006,12 +1894,17 @@ local function queueTerrainMeshes(world, pendingEntries, x, z, budget, priority)
   end
 end
 
-local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, budget)
-  budget = budget or TERRAIN_WORK_BUDGET
+local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, budget, frameBudget)
+  budget = budget or BUDGET.terrainWork
+  frameBudget = frameBudget or BUDGET.terrainFrame
   local processed = 0
+  local deadline = glfw.glfwGetTime() + frameBudget
   local lightingWasReady = world:lightingReady()
   local stats = {
     budget = budget,
+    budgetMs = frameBudget * 1000.0,
+    elapsedMs = 0,
+    timeSliced = false,
     processed = 0,
     chunkSteps = 0,
     meshSteps = 0,
@@ -1045,11 +1938,14 @@ local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, bud
 
       if completed then
         replaceTerrainMesh(terrainMeshes, World.chunkKey(item.entry.chunkX, item.entry.chunkZ), uploadTerrainChunkMesh(item.entry, item.vertices, {
+          dielectricVertices = item.dielectricVertices,
           provisionalLight = item.provisionalLight,
-          lightRevision = world.lightRevision
+          lightRevision = world.lightRevision,
+          world = world
         }))
         stats.meshUploads = stats.meshUploads + 1
         item.vertices = nil
+        item.dielectricVertices = nil
         item.meshThread = nil
         item.provisionalLight = nil
         table.remove(pendingEntries, 1)
@@ -1062,17 +1958,30 @@ local function processTerrainMeshQueue(world, terrainMeshes, pendingEntries, bud
       stats.syncUploads = stats.syncUploads + 1
       break
     end
+
+    -- Checked after the body so at least one step always runs; otherwise a
+    -- frame that is already over budget would never make progress.
+    if glfw.glfwGetTime() >= deadline then
+      stats.timeSliced = true
+      break
+    end
   end
+
+  stats.elapsedMs = (glfw.glfwGetTime() - (deadline - frameBudget)) * 1000.0
 
   stats.processed = processed
   if world.lightDirty or world.lightingJob then
-    stats.lightingBudget = LIGHTING_STEP_BUDGET
-    local lightingReady = world:stepLightingJob(LIGHTING_STEP_BUDGET)
+    stats.lightingBudget = BUDGET.lightingStep
+    local lightingReady = world:stepLightingJob(BUDGET.lightingStep)
     if lightingReady and not lightingWasReady then
       queueProvisionalLightRemeshes(world, terrainMeshes, pendingEntries)
     end
     stats.lightingReadyAfter = lightingReady
   end
+
+  -- Newly generated chunks light themselves and can spill into a neighbour that
+  -- is already meshed; pick those up here.
+  stats.lightRemeshes = queueLightTouchedRemeshes(world, pendingEntries)
 
   return stats
 end
@@ -1084,8 +1993,10 @@ local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, z)
 
   for key, entry in pairs(world.chunks) do
     if math.abs(entry.chunkX - centerChunkX) > keepRadius or math.abs(entry.chunkZ - centerChunkZ) > keepRadius then
+      if world.dirtyChunks and world.dirtyChunks[key] then world:saveChunk(entry) end
       world.chunks[key] = nil
-      rendering.release(terrainMeshes[key])
+      if world.lightTouched then world.lightTouched[key] = nil end
+      releaseTerrainMesh(terrainMeshes[key])
       terrainMeshes[key] = nil
     end
   end
@@ -1102,90 +2013,295 @@ local function pruneTerrainMeshes(world, terrainMeshes, pendingEntries, x, z)
   end
 end
 
-local function rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ)
+local function rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ, urgent)
   local key = World.chunkKey(chunkX, chunkZ)
   local entry = world.chunks[key]
   if entry then
-    queueChunkRemesh(pendingEntries, entry)
+    queueChunkRemesh(pendingEntries, entry, urgent)
   end
 end
 
+-- Called when the player places or breaks a block, so everything here is urgent:
+-- the block data (and its collision) has already changed and the mesh is the
+-- only thing left before the edit becomes visible.
 local function rebuildBlockChunkMeshes(world, pendingEntries, x, z)
-  local localX, localZ, chunkX, chunkZ = world:localBlockCoord(x, z)
-  rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ)
+  local _, _, chunkX, chunkZ = world:localBlockCoord(x, z)
+  rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ, true)
 
-  if localX == 0 then
-    rebuildChunkMesh(world, pendingEntries, chunkX - 1, chunkZ)
-  elseif localX == 15 then
-    rebuildChunkMesh(world, pendingEntries, chunkX + 1, chunkZ)
-  end
+  -- Neighbour geometry never depends on this chunk (voxel.lua treats anything
+  -- outside 0..15 as air), so the only reason to touch a neighbour is light,
+  -- and the update tells us exactly which ones changed.
+  queueLightTouchedRemeshes(world, pendingEntries, true)
+end
 
-  if localZ == 0 then
-    rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ - 1)
-  elseif localZ == 15 then
-    rebuildChunkMesh(world, pendingEntries, chunkX, chunkZ + 1)
+local function rebuildChangedBlockMeshes(world,pendingEntries,changed)
+  local chunks={}
+  for _,p in ipairs(changed or {}) do
+    local _,_,cx,cz=world:localBlockCoord(p.x,p.z)
+    chunks[cx..":"..cz]={x=cx,z=cz}
   end
+  for _,chunk in pairs(chunks) do rebuildChunkMesh(world,pendingEntries,chunk.x,chunk.z,true) end
+  queueLightTouchedRemeshes(world,pendingEntries,true)
 end
 
 local function createCharacterMesh()
-  local player = character.createPlayer({8, 6, 8})
-  return uploadMesh(player:createMesh())
+  local player = character.createPlayer({0, 0, 0})
+  return uploadMesh(player:createMesh(), character.VERTEX_STRIDE_FLOATS, true)
 end
 
-local function drawSky(skyShader, skyMesh, locations, moonTexture, sunTexture, cloudTexture, playerCamera, sunDir, sky, time)
-  local forward = playerCamera:getFront()
-  local worldUp = {0.0, 1.0, 0.0}
-  local right = math3d.normalize(math3d.cross(forward, worldUp))
-  local up = math3d.normalize(math3d.cross(right, forward))
+local function characterModel(playerCamera)
+  local front = playerCamera:getHorizontalFront()
+  local feetY = playerCamera.position[2] - (playerCamera.eyeHeight or 1.62)
+  return {
+    -front[3], 0, front[1], 0,
+    0, 1, 0, 0,
+    front[1], 0, front[3], 0,
+    playerCamera.position[1], feetY, playerCamera.position[3], 1
+  }
+end
 
-  gl.glDisable(GL_DEPTH_TEST)
+local function releaseDroppedItemMeshes(meshes)
+  for item, mesh in pairs(meshes) do
+    if mesh then rendering.release(mesh) end
+    meshes[item] = nil
+  end
+end
+
+local function drawDroppedItems(manager, meshes, modelLocation, identityModel)
+  for _, entity in ipairs(manager.items) do
+    local mesh = meshes[entity.item]
+    if mesh == nil then
+      local vertices = DroppedItems.meshVertices(entity.item)
+      mesh = #vertices > 0 and uploadTerrainMesh(vertices) or false
+      meshes[entity.item] = mesh
+    end
+    if mesh then
+      local rotation = entity.rotation or {0.0, 0.0, 0.0}
+      local scale = entity.scale or 1.0
+      local sx, cx = math.sin(rotation[1]), math.cos(rotation[1])
+      local sy, cy = math.sin(rotation[2]), math.cos(rotation[2])
+      local sz, cz = math.sin(rotation[3]), math.cos(rotation[3])
+      local transform = {
+        cz*cy*scale, sz*cy*scale, -sy*scale, 0,
+        (cz*sy*sx-sz*cx)*scale, (sz*sy*sx+cz*cx)*scale, cy*sx*scale, 0,
+        (cz*sy*cx+sz*sx)*scale, (sz*sy*cx-cz*sx)*scale, cy*cx*scale, 0,
+        entity.position[1], entity.position[2], entity.position[3], 1
+      }
+      gl.glUniformMatrix4fv(modelLocation, 1, 0, ffi.new("float[16]", transform))
+      rendering.draw(mesh)
+    end
+  end
+  gl.glUniformMatrix4fv(modelLocation, 1, 0, ffi.new("float[16]", identityModel))
+end
+
+
+local function releaseFallingTreeMesh(meshes,id)
+  local entry=meshes[id]
+  if type(entry)=="table" then
+    if entry.trunk then rendering.release(entry.trunk) end
+    if entry.leaves then rendering.release(entry.leaves) end
+  elseif entry then
+    rendering.release(entry)
+  end
+  meshes[id]=nil
+end
+
+local function releaseFallingTreeMeshes(meshes)
+  for id in pairs(meshes) do releaseFallingTreeMesh(meshes,id) end
+end
+
+local function drawFallingTrees(manager,meshes,modelLocation,identityModel)
+  for _,tree in ipairs(manager.trees) do
+    local entry=meshes[tree.id]
+    if entry==nil then
+      entry={
+        trunk=#tree.vertices>0 and uploadTerrainMesh(tree.vertices) or false,
+        leaves=#tree.leafVertices>0 and uploadTerrainMesh(tree.leafVertices) or false
+      }
+      meshes[tree.id]=entry
+    end
+    local model=manager:model(tree)
+    gl.glUniformMatrix4fv(modelLocation,1,0,ffi.new("float[16]",model))
+    if entry.trunk then rendering.draw(entry.trunk) end
+    if entry.leaves and not tree.leavesDetached then
+      rendering.draw(entry.leaves)
+    end
+  end
+  gl.glUniformMatrix4fv(modelLocation,1,0,ffi.new("float[16]",identityModel))
+end
+
+local function drawSky(skyShader, skyMesh, locations, moonTexture, playerCamera,
+    sunDir, sky, skyState, time, worldProfile)
+  local forward = (playerCamera.getViewFront or playerCamera.getFront)(playerCamera)
+  local cameraUp = playerCamera.getViewUp and playerCamera:getViewUp() or {0.0, 1.0, 0.0}
+  local right = math3d.normalize(math3d.cross(forward, cameraUp))
+  local up = math3d.normalize(math3d.cross(right, forward))
+  local cameraPosition = playerCamera.getViewPosition and playerCamera:getViewPosition() or playerCamera.position
+
+  gl.glDisable(GL.DEPTH_TEST)
   gl.glUseProgram(skyShader)
   gl.glUniform3f(locations.sunDir, sunDir[1], sunDir[2], sunDir[3])
   gl.glUniform3f(locations.time, time, 0.0, 0.0)
   gl.glUniform3f(locations.cameraForward, forward[1], forward[2], forward[3])
   gl.glUniform3f(locations.cameraRight, right[1], right[2], right[3])
   gl.glUniform3f(locations.cameraUp, up[1], up[2], up[3])
-  gl.glUniform3f(locations.cameraPosition, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
+  gl.glUniform3f(locations.cameraPosition, cameraPosition[1], cameraPosition[2], cameraPosition[3])
   gl.glUniform3f(locations.cameraProjection, windowWidth / windowHeight * math.tan(CAMERA_FOV / 2), math.tan(CAMERA_FOV / 2), 0.0)
+  local profileSky = (worldProfile or worldProfiles.get("earth")).sky
+  local profileAtmosphere = (worldProfile or worldProfiles.get("earth")).atmosphere
   gl.glUniform3f(locations.skyTuning, graphics.atmosphere.skyExposure, graphics.atmosphere.cloudDensity, graphics.atmosphere.sunGlare)
+  gl.glUniform3f(locations.skyParams,
+    (SKY.scatterStrength or 1.0) * (profileSky.scatterStrengthScale or 1.0),
+    profileAtmosphere.moonAmount or 0.0,
+    (SKY.sunIntensity or 22.0) * (profileSky.sunIntensityScale or 1.0))
+  gl.glUniform3f(locations.sunDisc,
+    (SKY.sunAngularRadius or 0.012) * (profileSky.sunAngularScale or 1.0),
+    (SKY.sunDiscBrightness or 9.0) * (profileSky.sunDiscScale or 1.0), 0.0)
+  gl.glUniform3f(locations.scatteringPlanet,
+    profileSky.planetRadiusMeters, profileSky.atmosphereHeightMeters, terrain.SEA_LEVEL - 1.0)
+  gl.glUniform3f(locations.scatteringScale,
+    profileSky.rayleighScaleHeightMeters, profileSky.dustScaleHeightMeters, profileSky.dustAnisotropy)
+  gl.glUniform3f(locations.scatteringRayleigh,
+    profileSky.rayleighBeta[1], profileSky.rayleighBeta[2], profileSky.rayleighBeta[3])
+  gl.glUniform3f(locations.scatteringDust,
+    profileSky.dustBeta[1], profileSky.dustBeta[2], profileSky.dustBeta[3])
+  gl.glUniform3f(locations.aureoleColor,
+    profileSky.aureoleColor[1], profileSky.aureoleColor[2], profileSky.aureoleColor[3])
+  gl.glUniform3f(locations.aureoleParams,
+    profileSky.aureoleFocus or 420.0, profileSky.aureoleStrength or 0.16, 0.0)
+  gl.glUniform1f(locations.multipleScatter, profileSky.multipleScatter or 0.0)
+  local moon=skyState and skyState.moons and skyState.moons[1]
+  if moon and moon.direction and (profileAtmosphere.moonAmount or 0)>0 then
+    gl.glUniform3f(locations.moonDirection,
+      moon.direction[1],moon.direction[2],moon.direction[3])
+    gl.glUniform4f(locations.moonParams,
+      moon.angularRadius*(SKY.moonAngularScale or 1.0),
+      SKY.moonBrightness or 2.2,SKY.earthshine or 0.035,0.0)
+  else
+    gl.glUniform3f(locations.moonDirection,0.0,1.0,0.0)
+    gl.glUniform4f(locations.moonParams,0.0,0.0,0.0,0.0)
+  end
+  local siderealTime=skyState and skyState.siderealTime or 0.0
+  local pole=astronomy.catalog.galacticPole
+  local centre=astronomy.catalog.galacticCentre
+  local poleDirection=astronomy.ephemeris.direction(
+    pole.rightAscension,pole.declination,siderealTime)
+  local centreDirection=astronomy.ephemeris.direction(
+    centre.rightAscension,centre.declination,siderealTime)
+  gl.glUniform3f(locations.galacticPole,
+    poleDirection[1],poleDirection[2],poleDirection[3])
+  gl.glUniform3f(locations.galacticCentre,
+    centreDirection[1],centreDirection[2],centreDirection[3])
+  gl.glUniform2f(locations.milkyWay,
+    (SKY.milkyWayBrightness or 0.14)*(profileSky.milkyWayScale or 1.0),
+    SKY.milkyWayHalfWidth or 0.20)
   gl.glUniform3f(locations.fogColor, sky.fogColor[1], sky.fogColor[2], sky.fogColor[3])
-  gl.glActiveTexture(GL_TEXTURE2)
-  gl.glBindTexture(GL_TEXTURE_2D, moonTexture[0])
-  gl.glActiveTexture(GL_TEXTURE4)
-  gl.glBindTexture(GL_TEXTURE_2D, sunTexture[0])
-  gl.glActiveTexture(GL_TEXTURE5)
-  gl.glBindTexture(GL_TEXTURE_2D, cloudTexture[0])
+  gl.glActiveTexture(GL.TEXTURE2)
+  gl.glBindTexture(GL.TEXTURE_2D, moonTexture[0])
   rendering.draw(skyMesh)
-  gl.glActiveTexture(GL_TEXTURE0)
-  gl.glEnable(GL_DEPTH_TEST)
+  gl.glActiveTexture(GL.TEXTURE0)
+  gl.glEnable(GL.DEPTH_TEST)
+end
+
+local function drawNightSky(program,locations,state,playerCamera,skyState,sky,
+    worldProfile,time)
+  local sunDirection=skyState.sunDirection
+  local visibility=1.0-math3d.smoothstep(-0.18,0.08,sunDirection[2])
+  if visibility<=0.001 then return end
+  local forward=(playerCamera.getViewFront or playerCamera.getFront)(playerCamera)
+  local cameraUp=playerCamera.getViewUp and playerCamera:getViewUp() or {0.0,1.0,0.0}
+  local right=math3d.normalize(math3d.cross(forward,cameraUp))
+  local up=math3d.normalize(math3d.cross(right,forward))
+  local projectionY=math.tan(CAMERA_FOV/2)
+  local profileSky=worldProfile.sky
+  local profileAtmosphere=worldProfile.atmosphere
+  local moon=skyState.moons and skyState.moons[1]
+  local moonAbove=moon and moon.direction and
+    math3d.smoothstep(-0.03,0.10,moon.direction[2]) or 0.0
+  local moonBackground=moon and moonAbove*(moon.illuminatedFraction or 0.0) or 0.0
+
+  astronomy.field.setBodies(state,skyState.planets or {})
+  astronomy.field.draw(program,locations,state,{
+    forward=forward,right=right,up=up,
+    projectionX=windowWidth/windowHeight*projectionY,projectionY=projectionY,
+    width=windowWidth,height=windowHeight
+  },{
+    visibility=visibility,
+    rotation=ffi.new("float[9]",astronomy.ephemeris.skyMatrix(
+      worldProfile.id,skyState.siderealTime)),
+    extinction=astronomy.field.extinctionFor(profileSky),
+    referenceBrightness=SKY.starBrightness or 3.2,
+    background=(1.0-visibility)*0.12+moonBackground*(SKY.moonStarSuppression or 0.018),
+    time=time,
+    twinkleAmount=astronomy.field.twinkleFor(profileAtmosphere)*(SKY.starTwinkle or 0.42),
+    twinkleSpeed=SKY.starTwinkleSpeed or 5.0
+  })
 end
 
 local function drawClouds(cloudShader, cloudMesh, locations, playerCamera, view, projection, time, sky)
-  local drift = time * 0.55
-  local span = CLOUD_MESH_CELLS * CLOUD_CELL_SIZE
-  local offsetX = math.floor((playerCamera.position[1] + drift) / span + 0.5) * span
-  local offsetZ = math.floor((playerCamera.position[3] + drift * 0.12) / span + 0.5) * span
+  local offsetX, offsetZ = cloudSheetOffset(playerCamera, time)
 
   gl.glUseProgram(cloudShader)
   gl.glUniformMatrix4fv(locations.projection, 1, 0, ffi.new("float[16]", projection))
   gl.glUniformMatrix4fv(locations.view, 1, 0, ffi.new("float[16]", view))
-  gl.glUniform3f(locations.offset, offsetX - drift, 0.0, offsetZ - drift * 0.12)
-  gl.glUniform1f(locations.alpha, CLOUD_ALPHA)
+  gl.glUniform3f(locations.offset, offsetX, 0.0, offsetZ)
+  gl.glUniform1f(locations.alpha, CLOUD.alpha)
   gl.glUniform3f(locations.tint, sky.cloudColor[1], sky.cloudColor[2], sky.cloudColor[3])
 
-  gl.glEnable(GL_BLEND)
-  gl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-  gl.glDepthMask(0)
-  rendering.draw(cloudMesh)
+  -- Cloud cells are closed boxes wound counter-clockwise outwards, and shared
+  -- side walls are not emitted. Always cull their back faces: from outside this
+  -- leaves one visible surface per pixel, and from inside a cloud it correctly
+  -- hides the box interior instead of exposing a second translucent shell.
+  gl.glEnable(GL.CULL_FACE)
+  gl.glCullFace(GL.BACK)
+
+  gl.glEnable(GL.BLEND)
+  gl.glBlendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA)
+  -- Keep the nearest cloud surface in the scene depth texture. Besides stopping
+  -- translucent shells from stacking, this gives volumetric composition the
+  -- cloud's real distance instead of treating it as infinitely far sky.
   gl.glDepthMask(1)
-  gl.glDisable(GL_BLEND)
+  rendering.draw(cloudMesh)
+  gl.glDisable(GL.BLEND)
+  gl.glDisable(GL.CULL_FACE)
 end
 
-local function visibleTerrainMeshes(terrainMeshes, frustum)
+local function visibleTerrainMeshes(terrainMeshes, frustum, centerChunkX, centerChunkZ, radius)
   local visible = {}
   for _, mesh in pairs(terrainMeshes) do
-    if mesh and (not mesh.bounds or math3d.aabbInFrustum(frustum, mesh.bounds)) then
-      visible[#visible + 1] = mesh
+    if mesh then
+      local inRadius = not centerChunkX or
+        math.max(math.abs(mesh.chunkX - centerChunkX), math.abs(mesh.chunkZ - centerChunkZ)) <= radius
+      if inRadius and (not mesh.bounds or math3d.aabbInFrustum(frustum, mesh.bounds)) then
+        visible[#visible + 1] = mesh
+      end
+    end
+  end
+  return visible
+end
+
+local function appendMeshes(target, source)
+  for i = 1, #source do target[#target + 1] = source[i] end
+  return target
+end
+
+local function visibleDielectricMeshes(visibleTerrain)
+  local visible = {}
+  for i = 1, #visibleTerrain do
+    local dielectricMesh = visibleTerrain[i].dielectricMesh
+    if dielectricMesh and dielectricMesh.count > 0 then
+      visible[#visible + 1] = dielectricMesh
+    end
+  end
+  return visible
+end
+
+local function visibleWaterMeshes(visibleTerrain)
+  local visible = {}
+  for i = 1, #visibleTerrain do
+    local waterMesh = visibleTerrain[i].waterMesh
+    if waterMesh and waterMesh.count > 0 then
+      visible[#visible + 1] = waterMesh
     end
   end
   return visible
@@ -1329,6 +2445,7 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
   local localX = blockX - chunkX * 16
   local localZ = blockZ - chunkZ * 16
   local biomeName = terrain.biomeAt(blockX, blockZ)
+  local generation = terrain.debugFieldsAt(blockX, blockZ, TERRAIN_MAX_H)
   local target = world:raycast(pos, playerCamera:getFront(), playerCamera.reach or 6.0)
   local targetLine = "Looking at: none"
   if target then
@@ -1360,12 +2477,25 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     chunkStats.pendingRemesh
   )
   local frameWorkLine = string.format(
-    "Frame work: %d/%d steps, %d uploads, %d light budget",
+    "Frame work: %.1f/%.1f ms%s, %d/%d steps, %d uploads",
+    queueStats.elapsedMs or 0.0,
+    queueStats.budgetMs or 0.0,
+    queueStats.timeSliced and " (capped)" or "",
     queueStats.processed or 0,
-    queueStats.budget or TERRAIN_WORK_BUDGET,
-    (queueStats.meshUploads or 0) + (queueStats.syncUploads or 0),
-    queueStats.lightingBudget or 0
+    queueStats.budget or BUDGET.terrainWork,
+    (queueStats.meshUploads or 0) + (queueStats.syncUploads or 0)
   )
+  local distant = queueStats.distant or {}
+  local distantLine = string.format(
+    "Distant LOD: square %d, ring %d/%d, %d queued, %d active, %d builds",
+    distant.radius or state.renderDistance or 0,
+    distant.scheduledThrough or 0,
+    distant.radius or state.renderDistance or 0,
+    distant.queued or 0,
+    distant.active or 0,
+    distant.built or 0
+  )
+  local _, visibleHorizon = renderDistance.fogRange(state.renderDistance, FOG_START)
 
   local leftLines = {
     string.format("MineLua 1.0.0 (%s)", runtime),
@@ -1373,6 +2503,7 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     string.format("C: %d/%d chunks, V: %d verts", meshStats.visible, meshStats.uploaded, math.floor(meshStats.visibleVertices + 0.5)),
     queueLine,
     frameWorkLine,
+    distantLine,
     string.format("XYZ: %s / %s / %s", formatNumber(pos[1], 3), formatNumber(feetY, 3), formatNumber(pos[3], 3)),
     string.format("Eye: %s / %s / %s", formatNumber(pos[1], 3), formatNumber(pos[2], 3), formatNumber(pos[3], 3)),
     string.format("Block: %d %d %d", blockX, blockY, blockZ),
@@ -1389,16 +2520,23 @@ local function buildDebugInfo(world, terrainMeshes, visibleMeshes, pendingEntrie
     string.format("Display: %dx%d", windowWidth, windowHeight),
     string.format("Mem: %s", formatNumber(memMb, 1) .. " MB"),
     string.format("World seed: %s", tostring(world.seed or "?")),
+    string.format("World: %s", world.worldProfile and world.worldProfile.name or "Earth"),
     string.format("Generator: %s", tostring(world.generatorType or "default")),
+    string.format("Landform: %s / geology: %s", tostring(generation.landform), tostring(generation.geology)),
+    string.format("Climate: T %s, M %s, rain %s", formatNumber(generation.temperature, 2), formatNumber(generation.moisture, 2), formatNumber(generation.rainfall, 2)),
+    string.format("World fields: continent %s, mountain %s", formatNumber(generation.continentalness, 2), formatNumber(generation.mountainPotential, 2)),
+    string.format("Erosion %s, drainage %s, river %s", formatNumber(generation.erosion, 2), formatNumber(generation.drainage, 2), formatNumber(generation.riverNetwork, 2)),
+    string.format("Hydrology: %s / coast: %s", tostring(generation.waterKind or "dry"), tostring(generation.coastType or "inland")),
     string.format("Server chunks: %d loaded / %d ready / %d collision", chunkStats.loaded, chunkStats.serverReady, chunkStats.collision),
     string.format("Lighting: %d lit / dirty %s / job %s / rev %d", chunkStats.light, tostring(world.lightDirty == true), tostring(world.lightingJob ~= nil), world.lightRevision or 0),
     string.format("Render chunks: %d mesh / %d gpu / %d ready", chunkStats.mesh, chunkStats.gpu, chunkStats.renderReady),
     string.format("Provisional meshes: %d", meshStats.provisional),
     string.format("Terrain GPU: %s, %d verts", formatBytes(meshStats.bytes), math.floor(meshStats.totalVertices + 0.5)),
-    string.format("Budget: terrain %d, queue %d, backlog %d", TERRAIN_WORK_BUDGET, CHUNK_QUEUE_BUDGET, CHUNK_QUEUE_BACKLOG),
-    string.format("Spawn load: %dx%d required, %dx%d halo", LOADING_REQUIRED_RADIUS * 2 + 1, LOADING_REQUIRED_RADIUS * 2 + 1, LOADING_HALO_RADIUS * 2 + 1, LOADING_HALO_RADIUS * 2 + 1),
-    string.format("Lighting budget: stream %d, load %d", LIGHTING_STEP_BUDGET, LOADING_LIGHTING_STEP_BUDGET),
-    string.format("Render radius: %d chunks, far %.0f", CHUNK_RENDER_RADIUS, CAMERA_FAR),
+    string.format("Budget: terrain %d, queue %d, backlog %d", BUDGET.terrainWork, BUDGET.chunkQueue, BUDGET.chunkBacklog),
+    string.format("Spawn load: %dx%d required, %dx%d halo", BUDGET.loadingRequiredRadius * 2 + 1, BUDGET.loadingRequiredRadius * 2 + 1, BUDGET.loadingHaloRadius * 2 + 1, BUDGET.loadingHaloRadius * 2 + 1),
+    string.format("Lighting budget: stream %d, load %d", BUDGET.lightingStep, BUDGET.loadingLightingStep),
+    string.format("Render radius: %d full / %d LOD, visible horizon %.0f m",
+      world.chunkRadius, state.renderDistance, visibleHorizon),
     string.format("Velocity: %s / %s / %s", formatNumber(playerCamera.velocity[1] or 0.0, 2), formatNumber(playerCamera.velocity[2] or 0.0, 2), formatNumber(playerCamera.velocity[3] or 0.0, 2)),
     string.format("Speed: %s m/s", formatNumber(speed, 2)),
     string.format("Mode: %s, flying %s, grounded %s", tostring(state.worldGameMode or "?"), tostring(playerCamera.flying == true), tostring(playerCamera.grounded == true)),
@@ -1441,15 +2579,32 @@ local function refreshDrawableSize(window, state)
 end
 
 local function createDisplayState()
-  return {
+  local state = {
     fullscreen = false,
     f11WasDown = false,
+    f1WasDown = false,
+    f2WasDown = false,
     f3WasDown = false,
+    hideHud = false,
+    screenshotRequested = false,
+    pickWasDown = false,
+    f4WasDown = false,
+    f5WasDown = false,
     escapeWasDown = false,
     breakWasDown = false,
+    breakTarget = nil,
+    breakProgress = 0.0,
+    handSwing = 0.0,
+    handSwinging = false,
+    handSwingStyle = "quick",
+    -- Smoothed turn rates and a walk phase for the held model's sway.
+    heldMotion = {lookX = 0.0, lookY = 0.0, bob = 0.0, walkPhase = 0.0, yaw = nil, pitch = nil},
     placeWasDown = false,
+    dropWasDown = false,
     menuClickWasDown = false,
+    activeMenuSlider = nil,
     debugScreen = false,
+    devMenuOpen = false,
     debugInfo = nil,
     debugSampleTimer = 0.0,
     debugFrames = 0,
@@ -1458,26 +2613,75 @@ local function createDisplayState()
     debugFrameMs = 0.0,
     debugLastFrameMs = 0.0,
     lastQueueStats = nil,
-    screen = "main",
+    -- game.autoStartWorld skips the menus and drops straight into a generated
+    -- world. Only a scripted smoke run sets it, so a launch from the command
+    -- line exercises worldgen, meshing and the HUD instead of the title screen.
+    screen = game.autoStartWorld and "loading" or "main",
     cursorMode = nil,
     menuMouseX = -1,
     menuMouseY = -1,
     worldGameMode = "survival",
     worldGeneratorType = "default",
+    worldId = "earth",
+    worldNameText = "New World",
+    worldNamePristine = true,
+    worldSeedText = "",
+    generateStructures = true,
+    allowCheats = false,
+    bonusChest = false,
+    renderDistance = renderDistance.clamp(DISTANT_CHUNK_RADIUS, 24),
+    soundVolume = 100,
+    sensitivity = 100,
+    invertMouse = false,
+    fovDegrees = graphics.window.fovDegrees or 70,
+    viewBobbing = true,
+    motionBlur = "Off",
+    vsync = VSYNC_ENABLED,
+    clouds = true,
+    bloom = POST.bloom ~= false,
+    particles = "All",
+    controlBindings = {},
+    savedWorlds = {},
+    selectedWorldIndex = nil,
+    pendingDeleteWorld = nil,
+    deleteWorldRequested = nil,
+    worldListScroll = 0,
+    worldListVersion = 0,
+    createTextKeyWasDown = {},
+    textInputCharacters = {},
+    activeTextField = nil,
+    textCaret = 0,
     hasWorld = false,
     menuParentScreen = nil,
     currentWorldSave = nil,
-    pendingNewWorldConfig = nil,
+    pendingNewWorldConfig = game.autoStartWorld and {
+      gameMode = "creative",
+      generatorType = "default",
+      seed = tonumber(game.autoStartWorld) or 1,
+      worldName = "Smoke Test",
+      spawnAltitudeMeters = 0.0
+    } or nil,
     loadingJob = nil,
     pendingTerrainEntries = {},
     selectedSlot = 1,
+    hotbarScroll = 0.0,
+    inventory = Inventory.new("survival"),
+    bodyDamage = BodyDamage.new(),
+    health = 20,
+    hunger = 20,
+    inventoryVersion = 1,
+    inventoryWasDown = false,
+    inventoryClickWasDown = false,
+    creativeTab = "building",
+    creativeScroll = 0,
+    creativeFiltered = Inventory.catalog("building"),
     hotbarBlocks = {
       blocks.grass,
       blocks.dirt,
       blocks.stone,
       blocks.sand,
-      blocks.gravel or blocks.cobblestone,
-      blocks.sandstone or blocks.cobblestone,
+      blocks.ice,
+      blocks.glass,
       blocks.oak_planks,
       blocks.oak_log,
       blocks.oak_leaves
@@ -1487,13 +2691,38 @@ local function createDisplayState()
     windowW = WINDOW_W,
     windowH = WINDOW_H
   }
+  local defaults = {
+    soundVolume = 100,
+    sensitivity = 100,
+    invertMouse = false,
+    fovDegrees = graphics.window.fovDegrees or 70,
+    renderDistance = renderDistance.clamp(DISTANT_CHUNK_RADIUS, 24),
+    vsync = VSYNC_ENABLED,
+    clouds = true,
+    bloom = POST.bloom ~= false,
+    particles = "All",
+    viewBobbing = true,
+    motionBlur = "Off",
+    fullscreen = false,
+    controlBindings = inputBindings.DEFAULTS
+  }
+  return userSettings.apply(state, userSettings.load(nil, defaults), defaults)
 end
 
-local function playerOptionsForGameMode(gameMode)
+local function saveUserSettings(state)
+  local ok, err = userSettings.save(state)
+  if not ok then io.stderr:write("Unable to save user settings: " .. tostring(err) .. "\n") end
+  return ok
+end
+
+local function playerOptionsForGameMode(gameMode, worldProfile)
   local options = {}
   for key, value in pairs(graphics.player) do
     options[key] = value
   end
+
+  worldProfile = worldProfile or worldProfiles.get("earth")
+  options.gravity = (options.gravity or 15.5) * (worldProfile.gravityScale or 1.0)
 
   if gameMode == "creative" then
     options.flying = true
@@ -1507,10 +2736,81 @@ local function playerOptionsForGameMode(gameMode)
   return options
 end
 
+local function playerSnapshot(state, playerCamera)
+  return {
+    camera = playerCamera:saveState(),
+    inventory = state.inventory:saveState(),
+    bodyDamage = state.bodyDamage and state.bodyDamage:saveState() or nil
+  }
+end
+
+local function saveCurrentPlayer(state, playerCamera)
+  if not state or not playerCamera or not state.inventory or
+      not state.currentWorldSave or not state.currentWorldSave.path then
+    return false
+  end
+
+  local called, saved, saveError = pcall(
+    saves.savePlayer, state.currentWorldSave, playerSnapshot(state, playerCamera))
+  if not called then
+    io.stderr:write("Unable to save player data: " .. tostring(saved) .. "\n")
+    return false
+  end
+  if not saved then
+    io.stderr:write("Unable to save player data: " .. tostring(saveError) .. "\n")
+    return false
+  end
+  return true
+end
+
+local function restorePlayer(state, playerCamera, savedPlayer)
+  if type(savedPlayer) ~= "table" then return false end
+
+  if type(savedPlayer.camera) == "table" then
+    playerCamera:restoreState(savedPlayer.camera)
+  end
+  if type(savedPlayer.inventory) == "table" then
+    state.inventory:restoreState(savedPlayer.inventory)
+  end
+  if type(savedPlayer.bodyDamage) == "table" then
+    state.bodyDamage:restoreState(savedPlayer.bodyDamage)
+  end
+
+  state.selectedSlot = state.inventory:normalizeSelected()
+  state.health = state.bodyDamage:vitality() * 20
+  return true
+end
+
+function game.applyPlayerDamage(state, hitHeight, side, amount, protection)
+  if not state or not state.bodyDamage or state.worldGameMode == "creative" then
+    return nil, 0
+  end
+  local region, applied, injury = state.bodyDamage:applyHit(
+    hitHeight, side, amount, protection)
+  state.health = state.bodyDamage:vitality() * 20
+  return region, applied, injury
+end
+
+function game.damagePlayerRegion(state, region, amount, protection)
+  if not state or not state.bodyDamage or state.worldGameMode == "creative" then return 0 end
+  local applied, injury = state.bodyDamage:applyDamage(region, amount, protection)
+  state.health = state.bodyDamage:vitality() * 20
+  return applied, injury
+end
+
 local function syncCursorMode(window, state, playerCamera)
-  local target = state.screen and glfw.GLFW_CURSOR_NORMAL or glfw.GLFW_CURSOR_DISABLED
+  local target = (state.screen or state.devMenuOpen) and glfw.GLFW_CURSOR_NORMAL or glfw.GLFW_CURSOR_DISABLED
   if state.cursorMode ~= target then
     glfw.glfwSetInputMode(window, glfw.GLFW_CURSOR, target)
+    -- Disabled-cursor mode can otherwise inherit desktop pointer acceleration.
+    -- Raw motion makes a given physical movement produce the same turn every
+    -- time; keep a guarded fallback for older GLFW builds.
+    pcall(function()
+      local rawEnabled = target == glfw.GLFW_CURSOR_DISABLED and
+        glfw.glfwRawMouseMotionSupported() ~= 0
+      glfw.glfwSetInputMode(window, glfw.GLFW_RAW_MOUSE_MOTION,
+        rawEnabled and glfw.GLFW_TRUE or glfw.GLFW_FALSE)
+    end)
     state.cursorMode = target
     if target == glfw.GLFW_CURSOR_DISABLED and playerCamera then
       playerCamera.firstMouse = true
@@ -1551,29 +2851,270 @@ local function setFullscreen(window, state, enabled, locP)
   updateViewportAndProjection(locP)
 end
 
-local function handleUiCommand(window, command, playerCamera)
+local function handleUiCommand(window, command, playerCamera, state, locP)
   if command == "quit_game" then
     glfw.glfwSetWindowShouldClose(window, 1)
+  elseif command == "quit_to_title" then
+    saveCurrentPlayer(state, playerCamera)
+    state.currentWorldSave = nil
   elseif command == "started_world" or command == "resume" then
     if playerCamera then
       playerCamera.firstMouse = true
     end
+  elseif command == "toggle_fullscreen" then
+    setFullscreen(window, state, not state.fullscreen, locP)
+  elseif command == "apply_vsync" then
+    glfw.glfwSwapInterval(state.vsync ~= false and 1 or 0)
   end
 end
 
-local function updateFullscreenInput(window, state, locP, playerCamera)
+local function updateWorldCreationTextInput(window, state)
+  if state.screen ~= "create_world" then
+    state.createTextKeyWasDown = {}
+    state.textInputCharacters = {}
+    state.activeTextField = nil
+    return
+  end
+
+  local fieldId = state.moreWorldOptions and "world_seed" or "world_name"
+  if state.activeTextField ~= fieldId then
+    state.textInputCharacters = {}
+    state.createTextKeyWasDown = {}
+    return
+  end
+
+  local previous = state.createTextKeyWasDown or {}
+  local current = {}
+  local editingSeed = fieldId == "world_seed"
+  local text = editingSeed and (state.worldSeedText or "") or (state.worldNameText or "New World")
+  local limit = editingSeed and 19 or 32
+
+  local caret = math.max(0, math.min(state.textCaret or #text, #text))
+  for _, character in ipairs(state.textInputCharacters or {}) do
+    if (not editingSeed and character:match("^[ -~]$")) or
+        (editingSeed and (character:match("^%d$") or (character == "-" and caret == 0 and not text:find("-", 1, true)))) then
+      if not editingSeed and state.worldNamePristine then
+        text, caret = "", 0
+        state.worldNamePristine = false
+      end
+      text, caret = textInput.insert(text, caret, character, limit)
+    end
+  end
+  state.textInputCharacters = {}
+
+  local function pressed(name, key)
+    local down = glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
+    current[name] = down
+    return down and not previous[name]
+  end
+
+  if pressed("backspace", glfw.GLFW_KEY_BACKSPACE) then
+    if not editingSeed and state.worldNamePristine then
+      text, caret = "", 0
+      state.worldNamePristine = false
+    else
+      text, caret = textInput.backspace(text, caret)
+    end
+  end
+  if pressed("delete", glfw.GLFW_KEY_DELETE) then text, caret = textInput.delete(text, caret) end
+  if pressed("left", glfw.GLFW_KEY_LEFT) then caret = textInput.move(text, caret, "left") end
+  if pressed("right", glfw.GLFW_KEY_RIGHT) then caret = textInput.move(text, caret, "right") end
+  if pressed("home", glfw.GLFW_KEY_HOME) then caret = textInput.move(text, caret, "home") end
+  if pressed("end", glfw.GLFW_KEY_END) then caret = textInput.move(text, caret, "end") end
+
+  if editingSeed then state.worldSeedText = text else state.worldNameText = text end
+  state.textCaret = caret
+  state.createTextKeyWasDown = current
+end
+
+local function createCharacterShader()
+  return shaderModule.fromSource([[
+#version 460 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec3 aColor;
+layout (location = 3) in vec2 aTexCoord;
+layout (location = 4) in vec3 aInfo;
+out vec3 vNormal;
+out vec3 vColor;
+out vec2 vTexCoord;
+uniform mat4 uProjection;
+uniform mat4 uView;
+uniform mat4 uModel;
+// phase, movement amount, elapsed time, crouch amount
+uniform vec4 uAnim0;
+// head pitch, vertical velocity, grounded, attack phase
+uniform vec4 uAnim1;
+
+void rotateX(inout vec3 point, inout vec3 normal, vec3 pivot, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  vec3 p = point - pivot;
+  point = pivot + vec3(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+  normal = vec3(normal.x, normal.y * c - normal.z * s,
+    normal.y * s + normal.z * c);
+}
+
+void rotateZ(inout vec3 point, inout vec3 normal, vec3 pivot, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  vec3 p = point - pivot;
+  point = pivot + vec3(p.x * c - p.y * s, p.x * s + p.y * c, p.z);
+  normal = vec3(normal.x * c - normal.y * s,
+    normal.x * s + normal.y * c, normal.z);
+}
+
+void rotateY(inout vec3 point, inout vec3 normal, vec3 pivot, float angle) {
+  float c = cos(angle);
+  float s = sin(angle);
+  vec3 p = point - pivot;
+  point = pivot + vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+  normal = vec3(normal.x * c + normal.z * s, normal.y,
+    -normal.x * s + normal.z * c);
+}
+
+void main() {
+  vec3 point = aPos;
+  vec3 normal = aNormal;
+  int part = int(aInfo.x + 0.5);
+  float moveAmount = clamp(uAnim0.y, 0.0, 1.0);
+  float crouch = clamp(uAnim0.w, 0.0, 1.0);
+  float idle = 1.0 - smoothstep(0.025, 0.16, moveAmount);
+  float gait = sin(uAnim0.x) * moveAmount;
+  float stride = gait * mix(0.82, 0.52, crouch);
+  float breathe = sin(uAnim0.z * 1.65) * idle;
+  float weightShift = sin(uAnim0.z * 0.72) * idle;
+  float airborne = 1.0 - clamp(uAnim1.z, 0.0, 1.0);
+
+  if (part == 1) {
+    float headPitch = -clamp(uAnim1.x, -1.25, 1.25) + breathe * 0.018;
+    rotateX(point, normal, vec3(0.0, 1.5, 0.0), headPitch);
+    rotateY(point, normal, vec3(0.0, 1.5, 0.0),
+      sin(uAnim0.z * 0.43) * idle * 0.028);
+  } else if (part == 3) {
+    float attack = sin(clamp(uAnim1.w, 0.0, 1.0) * 3.14159265);
+    rotateX(point, normal, vec3(-0.375, 1.5, 0.0),
+      -stride - attack * 1.75 - airborne * 0.20 + breathe * 0.028);
+    rotateZ(point, normal, vec3(-0.375, 1.5, 0.0),
+      -0.035 - weightShift * 0.018);
+  } else if (part == 4) {
+    rotateX(point, normal, vec3(0.375, 1.5, 0.0),
+      stride - airborne * 0.20 - breathe * 0.028);
+    rotateZ(point, normal, vec3(0.375, 1.5, 0.0),
+      0.035 - weightShift * 0.018);
+  } else if (part == 5) {
+    rotateX(point, normal, vec3(-0.125, 0.75, 0.0),
+      stride + airborne * 0.16 - crouch * 0.12);
+  } else if (part == 6) {
+    rotateX(point, normal, vec3(0.125, 0.75, 0.0),
+      -stride - airborne * 0.16 - crouch * 0.12);
+  }
+
+  // The crouch is a hierarchical upper-body pose rather than only a lowered
+  // camera: hips settle, the torso leans, and the head retains its own aim.
+  if (part <= 4) {
+    point.y -= crouch * 0.17;
+    point.z += crouch * 0.055;
+    rotateX(point, normal, vec3(0.0, 0.75, 0.0), crouch * 0.30);
+    rotateZ(point, normal, vec3(0.0, 0.75, 0.0), weightShift * 0.010);
+    point.y += breathe * 0.008;
+  }
+
+  // Alternating heel lift keeps the legs visibly separate at the quiet end of
+  // a stride and gives the model a little grounded weight without foot IK.
+  if (part == 5 || part == 6) {
+    float lift = max(0.0, part == 5 ? -gait : gait) * 0.045;
+    point.y += lift * (1.0 - crouch * 0.45);
+  }
+
+  vNormal = mat3(uModel) * normal;
+  vColor = aColor;
+  vTexCoord = aTexCoord;
+  gl_Position = uProjection * uView * uModel * vec4(point, 1.0);
+}
+]], [[
+#version 460 core
+in vec3 vNormal;
+in vec3 vColor;
+in vec2 vTexCoord;
+out vec4 FragColor;
+uniform sampler2D tex0;
+uniform vec3 lightDir;
+uniform vec3 ambientColor;
+uniform vec3 lightColor;
+vec3 srgbToLinear(vec3 color) {
+  return pow(max(color, vec3(0.0)), vec3(2.2));
+}
+vec3 linearToSrgb(vec3 color) {
+  return pow(max(color, vec3(0.0)), vec3(1.0 / 2.2));
+}
+void main() {
+  vec4 texel = texture(tex0, vTexCoord);
+  if (texel.a < 0.5) discard;
+  float diffuse = max(dot(normalize(vNormal), normalize(-lightDir)), 0.0);
+  vec3 lighting = ambientColor * 0.88 + lightColor * (0.22 + diffuse * 0.78);
+  vec3 lit = srgbToLinear(texel.rgb * vColor) * max(lighting, vec3(0.08));
+  FragColor = vec4(linearToSrgb(lit), texel.a);
+}
+]])
+end
+
+function game.refreshSavedWorldList(state)
+  local selected = state.savedWorlds and state.savedWorlds[state.selectedWorldIndex or 0]
+  local selectedPath = selected and selected.path
+  state.savedWorlds = saves.listWorlds()
+  state.selectedWorldIndex = #state.savedWorlds > 0 and 1 or nil
+  if selectedPath then
+    for index, entry in ipairs(state.savedWorlds) do
+      if entry.path == selectedPath then state.selectedWorldIndex = index break end
+    end
+  end
+  state.worldListScroll = 0
+  state.worldListVersion = (state.worldListVersion or 0) + 1
+  state.refreshWorldListRequested = false
+end
+
+local function closeInventory(state, playerCamera)
+  if state.inventory.cursor then
+    if state.screen ~= "creative_inventory" then
+      state.inventory:add(state.inventory.cursor.item, state.inventory.cursor.count)
+    end
+    state.inventory.cursor = nil
+  end
+  state.inventory:returnCraftingItems()
+  state.inventory:setCraftingGridSize(2)
+  state.inventoryLeftDrag = nil
+  state.inventoryRightDragSeen = nil
+  state.inventoryClickWasDown = false
+  state.inventoryRightWasDown = false
+  state.screen = nil
+  state.inventoryVersion = (state.inventoryVersion or 0) + 1
+  if playerCamera then playerCamera.firstMouse = true end
+end
+
+local function updateFullscreenInput(window, state, locP, playerCamera, devMenu)
   local f11Down = glfw.glfwGetKey(window, glfw.GLFW_KEY_F11) == glfw.GLFW_PRESS
   local escapeDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_ESCAPE) == glfw.GLFW_PRESS
 
   if f11Down and not state.f11WasDown then
     setFullscreen(window, state, not state.fullscreen, locP)
+    saveUserSettings(state)
   end
 
   if escapeDown and not state.escapeWasDown and state.fullscreen then
     setFullscreen(window, state, false, locP)
+    saveUserSettings(state)
+  elseif escapeDown and not state.escapeWasDown and state.devMenuOpen then
+    devMenu:setOpen(false)
+    state.devMenuOpen = false
+    if playerCamera then playerCamera.firstMouse = true end
   elseif escapeDown and not state.escapeWasDown then
     local wasScreen = state.screen
-    uiFlow.back(state)
+    if wasScreen == "inventory" or wasScreen == "creative_inventory" or wasScreen == "crafting_table" or wasScreen == "furnace" then
+      closeInventory(state, playerCamera)
+    else
+      uiFlow.back(state)
+    end
     if wasScreen and not state.screen and playerCamera then
       playerCamera.firstMouse = true
     end
@@ -1583,7 +3124,26 @@ local function updateFullscreenInput(window, state, locP, playerCamera)
   state.escapeWasDown = escapeDown
 end
 
+local function updateDevMenuInput(window, state, devMenu)
+  local f4Down = glfw.glfwGetKey(window, glfw.GLFW_KEY_F4) == glfw.GLFW_PRESS
+  if f4Down and not state.f4WasDown and state.hasWorld then
+    devMenu:toggle()
+    state.devMenuOpen = devMenu:isOpen()
+  end
+  state.f4WasDown = f4Down
+end
+
 local function updateDebugInput(window, state)
+  -- F1 clears the screen of interface, F2 saves what is left. The capture is
+  -- only requested here; it has to happen after the frame is drawn.
+  local f1Down = glfw.glfwGetKey(window, glfw.GLFW_KEY_F1) == glfw.GLFW_PRESS
+  if f1Down and not state.f1WasDown then state.hideHud = not state.hideHud end
+  state.f1WasDown = f1Down
+
+  local f2Down = glfw.glfwGetKey(window, glfw.GLFW_KEY_F2) == glfw.GLFW_PRESS
+  if f2Down and not state.f2WasDown and state.hasWorld then state.screenshotRequested = true end
+  state.f2WasDown = f2Down
+
   local f3Down = glfw.glfwGetKey(window, glfw.GLFW_KEY_F3) == glfw.GLFW_PRESS
   if f3Down and not state.f3WasDown then
     state.debugScreen = not state.debugScreen
@@ -1593,11 +3153,265 @@ local function updateDebugInput(window, state)
   state.f3WasDown = f3Down
 end
 
-local function updateMenuInput(window, state, playerCamera)
-  if not state.screen then
-    state.menuClickWasDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+local function updatePerspectiveInput(window, state, playerCamera)
+  local f5Down = glfw.glfwGetKey(window, glfw.GLFW_KEY_F5) == glfw.GLFW_PRESS
+  if f5Down and not state.f5WasDown and state.hasWorld and not state.screen and
+      not state.devMenuOpen then
+    state.perspective = playerCamera:cyclePerspective()
+  end
+  state.f5WasDown = f5Down
+  state.perspective = playerCamera.perspective or 0
+end
+
+local function refreshCreativeFilter(state)
+  local query = state.creativeTab == "search" and (state.inventory.search or ""):lower() or ""
+  local filtered = {}
+  for _, item in ipairs(Inventory.catalog(state.creativeTab)) do
+    local definition = blocks.mapping[item] or require("items").mapping[item]
+    local label = definition and definition.name and definition.name:lower() or item
+    if query == "" or item:find(query, 1, true) or label:find(query, 1, true) then
+      filtered[#filtered + 1] = item
+    end
+  end
+  state.creativeFiltered = filtered
+  state.creativeScroll = 0
+end
+
+function game.isInventoryOverlay(screen)
+  return screen == "inventory" or screen == "creative_inventory" or
+    screen == "crafting_table" or screen == "furnace"
+end
+
+function game.updateCreativeSearchInput(window, state)
+  if state.screen ~= "creative_inventory" or state.creativeTab ~= "search" then
+    state.creativeSearchKeyWasDown = {}
     return
   end
+
+  local previous = state.creativeSearchKeyWasDown or {}
+  local current = {}
+  local text = state.inventory.search or ""
+  local changed = false
+  local shift = glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_SHIFT) == glfw.GLFW_PRESS or
+    glfw.glfwGetKey(window, 344) == glfw.GLFW_PRESS
+
+  local function appendKey(key, character)
+    local down = glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
+    current[key] = down
+    if down and not previous[key] and #text < 48 then
+      text = text .. character
+      changed = true
+    end
+  end
+
+  for code = 65, 90 do appendKey(code, string.char(shift and code or code + 32)) end
+  for digit = 0, 9 do appendKey(48 + digit, tostring(digit)) end
+  appendKey(glfw.GLFW_KEY_SPACE, " ")
+  appendKey(glfw.GLFW_KEY_MINUS, shift and "_" or "-")
+
+  local backspace = glfw.glfwGetKey(window, glfw.GLFW_KEY_BACKSPACE) == glfw.GLFW_PRESS
+  current.backspace = backspace
+  if backspace and not previous.backspace and #text > 0 then
+    text = text:sub(1, -2)
+    changed = true
+  end
+
+  state.creativeSearchKeyWasDown = current
+  if changed then
+    state.inventory.search = text
+    refreshCreativeFilter(state)
+    state.inventoryVersion = state.inventoryVersion + 1
+  end
+end
+
+local function updateInventoryInput(window, state, playerCamera)
+  if not state.hasWorld or state.devMenuOpen then return end
+
+  local inventoryDown = inputBindings.actionDown(window, state.controlBindings, "inventory")
+  local typingCreativeSearch = state.screen == "creative_inventory" and state.creativeTab == "search"
+  if inventoryDown and not state.inventoryWasDown and not typingCreativeSearch then
+    if state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" or state.screen == "furnace" then
+      closeInventory(state, playerCamera)
+    elseif not state.screen then
+      state.inventory:setCraftingGridSize(2)
+      state.screen = uiFlow.inventoryScreenForGameMode(state.worldGameMode)
+      refreshCreativeFilter(state)
+    end
+  end
+  state.inventoryWasDown = inventoryDown
+
+  if state.screen ~= "inventory" and state.screen ~= "creative_inventory" and state.screen ~= "crafting_table" and state.screen ~= "furnace" then
+    return
+  end
+
+  game.updateCreativeSearchInput(window, state)
+
+  if state.screen == "creative_inventory" then
+    local scrollDelta = state.hotbarScroll or 0
+    local scrollSteps = scrollDelta > 0 and math.floor(scrollDelta) or math.ceil(scrollDelta)
+    if scrollSteps ~= 0 then
+      local nextScroll = Inventory.clampCreativeScroll(
+        (state.creativeScroll or 0) - scrollSteps, #(state.creativeFiltered or {}))
+      if nextScroll ~= state.creativeScroll then
+        state.creativeScroll = nextScroll
+        state.inventoryVersion = state.inventoryVersion + 1
+      end
+      state.hotbarScroll = scrollDelta - scrollSteps
+    end
+  end
+
+  local xpos, ypos = ffi.new("double[1]"), ffi.new("double[1]")
+  local clientWidth, clientHeight = ffi.new("int[1]"), ffi.new("int[1]")
+  glfw.glfwGetCursorPos(window, xpos, ypos)
+  glfw.glfwGetWindowSize(window, clientWidth, clientHeight)
+  state.menuMouseX = tonumber(xpos[0]) * windowWidth / math.max(1, tonumber(clientWidth[0]))
+  state.menuMouseY = tonumber(ypos[0]) * windowHeight / math.max(1, tonumber(clientHeight[0]))
+
+  local target = hud.inventorySlotAt(
+    state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state
+  )
+  local leftDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+  local rightDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_RIGHT) == glfw.GLFW_PRESS
+  local shiftDown = glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_SHIFT) == glfw.GLFW_PRESS or
+    glfw.glfwGetKey(window, 344) == glfw.GLFW_PRESS
+
+  if leftDown and target and target.kind == "creative_scroll" then
+    if state.creativeScroll ~= target.scroll then
+      state.creativeScroll = target.scroll
+      state.inventoryVersion = state.inventoryVersion + 1
+    end
+  elseif leftDown then
+    if not state.inventoryClickWasDown then
+      local collectible = target and (target.kind == "slot" or target.kind == "craft" or
+        target.kind == "furnace_input" or target.kind == "furnace_fuel" or target.kind == "furnace_output")
+      local targetStack
+      if collectible then
+        if target.kind == "slot" then
+          targetStack = state.inventory:get(target.index)
+        elseif target.kind == "craft" then
+          targetStack = state.inventory.crafting[target.index]
+        else
+          local furnaceName = target.kind:sub(9)
+          targetStack = state.inventory.furnace and state.inventory.furnace[furnaceName]
+        end
+      end
+      local clickItem = targetStack and targetStack.item or
+        (collectible and state.inventory.cursor and state.inventory.cursor.item)
+      local clickKey = target and (clickItem and ("item:" .. clickItem) or
+        (target.kind .. ":" .. tostring(target.index or target.item or target.tab))) or nil
+      local clickTime = glfw.glfwGetTime()
+      local doubleClick = clickKey and clickKey == state.inventoryLastClickKey and
+        clickTime - (state.inventoryLastClickTime or -math.huge) <= 0.25
+      if doubleClick and collectible and state.inventory.cursor and
+          clickItem == state.inventory.cursor.item then
+        state.inventory:collectToCursor()
+      elseif target and target.kind == "craft" and state.inventory.cursor and not shiftDown then
+        state.inventoryLeftDrag = {kind = "craft", indices = {target.index}, seen = {[target.index] = true}}
+      elseif target then
+        if target.kind == "slot" then
+          local pickedUp = not state.inventory.cursor and state.inventory:get(target.index) ~= nil
+          if pickedUp then state.inventory:swapOrMerge(target.index) end
+          state.inventoryLeftDrag = {
+            kind = "slot", indices = {target.index}, seen = {[target.index] = true}, pickedUp = pickedUp
+          }
+        elseif target.kind == "craft" then
+          state.inventory:swapCraft(target.index)
+        elseif target.kind == "furnace_input" or target.kind == "furnace_fuel" or target.kind == "furnace_output" then
+          state.inventory:swapFurnace(target.kind)
+        elseif target.kind == "result" then
+          if shiftDown then state.inventory:craftAll() else state.inventory:takeCraftResult() end
+        elseif target.kind == "creative_tab" then
+          state.creativeTab = target.tab
+          refreshCreativeFilter(state)
+        elseif target.kind == "creative" and target.item then
+          state.inventory.cursor = {item = target.item, count = 64}
+        end
+        state.inventoryVersion = state.inventoryVersion + 1
+      end
+      state.inventoryLastClickKey = clickKey
+      state.inventoryLastClickTime = clickTime
+    elseif state.inventoryLeftDrag and target and target.kind == state.inventoryLeftDrag.kind and
+        not state.inventoryLeftDrag.seen[target.index] then
+      state.inventoryLeftDrag.seen[target.index] = true
+      state.inventoryLeftDrag.indices[#state.inventoryLeftDrag.indices + 1] = target.index
+    end
+  elseif state.inventoryLeftDrag then
+    local drag = state.inventoryLeftDrag
+    local indices = state.inventoryLeftDrag.indices
+    if drag.kind == "slot" then
+      if #indices > 1 then
+        state.inventory:distributeSlots(indices)
+      elseif not drag.pickedUp then
+        state.inventory:swapOrMerge(indices[1])
+      end
+    elseif #indices > 1 then
+      state.inventory:distributeCraft(indices)
+    else
+      state.inventory:swapCraft(indices[1])
+    end
+    state.inventoryLeftDrag = nil
+    state.inventoryVersion = state.inventoryVersion + 1
+  end
+  state.inventoryClickWasDown = leftDown
+
+  if rightDown and not leftDown then
+    if not state.inventoryRightWasDown or not state.inventoryRightDragSeen then
+      state.inventoryRightDragSeen = {}
+    end
+    if target and (target.kind == "craft" or target.kind == "slot" or
+        target.kind == "furnace_input" or target.kind == "furnace_fuel" or target.kind == "furnace_output") then
+      local dragKey = target.kind .. ":" .. target.index
+      if not state.inventoryRightDragSeen[dragKey] then
+        state.inventoryRightDragSeen[dragKey] = true
+        local changed
+        if target.kind == "craft" then
+          changed = state.inventory:rightClickCraft(target.index)
+        elseif target.kind:sub(1,8)=="furnace_" then
+          changed = state.inventory:rightClickFurnace(target.kind)
+        else
+          changed = state.inventory:rightClickSlot(target.index)
+        end
+        if changed then
+          state.inventoryVersion = state.inventoryVersion + 1
+        end
+      end
+    end
+  else
+    state.inventoryRightDragSeen = nil
+  end
+  state.inventoryRightWasDown = rightDown
+end
+
+local function updateMenuInput(window, state, playerCamera, locP)
+  if state.devMenuOpen then
+    state.menuClickWasDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+    state.activeMenuSlider = nil
+    return
+  end
+  if not state.screen then
+    state.menuClickWasDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+    state.activeMenuSlider = nil
+    return
+  end
+  if state.screen == "inventory" or state.screen == "creative_inventory" or state.screen == "crafting_table" or state.screen == "furnace" then
+    return
+  end
+
+  if state.refreshWorldListRequested then game.refreshSavedWorldList(state) end
+
+  if state.screen == "select_world" then
+    local scrollDelta = state.hotbarScroll or 0.0
+    local scrollSteps = scrollDelta > 0 and math.floor(scrollDelta) or math.ceil(scrollDelta)
+    if scrollSteps ~= 0 then
+      local layout = hud.worldListLayout(windowWidth, windowHeight, state)
+      state.worldListScroll = math.max(0, math.min(layout.maxScroll,
+        (state.worldListScroll or 0) - scrollSteps))
+      state.hotbarScroll = scrollDelta - scrollSteps
+    end
+  else
+    state.hotbarScroll = 0.0
+  end
+  updateWorldCreationTextInput(window, state)
 
   local xpos = ffi.new("double[1]")
   local ypos = ffi.new("double[1]")
@@ -1609,17 +3423,59 @@ local function updateMenuInput(window, state, playerCamera)
   state.menuMouseY = tonumber(ypos[0]) * windowHeight / math.max(1, tonumber(clientHeight[0]))
 
   local clickDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
-  if clickDown and not state.menuClickWasDown then
-    local action = hud.menuButtonAt(state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
-    handleUiCommand(window, uiFlow.applyAction(state, action), playerCamera)
+  if clickDown then
+    local textField = not state.menuClickWasDown and hud.menuTextFieldAt(
+      state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
+    local slider, value = hud.menuSliderValueAt(
+      state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY,
+      state, state.activeMenuSlider
+    )
+    if textField then
+      state.activeTextField = textField.id
+      state.textCaret = textField.caret or 0
+      state.createTextKeyWasDown = {}
+      if textField.id == "world_name" then state.worldNamePristine = false end
+    elseif slider then
+      state.activeMenuSlider = slider
+      uiFlow.applySlider(state, slider, value)
+      state.userSettingsDirty = true
+    elseif not state.menuClickWasDown then
+      if state.screen == "create_world" then state.activeTextField = nil end
+      local action = hud.menuButtonAt(state.screen, windowWidth, windowHeight, state.menuMouseX, state.menuMouseY, state)
+      local previousSettings = userSettings.stateKey(state)
+      local command = uiFlow.applyAction(state, action)
+      if state.deleteWorldRequested then
+        local worldToDelete = state.deleteWorldRequested
+        state.deleteWorldRequested = nil
+        local deleted, deleteError = saves.deleteWorld(worldToDelete)
+        if deleted then
+          state.statusMessage = "Deleted " .. tostring(worldToDelete.worldName or worldToDelete.folderName)
+        else
+          state.statusMessage = "Could not delete world: " .. tostring(deleteError or "unknown error")
+        end
+        state.refreshWorldListRequested = true
+      end
+      if state.refreshWorldListRequested then game.refreshSavedWorldList(state) end
+      handleUiCommand(window, command, playerCamera, state, locP)
+      if userSettings.stateKey(state) ~= previousSettings then saveUserSettings(state) end
+    end
+  else
+    if state.userSettingsDirty then
+      saveUserSettings(state)
+      state.userSettingsDirty = false
+    end
+    state.activeMenuSlider = nil
   end
 
   state.menuClickWasDown = clickDown
 end
 
-local function updateBlockEditInput(window, state, world, pendingEntries, playerCamera)
-  local breakDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
-  local placeDown = glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_RIGHT) == glfw.GLFW_PRESS
+local function updateBlockEditInput(window, state, world, pendingEntries, playerCamera,
+    droppedItems, fallingTrees, blockParticles, audioEngine, dt)
+  local Mining=require("mining")
+  local FallingTrees=require("falling_trees")
+  local breakDown = inputBindings.actionDown(window, state.controlBindings, "attack")
+  local placeDown = inputBindings.actionDown(window, state.controlBindings, "use")
 
   local slotKeys = {
     glfw.GLFW_KEY_1,
@@ -1633,31 +3489,151 @@ local function updateBlockEditInput(window, state, world, pendingEntries, player
     glfw.GLFW_KEY_9
   }
 
+  local scrollDelta = state.hotbarScroll or 0.0
+  local scrollSteps = scrollDelta > 0 and math.floor(scrollDelta) or math.ceil(scrollDelta)
+  if scrollSteps ~= 0 then
+    state.selectedSlot = ((state.selectedSlot - 1 - scrollSteps) % Inventory.HOTBAR_SIZE) + 1
+    state.inventory.selected = state.selectedSlot
+    state.hotbarScroll = scrollDelta - scrollSteps
+  end
+
   for i = 1, #slotKeys do
     if glfw.glfwGetKey(window, slotKeys[i]) == glfw.GLFW_PRESS then
       state.selectedSlot = i
+      state.inventory.selected = i
     end
   end
 
-  if breakDown and not state.breakWasDown then
+  -- The swing runs before the break loop so a chop can bite at the moment the
+  -- animation says the blade arrives, rather than on the button press.
+  local heldStack=state.inventory.slots[state.selectedSlot]
+  local actionSpeed = state.bodyDamage and state.bodyDamage:actionMultiplier() or 1.0
+  local strength = state.bodyDamage and state.bodyDamage:strengthMultiplier() or 1.0
+  local actionDt = dt * actionSpeed
+  local landedBlow=heldItem.updateSwing(state, actionDt,
+    breakDown or (placeDown and not state.placeWasDown),
+    heldItem.isHeavy(Mining.tool(heldStack and heldStack.item)))
+
+  if breakDown then
     local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
-    if hit then
-      worldInteraction.breakBlock(world, hit.x, hit.y, hit.z)
-      rebuildBlockChunkMeshes(world, pendingEntries, hit.x, hit.z)
+    if hit and world.isProtectedBlock and world:isProtectedBlock(hit.x, hit.y, hit.z) then
+      hit = nil
     end
+    if hit then
+      local definition = blocks.list[hit.id]
+      local targetKey=hit.x..":"..hit.y..":"..hit.z
+      if state.breakTarget~=targetKey then
+        state.breakTarget=targetKey
+        state.breakProgress=0
+      end
+      local held=heldStack
+      local broke=Mining.advanceBreak(state,definition,held and held.item,
+        state.worldGameMode,actionDt,landedBlow,strength)
+      state.breakTargetPosition={x=hit.x,y=hit.y,z=hit.z}
+      if landedBlow and not broke and audioEngine then
+        audioEngine:playBlock(definition, "hit",
+          {hit.x + 0.5, hit.y + 0.5, hit.z + 0.5})
+      end
+      if broke and (state.worldGameMode~="creative" or not state.breakWasDown) then
+        local tree,changed
+        local canHarvest=state.worldGameMode=="creative" or Mining.canHarvest(definition,held and held.item)
+        if FallingTrees.isLog(definition) and canHarvest then tree,changed=fallingTrees:start(world,hit.x,hit.y,hit.z,playerCamera:getFront()) end
+        if tree and audioEngine then
+          audioEngine:playTreeFall(tree.impactPosition,1.35,tree.secondsToImpact)
+        end
+        if not tree then changed=worldInteraction.breakBlock(world, hit.x, hit.y, hit.z) end
+        rebuildChangedBlockMeshes(world,pendingEntries,changed)
+        if #changed > 0 and blockParticles then
+          blockParticles:spawn(definition, hit.x, hit.y, hit.z, state.particles)
+        end
+        if audioEngine then
+          audioEngine:playBlock(definition, "break",
+            {hit.x + 0.5, hit.y + 0.5, hit.z + 0.5})
+        end
+        if #changed > 0 and not tree and state.worldGameMode ~= "creative" and definition and Mining.canHarvest(definition,held and held.item) then
+          local drop = Mining.drop(definition, held and held.item)
+          if drop then droppedItems:spawn(drop.item, drop.count,
+            {hit.x + 0.5, hit.y + 0.55, hit.z + 0.5},
+            {(math.random() - 0.5) * 1.4, 2.2, (math.random() - 0.5) * 1.4}, 0.35) end
+        end
+        state.breakTarget=nil
+        state.breakTargetPosition=nil state.breakDuration=nil
+        state.breakProgress=0
+      end
+    else
+      state.breakTarget=nil state.breakTargetPosition=nil state.breakDuration=nil state.breakProgress=0
+    end
+  else
+    state.breakTarget=nil state.breakTargetPosition=nil state.breakDuration=nil state.breakProgress=0
   end
 
   if placeDown and not state.placeWasDown then
     local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
-    local blockId = state.hotbarBlocks[state.selectedSlot]
-    local target = worldInteraction.placeFromHit(world, hit, blockId)
-    if target then
-      rebuildBlockChunkMeshes(world, pendingEntries, target.x, target.z)
+    if hit and hit.id == blocks.crafting_table then
+      state.inventory:setCraftingGridSize(3)
+      state.screen = "crafting_table"
+      state.inventoryVersion = state.inventoryVersion + 1
+    elseif hit and hit.id == blocks.furnace then
+      state.inventory:returnCraftingItems()
+      state.inventory:setCraftingGridSize(2)
+      state.screen = "furnace"
+      state.inventoryVersion = state.inventoryVersion + 1
+    else
+      local stack = state.inventory.slots[state.selectedSlot]
+      local blockId = state.inventory:blockIdFor(stack)
+      local target = worldInteraction.placeFromHit(world, hit, blockId)
+      if target then
+        rebuildBlockChunkMeshes(world, pendingEntries, target.x, target.z)
+        if audioEngine then
+          audioEngine:playBlock(blocks.list[blockId], "place",
+            {target.x + 0.5, target.y + 0.5, target.z + 0.5})
+        end
+        state.inventory:consumeSelected(1)
+        state.inventoryVersion = state.inventoryVersion + 1
+      end
+    end
+  end
+
+  local dropDown = inputBindings.actionDown(window, state.controlBindings, "drop")
+  if dropDown and not state.dropWasDown and state.worldGameMode ~= "creative" then
+    -- Ctrl+Q throws the whole stack, so clearing junk out of the hotbar is one
+    -- keypress instead of sixty-four.
+    local wholeStack = glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_CONTROL) == glfw.GLFW_PRESS or
+      glfw.glfwGetKey(window, glfw.GLFW_KEY_RIGHT_CONTROL) == glfw.GLFW_PRESS
+    local carried = state.inventory.slots[state.selectedSlot]
+    local removed = state.inventory:removeAt(state.selectedSlot,
+      wholeStack and carried and carried.count or 1)
+    if removed then
+      local front = playerCamera:getFront()
+      droppedItems:spawn(removed.item, removed.count, {
+        playerCamera.position[1] + front[1] * 0.8,
+        playerCamera.position[2] - 0.25,
+        playerCamera.position[3] + front[3] * 0.8
+      }, {front[1] * 4.0, front[2] * 4.0 + 2.0, front[3] * 4.0}, 1.0)
+      state.inventoryVersion = state.inventoryVersion + 1
+    end
+  end
+
+  -- Middle click puts what you are looking at in your hand, pulling it forward
+  -- from the backpack when it is not already on the hotbar.
+  local pickDown = inputBindings.actionDown(window, state.controlBindings, "pick")
+  if pickDown and not state.pickWasDown then
+    local hit = world:raycast(playerCamera.position, playerCamera:getFront(), playerCamera.reach or graphics.player.reach or 6.0)
+    local definition = hit and blocks.list[hit.id]
+    if definition and definition.key then
+      local slot = state.inventory:pickBlock(definition.key)
+      if slot then
+        state.selectedSlot = slot
+        state.inventory.selected = slot
+        state.inventoryVersion = state.inventoryVersion + 1
+      end
     end
   end
 
   state.breakWasDown = breakDown
   state.placeWasDown = placeDown
+  state.dropWasDown = dropDown
+  state.pickWasDown = pickDown
 end
 
 local function initWindow()
@@ -1665,84 +3641,224 @@ local function initWindow()
     error("Failed to init GLFW")
   end
 
-  glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MAJOR, 3)
-  glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MINOR, 3)
+  glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MAJOR, 4)
+  glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MINOR, 6)
   glfw.glfwWindowHint(glfw.GLFW_OPENGL_PROFILE, glfw.GLFW_OPENGL_CORE_PROFILE)
 
-  local window = glfw.glfwCreateWindow(WINDOW_W, WINDOW_H, "MineLua", nil, nil)
+  local window = glfw.glfwCreateWindow(WINDOW_W, WINDOW_H, "Tamarton", nil, nil)
   if window == nil then
-    error("Failed to create window")
+    error("Failed to create an OpenGL 4.6 Core window; update the graphics driver or use a GPU that supports OpenGL 4.6")
   end
 
   glfw.glfwMakeContextCurrent(window)
+  -- With vsync on, every frame reports the refresh interval regardless of how
+  -- much work it actually did, which hides the real headroom. Turn it off to
+  -- measure true frame cost.
+  glfw.glfwSwapInterval(VSYNC_ENABLED and 1 or 0)
   glfw.glfwSetInputMode(window, glfw.GLFW_CURSOR, glfw.GLFW_CURSOR_NORMAL)
 
   return window
 end
 
+-- Read the default framebuffer back to a PPM. Scripted runs use this instead
+-- of a screenshot key, which no headless launch can press.
+function game.captureFrame(path, width, height)
+  local pixels = ffi.new("unsigned char[?]", width * height * 3)
+  gl.glPixelStorei(GL.PACK_ALIGNMENT, 1)
+  gl.glReadPixels(0, 0, width, height, GL.RGB, GL.UNSIGNED_BYTE, pixels)
+  local file = io.open(path, "wb")
+  if not file then return false end
+  file:write(string.format("P6\n%d %d\n255\n", width, height))
+  -- OpenGL hands back the bottom row first; PPM wants the top row first.
+  local stride = width * 3
+  for row = height - 1, 0, -1 do
+    file:write(ffi.string(pixels + row * stride, stride))
+  end
+  file:close()
+  return true
+end
+
+-- F2 writes a PNG beside the saves. Named by wall-clock time, with a counter
+-- for the case of two shots inside the same second, so nothing is overwritten.
+function game.captureScreenshot(width, height)
+  local pixels = ffi.new("unsigned char[?]", width * height * 3)
+  gl.glPixelStorei(GL.PACK_ALIGNMENT, 1)
+  gl.glReadPixels(0, 0, width, height, GL.RGB, GL.UNSIGNED_BYTE, pixels)
+  saves.ensureDirectory("screenshots")
+
+  local stamp = os.date("%Y-%m-%d_%H.%M.%S")
+  local name = stamp .. ".png"
+  local attempt = 1
+  while true do
+    local existing = io.open("screenshots/" .. name, "rb")
+    if not existing then break end
+    existing:close()
+    attempt = attempt + 1
+    name = string.format("%s_%d.png", stamp, attempt)
+  end
+
+  if texture.writePng("screenshots/" .. name, width, height, pixels, true) then return name end
+  return nil
+end
+
 function game.run()
-  local ok, err = pcall(function()
+  local ok, err = xpcall(function()
     local window = initWindow()
 
     GL.loadModernGL()
-    print("GL_VERSION:", ffi.string(gl.glGetString(0x1F02)))
+    print("GL_VERSION:", ffi.string(gl.glGetString(GL.VERSION)))
 
-    gl.glEnable(GL_DEPTH_TEST)
-    gl.glDepthFunc(GL_LESS)
-    gl.glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS)
+    gl.glEnable(GL.DEPTH_TEST)
+    gl.glDepthFunc(GL.LESS)
+    gl.glEnable(GL.TEXTURE_CUBE_MAP_SEAMLESS)
+    local devMenu = DevMenu.new()
+    local runtimeAtmosphereSettings = {}
+    local previewAtmosphereSettings = {}
+    -- Grading and metering are authored globally, but a world whose sky is a
+    -- different kind of light source needs its own numbers: Mars carries less
+    -- than half of Earth's sunlight onto ground that reflects it into a much
+    -- brighter sky. A profile supplies only the keys it wants to move.
+    local function postSettingsFor(worldProfile)
+      local settings = {}
+      for key, value in pairs(POST) do
+        settings[key] = value
+      end
+      local overrides = worldProfile and worldProfile.post
+      if overrides then
+        for key, value in pairs(overrides) do
+          settings[key] = value
+        end
+      end
+      return settings
+    end
+    local activeWorldProfile = worldProfiles.get("earth")
+    local activePostSettings = postSettingsFor(activeWorldProfile)
+    updateRuntimeAtmosphereSettings(runtimeAtmosphereSettings, 1.0, activeWorldProfile)
+    updateRuntimeAtmosphereSettings(previewAtmosphereSettings, 0.0, activeWorldProfile)
 
     local atlasTex = createTextureAtlas()
+    local characterTexture = createImageTexture(character.DEFAULT_SKIN, true)
     local moonTexture = createImageTexture("assets/textures/environment/moon_phases.png", true)
-    local sunTexture = createImageTexture("assets/textures/environment/sun.png", true)
-    local cloudTexture = createImageTexture("assets/textures/environment/clouds.png", true, true)
-    local waterTexture = createImageTexture("assets/textures/blocks/water_flow.png", true, true)
     local underwaterOverlayTexture = createImageTexture("assets/textures/blocks/water_overlay.png", false, true)
+    effects.miningOverlay = require("mining_overlay").create()
+    effects.blockParticles = require("block_particles").new()
     local world = World.new({
       chunkRadius = CHUNK_RENDER_RADIUS,
       maxHeight = TERRAIN_MAX_H,
       generatorType = "default",
+      worldId = "earth",
       seed = graphics.terrainGeneration.seed or 1,
       deferInitialChunks = true
     })
     local terrainMeshes = {}
+    local droppedItems = DroppedItems.new()
+    local droppedItemMeshes = {}
+    local fallingTrees = require("falling_trees").new()
+    local fallingTreeMeshes = {}
+    local distantTerrain = createDistantTerrain()
     local currentWaterLevel = WATER_LEVEL
-    local characterMesh = graphics.player.showDebugBody and createCharacterMesh() or nil
+    local characterMesh = createCharacterMesh()
     local skyMesh = uploadSkyMesh()
-    local cloudMesh = createCloudMesh("assets/textures/environment/clouds.png")
-    local waterMesh = uploadMesh(effects.waterVertices(WATER_RADIUS))
-    local shadowMap = effects.createShadowMap(SHADOW_MAP_SIZE)
+    local cloudMesh, cloudShadowTexture = createCloudMesh("assets/textures/environment/clouds.png")
+    -- Where the cloud sheet is this frame, shared by the terrain and water
+    -- passes so a shadow band stays continuous across the shoreline.
+    local cloudShadow = {originX = 0.0, originZ = 0.0, inverseSpan = 0.0,
+      altitude = CLOUD.bottom, strength = 0.0, texture = cloudShadowTexture}
+    local shadowMap = effects.createShadowMap(graphics.shadows.cascadeMapSizes)
     local sceneTarget = effects.createSceneTarget(windowWidth, windowHeight)
+    local waterBackgroundTarget = effects.createSceneTarget(windowWidth, windowHeight)
+    local volumetricFog = effects.createVolumetricFog(FOG_GRID.width, FOG_GRID.height, FOG_GRID.depth)
+    local ocean = effects.createOceanSimulation(graphics.water)
 
-    local shader = createShaderProgram()
-    local shadowShader = effects.createShadowShader()
-    local skyShader = createSkyShaderProgram()
-    local cloudShader = createCloudShaderProgram()
-    local waterShader = effects.createWaterShader()
-    local atmospherePostShader = effects.createAtmospherePostShader()
+    local programs = {
+      terrain = createShaderProgram(),
+      shadow = effects.createShadowShader(),
+      sky = createSkyShaderProgram(),
+      stars = astronomy.field.createShader(),
+      cloud = createCloudShaderProgram(),
+      dielectric = effects.createDielectricShader(),
+      water = effects.createWaterShader(),
+      atmospherePost = effects.createAtmospherePostShader(),
+      godRays = effects.createGodRaysShader(),
+      volumetricFog = effects.createVolumetricFogShaders(
+        FOG_GRID.width, FOG_GRID.height, FOG_GRID.depth),
+      worldgenPreview = createWorldgenPreviewShader(),
+      character = createCharacterShader()
+    }
+    local nightSky = {
+      state = astronomy.field.create({
+        proceduralCount = SKY.proceduralStarCount or 2600,
+        faintestMagnitude = SKY.faintestStarMagnitude or 6.2
+      }),
+      locations = astronomy.field.createLocations(programs.stars)
+    }
+    local shader, shadowShader, skyShader = programs.terrain, programs.shadow, programs.sky
+    local cloudShader, dielectricShader, waterShader = programs.cloud, programs.dielectric, programs.water
+    local atmospherePostShader = programs.atmospherePost
+    local volumetricFogShaders, worldgenPreviewShader = programs.volumetricFog, programs.worldgenPreview
+    local characterShader = programs.character
+    effects.eyeAdaptationRuntime = {
+      shader = effects.createEyeAdaptationShader(),
+      state = effects.createEyeAdaptation()
+    }
     local hudOverlay = hud.create()
-    gl.glUseProgram(shader)
+    gl.glUseProgram(programs.terrain)
 
-    local locP = gl.glGetUniformLocation(shader, "uProjection")
-    local locV = gl.glGetUniformLocation(shader, "uView")
-    local locM = gl.glGetUniformLocation(shader, "uModel")
-    local locLight = gl.glGetUniformLocation(shader, "lightDir")
-    local locViewPos = gl.glGetUniformLocation(shader, "viewPos")
-    local locTex = gl.glGetUniformLocation(shader, "tex0")
-    local locTime = gl.glGetUniformLocation(shader, "time")
-
-    local locShadowMap = gl.glGetUniformLocation(shader, "shadowMap")
-    local locAmbientColor = gl.glGetUniformLocation(shader, "ambientColor")
-    local locLightColor = gl.glGetUniformLocation(shader, "lightColor")
-    local locMoonLightColor = gl.glGetUniformLocation(shader, "moonLightColor")
-    local locLightingParams = gl.glGetUniformLocation(shader, "lightingParams")
-    local locFaceLight = gl.glGetUniformLocation(shader, "faceLight")
-    local locExposure = gl.glGetUniformLocation(shader, "exposure")
-    local locShadowStrength = gl.glGetUniformLocation(shader, "shadowStrength")
-    local locLightSpaceMatrix = gl.glGetUniformLocation(shader, "lightSpaceMatrix")
+    local terrainLocations = {
+      projection = gl.glGetUniformLocation(shader, "uProjection"),
+      view = gl.glGetUniformLocation(shader, "uView"),
+      model = gl.glGetUniformLocation(shader, "uModel"),
+      light = gl.glGetUniformLocation(shader, "lightDir"),
+      viewPos = gl.glGetUniformLocation(shader, "viewPos"),
+      texture = gl.glGetUniformLocation(shader, "tex0"),
+      time = gl.glGetUniformLocation(shader, "time"),
+      ambientColor = gl.glGetUniformLocation(shader, "ambientColor"),
+      lightColor = gl.glGetUniformLocation(shader, "lightColor"),
+      moonLightColor = gl.glGetUniformLocation(shader, "moonLightColor"),
+      lightingParams = gl.glGetUniformLocation(shader, "lightingParams"),
+      carriedLightPosition = gl.glGetUniformLocation(shader, "carriedLightPosition"),
+      carriedLightEmission = gl.glGetUniformLocation(shader, "carriedLightEmission"),
+      carriedLightVolume = gl.glGetUniformLocation(shader, "carriedLightVolume"),
+      carriedVolume = gl.glGetUniformLocation(shader, "carriedVolume"),
+      cloudShadowMap = gl.glGetUniformLocation(shader, "cloudShadowMap"),
+      cloudShadow = gl.glGetUniformLocation(shader, "cloudShadow"),
+      cloudShadowStrength = gl.glGetUniformLocation(shader, "cloudShadowStrength"),
+      faceLight = gl.glGetUniformLocation(shader, "faceLight"),
+      exposure = gl.glGetUniformLocation(shader, "exposure"),
+      shadowStrength = gl.glGetUniformLocation(shader, "shadowStrength"),
+      waterLevel = gl.glGetUniformLocation(shader, "waterLevel"),
+      waterNormalMap = gl.glGetUniformLocation(shader, "waterNormalMap"),
+      waterCascadeSizes = gl.glGetUniformLocation(shader, "waterCascadeSizes"),
+      waterNormalWeights = gl.glGetUniformLocation(shader, "waterNormalWeights"),
+      causticStrength = gl.glGetUniformLocation(shader, "causticStrength")
+    }
+    local characterLocations = {
+      projection = gl.glGetUniformLocation(characterShader, "uProjection"),
+      view = gl.glGetUniformLocation(characterShader, "uView"),
+      model = gl.glGetUniformLocation(characterShader, "uModel"),
+      texture = gl.glGetUniformLocation(characterShader, "tex0"),
+      light = gl.glGetUniformLocation(characterShader, "lightDir"),
+      ambient = gl.glGetUniformLocation(characterShader, "ambientColor"),
+      lightColor = gl.glGetUniformLocation(characterShader, "lightColor"),
+      anim0 = gl.glGetUniformLocation(characterShader, "uAnim0"),
+      anim1 = gl.glGetUniformLocation(characterShader, "uAnim1")
+    }
     local shadowLocations = {
       model = gl.glGetUniformLocation(shadowShader, "uModel"),
       lightSpaceMatrix = gl.glGetUniformLocation(shadowShader, "lightSpaceMatrix"),
-      tex0 = gl.glGetUniformLocation(shadowShader, "tex0")
+      tex0 = gl.glGetUniformLocation(shadowShader, "tex0"),
+      terrainMaps = {
+        gl.glGetUniformLocation(shader, "shadowMap0"),
+        gl.glGetUniformLocation(shader, "shadowMap1"),
+        gl.glGetUniformLocation(shader, "shadowMap2")
+      },
+      terrainMatrices = {
+        gl.glGetUniformLocation(shader, "lightSpaceMatrix0"),
+        gl.glGetUniformLocation(shader, "lightSpaceMatrix1"),
+        gl.glGetUniformLocation(shader, "lightSpaceMatrix2")
+      },
+      terrainSplits = gl.glGetUniformLocation(shader, "shadowSplits"),
+      terrainSoftness = gl.glGetUniformLocation(shader, "shadowSoftness")
     }
     local skyLocations = {
       sunDir = gl.glGetUniformLocation(skyShader, "sunDir"),
@@ -1753,10 +3869,22 @@ function game.run()
       cameraPosition = gl.glGetUniformLocation(skyShader, "cameraPosition"),
       cameraProjection = gl.glGetUniformLocation(skyShader, "cameraProjection"),
       skyTuning = gl.glGetUniformLocation(skyShader, "skyTuning"),
+      skyParams = gl.glGetUniformLocation(skyShader, "skyParams"),
       fogColor = gl.glGetUniformLocation(skyShader, "fogColor"),
       moonTex = gl.glGetUniformLocation(skyShader, "moonTex"),
-      sunTex = gl.glGetUniformLocation(skyShader, "sunTex"),
-      cloudTex = gl.glGetUniformLocation(skyShader, "cloudTex")
+      sunDisc = gl.glGetUniformLocation(skyShader, "sunDisc"),
+      scatteringPlanet = gl.glGetUniformLocation(skyShader, "scatteringPlanet"),
+      scatteringScale = gl.glGetUniformLocation(skyShader, "scatteringScale"),
+      scatteringRayleigh = gl.glGetUniformLocation(skyShader, "scatteringRayleigh"),
+      scatteringDust = gl.glGetUniformLocation(skyShader, "scatteringDust"),
+      aureoleColor = gl.glGetUniformLocation(skyShader, "aureoleColor"),
+      aureoleParams = gl.glGetUniformLocation(skyShader, "aureoleParams"),
+      multipleScatter = gl.glGetUniformLocation(skyShader, "multipleScatter"),
+      moonDirection = gl.glGetUniformLocation(skyShader, "moonDirection"),
+      moonParams = gl.glGetUniformLocation(skyShader, "moonParams"),
+      galacticPole = gl.glGetUniformLocation(skyShader, "galacticPole"),
+      galacticCentre = gl.glGetUniformLocation(skyShader, "galacticCentre"),
+      milkyWay = gl.glGetUniformLocation(skyShader, "milkyWay")
     }
     local cloudLocations = {
       projection = gl.glGetUniformLocation(cloudShader, "uProjection"),
@@ -1765,59 +3893,178 @@ function game.run()
       alpha = gl.glGetUniformLocation(cloudShader, "cloudAlpha"),
       tint = gl.glGetUniformLocation(cloudShader, "cloudTint")
     }
+    local dielectricLocations = {
+      projection = gl.glGetUniformLocation(dielectricShader, "uProjection"),
+      view = gl.glGetUniformLocation(dielectricShader, "uView"),
+      model = gl.glGetUniformLocation(dielectricShader, "uModel"),
+      viewPos = gl.glGetUniformLocation(dielectricShader, "viewPos"),
+      sunDir = gl.glGetUniformLocation(dielectricShader, "sunDir"),
+      fogColor = gl.glGetUniformLocation(dielectricShader, "fogColor"),
+      skyZenithColor = gl.glGetUniformLocation(dielectricShader, "skyZenithColor"),
+      lightColor = gl.glGetUniformLocation(dielectricShader, "lightColor"),
+      viewportSize = gl.glGetUniformLocation(dielectricShader, "viewportSize"),
+      clipPlanes = gl.glGetUniformLocation(dielectricShader, "clipPlanes"),
+      iceOptics = gl.glGetUniformLocation(dielectricShader, "iceOptics"),
+      glassOptics = gl.glGetUniformLocation(dielectricShader, "glassOptics"),
+      iceAbsorption = gl.glGetUniformLocation(dielectricShader, "iceAbsorption"),
+      glassAbsorption = gl.glGetUniformLocation(dielectricShader, "glassAbsorption"),
+      tex0 = gl.glGetUniformLocation(dielectricShader, "tex0"),
+      sceneColor = gl.glGetUniformLocation(dielectricShader, "sceneColor"),
+      sceneDepth = gl.glGetUniformLocation(dielectricShader, "sceneDepth")
+    }
+    local worldgenPreviewLocations = {
+      projection = gl.glGetUniformLocation(worldgenPreviewShader, "uProjection"),
+      view = gl.glGetUniformLocation(worldgenPreviewShader, "uView"),
+      lightDir = gl.glGetUniformLocation(worldgenPreviewShader, "lightDir")
+    }
     local waterLocations = {
       projection = gl.glGetUniformLocation(waterShader, "uProjection"),
       view = gl.glGetUniformLocation(waterShader, "uView"),
-      waterCenter = gl.glGetUniformLocation(waterShader, "waterCenter"),
       waterLevel = gl.glGetUniformLocation(waterShader, "waterLevel"),
       viewPos = gl.glGetUniformLocation(waterShader, "viewPos"),
       sunDir = gl.glGetUniformLocation(waterShader, "sunDir"),
+      cloudShadowMap = gl.glGetUniformLocation(waterShader, "cloudShadowMap"),
+      cloudShadow = gl.glGetUniformLocation(waterShader, "cloudShadow"),
+      cloudShadowStrength = gl.glGetUniformLocation(waterShader, "cloudShadowStrength"),
       fogColor = gl.glGetUniformLocation(waterShader, "fogColor"),
-      fogParams = gl.glGetUniformLocation(waterShader, "fogParams"),
       lightColor = gl.glGetUniformLocation(waterShader, "lightColor"),
       skyZenithColor = gl.glGetUniformLocation(waterShader, "skyZenithColor"),
+      cascadeSizes = gl.glGetUniformLocation(waterShader, "cascadeSizes"),
+      displacementWeights = gl.glGetUniformLocation(waterShader, "displacementWeights"),
+      normalWeights = gl.glGetUniformLocation(waterShader, "normalWeights"),
+      openWaterWaveBoost = gl.glGetUniformLocation(waterShader, "openWaterWaveBoost"),
+      viewportSize = gl.glGetUniformLocation(waterShader, "viewportSize"),
+      clipPlanes = gl.glGetUniformLocation(waterShader, "clipPlanes"),
       time = gl.glGetUniformLocation(waterShader, "time"),
-      waterTex = gl.glGetUniformLocation(waterShader, "waterTex")
+      refractionStrength = gl.glGetUniformLocation(waterShader, "refractionStrength"),
+      absorption = gl.glGetUniformLocation(waterShader, "absorption"),
+      displacementMap0 = gl.glGetUniformLocation(waterShader, "displacementMap0"),
+      displacementMap1 = gl.glGetUniformLocation(waterShader, "displacementMap1"),
+      displacementMap2 = gl.glGetUniformLocation(waterShader, "displacementMap2"),
+      normalMap0 = gl.glGetUniformLocation(waterShader, "normalMap0"),
+      normalMap1 = gl.glGetUniformLocation(waterShader, "normalMap1"),
+      normalMap2 = gl.glGetUniformLocation(waterShader, "normalMap2"),
+      sceneColor = gl.glGetUniformLocation(waterShader, "sceneColor"),
+      sceneDepth = gl.glGetUniformLocation(waterShader, "sceneDepth")
     }
     local atmospherePostLocations = {
       sceneColor = gl.glGetUniformLocation(atmospherePostShader, "sceneColor"),
       sceneDepth = gl.glGetUniformLocation(atmospherePostShader, "sceneDepth"),
       underwaterOverlay = gl.glGetUniformLocation(atmospherePostShader, "underwaterOverlay"),
+      fogVolume = gl.glGetUniformLocation(atmospherePostShader, "fogVolume"),
       cameraPosition = gl.glGetUniformLocation(atmospherePostShader, "cameraPosition"),
       cameraForward = gl.glGetUniformLocation(atmospherePostShader, "cameraForward"),
       cameraRight = gl.glGetUniformLocation(atmospherePostShader, "cameraRight"),
       cameraUp = gl.glGetUniformLocation(atmospherePostShader, "cameraUp"),
       cameraProjection = gl.glGetUniformLocation(atmospherePostShader, "cameraProjection"),
-      sunDir = gl.glGetUniformLocation(atmospherePostShader, "sunDir"),
-      fogColor = gl.glGetUniformLocation(atmospherePostShader, "fogColor"),
-      fogParams = gl.glGetUniformLocation(atmospherePostShader, "fogParams"),
-      skyZenithColor = gl.glGetUniformLocation(atmospherePostShader, "skyZenithColor"),
-      lightColor = gl.glGetUniformLocation(atmospherePostShader, "lightColor"),
       depthParams = gl.glGetUniformLocation(atmospherePostShader, "depthParams"),
-      atmosphereParams = gl.glGetUniformLocation(atmospherePostShader, "atmosphereParams"),
-      scatterParams = gl.glGetUniformLocation(atmospherePostShader, "scatterParams"),
+      volumeParams = gl.glGetUniformLocation(atmospherePostShader, "volumeParams"),
+      localSkyVisibility = gl.glGetUniformLocation(atmospherePostShader, "localSkyVisibility"),
       blurAmount = gl.glGetUniformLocation(atmospherePostShader, "blurAmount"),
-      time = gl.glGetUniformLocation(atmospherePostShader, "time")
+      underwaterAmount = gl.glGetUniformLocation(atmospherePostShader, "underwaterAmount"),
+      time = gl.glGetUniformLocation(atmospherePostShader, "time"),
+      bloomTexture = gl.glGetUniformLocation(atmospherePostShader, "bloomTexture"),
+      godRaysTexture = gl.glGetUniformLocation(atmospherePostShader, "godRaysTexture"),
+      eyeExposure = gl.glGetUniformLocation(atmospherePostShader, "eyeExposure"),
+      gradeParams = gl.glGetUniformLocation(atmospherePostShader, "gradeParams"),
+      tonemapParams = gl.glGetUniformLocation(atmospherePostShader, "tonemapParams"),
+      godRaysStrength = gl.glGetUniformLocation(atmospherePostShader, "godRaysStrength"),
+      motionBlurVector = gl.glGetUniformLocation(atmospherePostShader, "motionBlurVector")
     }
+    effects.godRaysRuntime = {
+      shader = programs.godRays,
+      target = effects.createGodRaysTarget(windowWidth, windowHeight,
+        POST.godRaysResolutionScale or 0.25),
+      locations = {
+        sceneDepth = gl.glGetUniformLocation(programs.godRays, "sceneDepth"),
+        lightPosition = gl.glGetUniformLocation(programs.godRays, "lightPosition"),
+        lightColor = gl.glGetUniformLocation(programs.godRays, "lightColor"),
+        rayParams = gl.glGetUniformLocation(programs.godRays, "rayParams"),
+        sourceParams = gl.glGetUniformLocation(programs.godRays, "sourceParams"),
+        aspectRatio = gl.glGetUniformLocation(programs.godRays, "aspectRatio"),
+        sampleCount = gl.glGetUniformLocation(programs.godRays, "sampleCount")
+      }
+    }
+    effects.eyeAdaptationRuntime.locations = {
+      sceneColor = gl.glGetUniformLocation(effects.eyeAdaptationRuntime.shader, "sceneColor"),
+      sceneDepth = gl.glGetUniformLocation(effects.eyeAdaptationRuntime.shader, "sceneDepth"),
+      previousExposure = gl.glGetUniformLocation(effects.eyeAdaptationRuntime.shader, "previousExposure"),
+      adaptationParams = gl.glGetUniformLocation(effects.eyeAdaptationRuntime.shader, "adaptationParams"),
+      adaptationSpeeds = gl.glGetUniformLocation(effects.eyeAdaptationRuntime.shader, "adaptationSpeeds"),
+      meterParams = gl.glGetUniformLocation(effects.eyeAdaptationRuntime.shader, "meterParams")
+    }
+
+    local bloomShaders = {
+      down = effects.createBloomDownShader(),
+      up = effects.createBloomUpShader()
+    }
+    bloomShaders.downLoc = {
+      source = gl.glGetUniformLocation(bloomShaders.down, "source"),
+      texelSize = gl.glGetUniformLocation(bloomShaders.down, "texelSize"),
+      prefilter = gl.glGetUniformLocation(bloomShaders.down, "prefilter"),
+      clampMax = gl.glGetUniformLocation(bloomShaders.down, "clampMax")
+    }
+    bloomShaders.upLoc = {
+      source = gl.glGetUniformLocation(bloomShaders.up, "source"),
+      texelSize = gl.glGetUniformLocation(bloomShaders.up, "texelSize"),
+      radius = gl.glGetUniformLocation(bloomShaders.up, "radius")
+    }
+    local bloomChain = effects.createBloomChain(windowWidth, windowHeight, POST.bloomLevels or 6)
 
     local model = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
 
-    updateViewportAndProjection(locP)
-    gl.glUniformMatrix4fv(locM, 1, 0, ffi.new("float[16]", model))
-    gl.glUniform1i(locTex, 0)
-    gl.glUniform1i(locShadowMap, 1)
+    updateViewportAndProjection(terrainLocations.projection)
+    gl.glUniformMatrix4fv(terrainLocations.model, 1, 0, ffi.new("float[16]", model))
+    gl.glUniform1i(terrainLocations.texture, 0)
+    gl.glUniform1i(shadowLocations.terrainMaps[1], 1)
+    gl.glUniform1i(shadowLocations.terrainMaps[2], 3)
+    gl.glUniform1i(shadowLocations.terrainMaps[3], 4)
+    gl.glUniform1i(terrainLocations.waterNormalMap, 2)
+    gl.glUniform1i(terrainLocations.carriedLightVolume, 5)
+    gl.glUniform1i(terrainLocations.cloudShadowMap, 6)
     gl.glUseProgram(skyShader)
     gl.glUniform1i(skyLocations.moonTex, 2)
-    gl.glUniform1i(skyLocations.sunTex, 4)
-    gl.glUniform1i(skyLocations.cloudTex, 5)
     gl.glUseProgram(shader)
-    gl.glUniform3f(locFaceLight, graphics.terrain.topLight, graphics.terrain.sideLight, graphics.terrain.bottomLight)
-    gl.glUniform1f(locExposure, graphics.terrain.exposure)
+    gl.glUniform3f(terrainLocations.faceLight, graphics.terrain.topLight,
+      graphics.terrain.sideLight, graphics.terrain.bottomLight)
+    gl.glUniform1f(terrainLocations.exposure, graphics.terrain.exposure)
 
-    local playerCamera = camera.new(playerOptionsForGameMode("survival"))
+    local playerCamera = camera.new(playerOptionsForGameMode("survival", activeWorldProfile))
     playerCamera:placeAtSpawn(world, playerCamera.position[1], playerCamera.position[3])
+    local worldgenPreviewCamera = camera.new({position = {0.0, 900.0, 0.0}, yaw = 45.0, pitch = -54.0})
+    local worldgenPreviewState = {
+      centerX = playerCamera.position[1],
+      centerZ = playerCamera.position[3],
+      yaw = 45.0,
+      distance = 980.0
+    }
+    local worldgenPreviewMesh = nil
     local displayState = createDisplayState()
+    glfw.glfwSwapInterval(displayState.vsync ~= false and 1 or 0)
+    local launchFullscreen = displayState.fullscreen == true
+    displayState.fullscreen = false
+    if launchFullscreen then
+      setFullscreen(window, displayState, true, terrainLocations.projection)
+    end
+    local audioEngine = game.AudioEngine.new()
+    local scrollCallback = ffi.cast("GLFWscrollfun", function(_, _, yoffset)
+      displayState.hotbarScroll = displayState.hotbarScroll + tonumber(yoffset)
+    end)
+    displayState.scrollCallback = scrollCallback
+    glfw.glfwSetScrollCallback(window, scrollCallback)
+    local charCallback = ffi.cast("GLFWcharfun", function(_, codepoint)
+      local value = tonumber(codepoint)
+      -- The bundled bitmap font contains the printable Latin range. GLFW's
+      -- character callback still gives us layout-aware punctuation/case,
+      -- unlike polling physical key codes.
+      if value and value >= 32 and value <= 126 then
+        displayState.textInputCharacters[#displayState.textInputCharacters + 1] = string.char(value)
+      end
+    end)
+    displayState.charCallback = charCallback
+    glfw.glfwSetCharCallback(window, charCallback)
     local lastTime = glfw.glfwGetTime()
+    local lastPlayerSaveTime = lastTime
 
     while glfw.glfwWindowShouldClose(window) == 0 do
       local currentTime = glfw.glfwGetTime()
@@ -1825,41 +4072,123 @@ function game.run()
       lastTime = currentTime
 
       updateDebugFrameStats(displayState, dt)
-      updateFullscreenInput(window, displayState, locP, playerCamera)
+      updateDevMenuInput(window, displayState, devMenu)
+      updateFullscreenInput(window, displayState, terrainLocations.projection, playerCamera, devMenu)
       updateDebugInput(window, displayState)
+      updatePerspectiveInput(window, displayState, playerCamera)
+      devMenu:processExportRequest()
+      if devMenu:consumePreviewRebuildRequest() then
+        worldgenPreviewMesh = rebuildWorldgenPreview(
+          worldgenPreviewMesh,
+          devMenu:stagedGenerationSettings(),
+          world.seed,
+          worldgenPreviewState.centerX,
+          worldgenPreviewState.centerZ
+        )
+        worldgenPreviewState.meshCenterX = worldgenPreviewState.centerX
+        worldgenPreviewState.meshCenterZ = worldgenPreviewState.centerZ
+      end
+      if devMenu:consumeRegenerateRequest() and displayState.hasWorld and
+          world.generatorType ~= "superflat" and world.generatorType ~= "showcase" then
+        devMenu:commitGenerationChanges(graphics.terrainGeneration)
+        terrain.refreshGenerationSettings()
+        releaseTerrainMeshes(terrainMeshes)
+        distantTerrain:clear()
+        terrainMeshes = {}
+        displayState.pendingTerrainEntries = {}
+        world.seed = graphics.terrainGeneration.seed
+        world:clearGeneratedChunks()
+        terrain.setSeed(world.seed)
+        devMenu:setPreviewMode(false)
+        displayState.debugInfo = nil
+        displayState.debugSampleTimer = 999.0
+      end
       refreshDrawableSize(window, displayState)
-      updateMenuInput(window, displayState, playerCamera)
+      updateInventoryInput(window, displayState, playerCamera)
+      if displayState.inventory and displayState.inventory:updateSmelting(dt) then
+        displayState.inventoryVersion=(displayState.inventoryVersion or 0)+1
+      end
+      updateMenuInput(window, displayState, playerCamera, terrainLocations.projection)
+      displayState.renderDistance = renderDistance.clamp(displayState.renderDistance, DISTANT_CHUNK_RADIUS)
+      distantTerrain:setRadius(displayState.renderDistance)
+      world.chunkRadius = renderDistance.fullDetailRadius(displayState.renderDistance, CHUNK_RENDER_RADIUS)
       local renderedLoadingFrame = false
       if displayState.pendingNewWorldConfig then
         local config = displayState.pendingNewWorldConfig
         displayState.pendingNewWorldConfig = nil
+        world:saveDirtyChunks()
         displayState.loadingJob = createWorldLoadingJob(config)
       end
       if displayState.loadingJob then
         local job = displayState.loadingJob
         local done = stepWorldLoadingJob(job)
         if done then
+          world:close()
           releaseTerrainMeshes(terrainMeshes)
+          distantTerrain:clear()
           world = job.world
+          activeWorldProfile = job.worldProfile
+          activePostSettings = postSettingsFor(activeWorldProfile)
           terrainMeshes = job.terrainMeshes
           displayState.currentWorldSave = job.save
-          currentWaterLevel = job.config.generatorType == "superflat" and nil or WATER_LEVEL
-          playerCamera = camera.new(playerOptionsForGameMode(job.config.gameMode))
+          if job.config.generatorType == "superflat" or job.config.generatorType == "showcase" or
+              not activeWorldProfile.hasSurfaceWater then
+            currentWaterLevel = nil
+          else
+            currentWaterLevel = WATER_LEVEL
+          end
+          playerCamera = camera.new(playerOptionsForGameMode(job.config.gameMode, activeWorldProfile))
+          playerCamera.perspective = game.startPerspective or 0
           playerCamera:placeAtSpawn(world, job.spawnX, job.spawnZ)
-          playerCamera.firstMouse = true
-          displayState.selectedSlot = 1
           displayState.worldGameMode = job.config.gameMode
+          displayState.inventory = Inventory.new(job.config.gameMode)
+          displayState.bodyDamage = BodyDamage.new()
+          displayState.health = 20
+          displayState.selectedSlot = 1
+          restorePlayer(displayState, playerCamera, job.savedPlayer)
+          if game.startHold then
+            displayState.inventory.slots[1] = {item = game.startHold, count = 1}
+            displayState.inventory.selected = 1
+            displayState.selectedSlot = 1
+          end
+          -- Physics belongs to the selected world, not to an old camera
+          -- snapshot. This also lets profile upgrades correct existing saves.
+          playerCamera.gravity = (graphics.player.gravity or 15.5) *
+            (activeWorldProfile.gravityScale or 1.0)
+          -- Movement tuning is runtime configuration, not world state. Older
+          -- player snapshots contain the previous launch speed, so replace it
+          -- after restoration to make the softer jump apply to existing saves.
+          playerCamera.jumpSpeed = graphics.player.jumpSpeed or 6.6
+          displayState.inventoryVersion = displayState.inventoryVersion + 1
+          playerCamera.firstMouse = true
+          refreshCreativeFilter(displayState)
           displayState.worldGeneratorType = job.config.generatorType
+          displayState.worldId = activeWorldProfile.id
+          devMenu:setGenerationSeed(job.seed)
+          worldgenPreviewState.centerX = playerCamera.position[1]
+          worldgenPreviewState.centerZ = playerCamera.position[3]
           displayState.hasWorld = true
+          displayState.perspective = playerCamera.perspective
           displayState.screen = nil
           displayState.loadingJob = nil
           displayState.pendingTerrainEntries = job.streamingEntries or {}
+          droppedItems:clear()
+          if job.config.generatorType == "showcase" then
+            for _, display in ipairs(showcase.displays()) do
+              droppedItems:spawnDisplay(display.key,
+                {display.x, display.y, display.z}, display.scale)
+            end
+          end
+          effects.blockParticles:clear()
+          fallingTrees:clear()
+          releaseFallingTreeMeshes(fallingTreeMeshes)
+          lastPlayerSaveTime = currentTime
         else
           syncCursorMode(window, displayState, playerCamera)
-          gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+          gl.glBindFramebuffer(GL.FRAMEBUFFER, 0)
           gl.glViewport(0, 0, windowWidth, windowHeight)
           gl.glClearColor(0.0, 0.0, 0.0, 1.0)
-          gl.glClear(GL_COLOR_BUFFER_BIT + GL_DEPTH_BUFFER_BIT)
+          gl.glClear(GL.COLOR_BUFFER_BIT + GL.DEPTH_BUFFER_BIT)
           hudOverlay:drawLoading(windowWidth, windowHeight, job)
           glfw.glfwSwapBuffers(window)
           glfw.glfwPollEvents()
@@ -1868,10 +4197,10 @@ function game.run()
       end
       if not renderedLoadingFrame and displayState.screen and not displayState.hasWorld then
         syncCursorMode(window, displayState, playerCamera)
-        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        gl.glBindFramebuffer(GL.FRAMEBUFFER, 0)
         gl.glViewport(0, 0, windowWidth, windowHeight)
         gl.glClearColor(0.0, 0.0, 0.0, 1.0)
-        gl.glClear(GL_COLOR_BUFFER_BIT + GL_DEPTH_BUFFER_BIT)
+        gl.glClear(GL.COLOR_BUFFER_BIT + GL.DEPTH_BUFFER_BIT)
         hudOverlay:drawMenu(windowWidth, windowHeight, displayState.screen, displayState.menuMouseX, displayState.menuMouseY, displayState, currentTime)
         glfw.glfwSwapBuffers(window)
         glfw.glfwPollEvents()
@@ -1879,8 +4208,9 @@ function game.run()
       end
       if not renderedLoadingFrame then
         syncCursorMode(window, displayState, playerCamera)
+        local previewMode = devMenu:isPreviewMode() and worldgenPreviewMesh ~= nil
         local queueStats = {
-          budget = TERRAIN_WORK_BUDGET,
+          budget = BUDGET.terrainWork,
           processed = 0,
           chunkSteps = 0,
           meshSteps = 0,
@@ -1889,38 +4219,221 @@ function game.run()
           dropped = 0,
           lightingBudget = 0
         }
-        pruneTerrainMeshes(world, terrainMeshes, displayState.pendingTerrainEntries, playerCamera.position[1], playerCamera.position[3])
-        if #displayState.pendingTerrainEntries < CHUNK_QUEUE_BACKLOG then
-          local streamForward = playerCamera:getHorizontalFront()
-          queueTerrainMeshes(
-            world,
-            displayState.pendingTerrainEntries,
-            playerCamera.position[1],
-            playerCamera.position[3],
-            math.min(CHUNK_QUEUE_BUDGET, CHUNK_QUEUE_BACKLOG - #displayState.pendingTerrainEntries),
-            {
-              predictedX = playerCamera.position[1] + (playerCamera.velocity and playerCamera.velocity[1] or 0.0) * 1.5,
-              predictedZ = playerCamera.position[3] + (playerCamera.velocity and playerCamera.velocity[3] or 0.0) * 1.5,
-              forwardX = streamForward[1],
-              forwardZ = streamForward[3]
-            }
-          )
-        end
-        if #displayState.pendingTerrainEntries > 0 or world.lightDirty or world.lightingJob then
-          queueStats = processTerrainMeshQueue(world, terrainMeshes, displayState.pendingTerrainEntries, TERRAIN_WORK_BUDGET)
+        local distantStats = nil
+        if not previewMode then
+          if displayState.hasWorld then
+            distantStats = distantTerrain:update(
+              world, terrainMeshes, displayState.pendingTerrainEntries,
+              playerCamera.position[1], playerCamera.position[3]
+            )
+            queueStats.distant = distantStats
+          end
+          pruneTerrainMeshes(world, terrainMeshes, displayState.pendingTerrainEntries, playerCamera.position[1], playerCamera.position[3])
+          if #displayState.pendingTerrainEntries < BUDGET.chunkBacklog then
+            local streamForward = playerCamera:getHorizontalFront()
+            queueTerrainMeshes(
+              world,
+              displayState.pendingTerrainEntries,
+              playerCamera.position[1],
+              playerCamera.position[3],
+              math.min(BUDGET.chunkQueue, BUDGET.chunkBacklog - #displayState.pendingTerrainEntries),
+              {
+                predictedX = playerCamera.position[1] + (playerCamera.velocity and playerCamera.velocity[1] or 0.0) * 1.5,
+                predictedZ = playerCamera.position[3] + (playerCamera.velocity and playerCamera.velocity[3] or 0.0) * 1.5,
+                forwardX = streamForward[1],
+                forwardZ = streamForward[3]
+              },
+              function(chunkX, chunkZ) return distantTerrain:isPending(chunkX, chunkZ) end
+            )
+          end
+          local predictedX = playerCamera.position[1] +
+            (playerCamera.velocity and playerCamera.velocity[1] or 0.0) * 1.5
+          local predictedZ = playerCamera.position[3] +
+            (playerCamera.velocity and playerCamera.velocity[3] or 0.0) * 1.5
+          require("chunk_streaming").prioritize(world, displayState.pendingTerrainEntries,
+            playerCamera.position[1], playerCamera.position[3], predictedX, predictedZ)
+          if #displayState.pendingTerrainEntries > 0 or world.lightDirty or world.lightingJob then
+            local nearChunksMissing = not require("chunk_streaming").collisionRingReady(world, predictedX, predictedZ)
+            queueStats = processTerrainMeshQueue(
+              world,
+              terrainMeshes,
+              displayState.pendingTerrainEntries,
+              nearChunksMissing and (PERFORMANCE.nearTerrainWorkBudget or BUDGET.terrainWork) or BUDGET.terrainWork,
+              nearChunksMissing and
+                ((PERFORMANCE.nearTerrainFrameBudgetMs or PERFORMANCE.terrainFrameBudgetMs or 6.0) / 1000.0) or
+                BUDGET.terrainFrame
+            )
+            queueStats.distant = distantStats
+          end
         end
         displayState.lastQueueStats = queueStats
-        if not displayState.screen then
-          playerCamera:update(dt, window, world)
-          updateBlockEditInput(window, displayState, world, displayState.pendingTerrainEntries, playerCamera)
+        if displayState.hasWorld and not previewMode then
+          effects.blockParticles:update(dt, world)
+          local pickedUp = droppedItems:update(dt, world, playerCamera.position, displayState.inventory)
+          if pickedUp > 0 then
+            displayState.inventoryVersion = displayState.inventoryVersion + 1
+          end
+          local completedTrees,impactTrees,detachedLeafTrees=fallingTrees:update(dt)
+          for _,tree in ipairs(detachedLeafTrees) do
+            if displayState.worldGameMode~="creative" then
+              local dx,dz=tree.direction[1],tree.direction[3]
+              local sideX,sideZ=-dz,dx
+              for _,drop in ipairs(fallingTrees:leafDrops(tree,24)) do
+                local forward=0.8+math.random()*1.2
+                local scatter=(math.random()-0.5)*2.4
+                droppedItems:spawn(drop.item,drop.count,drop.position,{
+                  dx*forward+sideX*scatter,1.2+math.random()*1.8,
+                  dz*forward+sideZ*scatter
+                },0.65)
+              end
+            end
+          end
+          for _,tree in ipairs(impactTrees) do
+            local impactPosition=tree.impactPosition or tree.pivot
+            local landingX,landingZ=impactPosition[1],impactPosition[3]
+            local impactDx=playerCamera.position[1]-landingX
+            local impactDz=playerCamera.position[3]-landingZ
+            local impactDistance=math.sqrt(impactDx*impactDx+impactDz*impactDz)
+            if impactDistance<24 then
+              local mass=math.min(1.0,(tree.logCount or 1)/12)
+              local falloff=1.0-impactDistance/24
+              playerCamera.landingViewOffset=(playerCamera.landingViewOffset or 0)-0.075*mass*falloff
+            end
+          end
+          for _,tree in ipairs(completedTrees) do
+            releaseFallingTreeMesh(fallingTreeMeshes,tree.id)
+            if displayState.worldGameMode~="creative" then
+              droppedItems:spawn(tree.drop,tree.logCount,
+                fallingTrees:dropPosition(tree),{0,1.4,0},0.5)
+            end
+          end
         end
-        local sunDir = math3d.normalize(atmosphere.sunDirection(currentTime, SUN_CYCLE_SPEED))
-        local sky = atmosphere.forSun(sunDir, FOG_START, FOG_END)
+        displayState.inventoryOverlayOpen = game.isInventoryOverlay(displayState.screen)
+        if previewMode then
+          updateWorldgenPreviewCamera(worldgenPreviewState, worldgenPreviewCamera, window, dt, not devMenu:wantsMouse())
+          local meshCenterX = worldgenPreviewState.meshCenterX or worldgenPreviewState.centerX
+          local meshCenterZ = worldgenPreviewState.meshCenterZ or worldgenPreviewState.centerZ
+          if math.abs(worldgenPreviewState.centerX - meshCenterX) > 520.0 or
+             math.abs(worldgenPreviewState.centerZ - meshCenterZ) > 520.0 then
+            worldgenPreviewMesh = rebuildWorldgenPreview(
+              worldgenPreviewMesh,
+              devMenu:stagedGenerationSettings(),
+              world.seed,
+              worldgenPreviewState.centerX,
+              worldgenPreviewState.centerZ
+            )
+            worldgenPreviewState.meshCenterX = worldgenPreviewState.centerX
+            worldgenPreviewState.meshCenterZ = worldgenPreviewState.centerZ
+          end
+        elseif not displayState.screen or displayState.inventoryOverlayOpen then
+          local body = displayState.bodyDamage
+          if body then
+            body:update(dt)
+            local trauma = body:headEffect()
+            playerCamera.movementMultiplier = body:movementMultiplier()
+            playerCamera.sprintConditionMultiplier = body:sprintMultiplier()
+            playerCamera.damageShake = trauma.shake
+            displayState.headDamageBlur = trauma.blur
+            displayState.staminaRecoveryMultiplier = body:recoveryMultiplier()
+            displayState.health = body:vitality() * 20
+          end
+          playerCamera.mouseSensitivity = (graphics.player.mouseSensitivity or 0.085) *
+            math.max(0.1, (displayState.sensitivity or 100) / 100.0)
+          playerCamera.invertMouse = displayState.invertMouse == true
+          playerCamera.viewBobbingEnabled = displayState.viewBobbing ~= false
+          playerCamera.controlBindings = displayState.controlBindings
+          -- Inventory and developer UI are overlays, not pause screens. Keep
+          -- movement, gravity and view motion running beneath them, while a
+          -- visible cursor owns mouse look and gameplay clicks.
+          playerCamera:update(dt, window, world,
+            not displayState.devMenuOpen and not displayState.inventoryOverlayOpen)
+          if body and displayState.worldGameMode ~= "creative" and
+              playerCamera.lastLandingImpact then
+            body:applyFall(playerCamera.lastLandingImpact)
+            displayState.health = body:vitality() * 20
+          end
+          playerCamera:updatePerspectiveObstruction(world)
+          heldItem.updateMotion(displayState.heldMotion, playerCamera, dt)
+          if not displayState.devMenuOpen and not displayState.inventoryOverlayOpen then
+            updateBlockEditInput(window, displayState, world,
+              displayState.pendingTerrainEntries, playerCamera, droppedItems,
+              fallingTrees, effects.blockParticles, audioEngine, dt)
+          else
+            -- Do not let clicks on an ImGui control mine or place blocks in
+            -- the survival world underneath it.
+            displayState.breakTarget = nil
+            displayState.breakTargetPosition = nil
+            displayState.breakDuration = nil
+            displayState.breakProgress = 0.0
+            displayState.hotbarScroll = 0.0
+            displayState.breakWasDown =
+              glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_LEFT) == glfw.GLFW_PRESS
+            displayState.placeWasDown =
+              glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_RIGHT) == glfw.GLFW_PRESS
+            displayState.pickWasDown =
+              glfw.glfwGetMouseButton(window, glfw.GLFW_MOUSE_BUTTON_MIDDLE) == glfw.GLFW_PRESS
+            displayState.dropWasDown =
+              inputBindings.actionDown(window, displayState.controlBindings, "drop")
+          end
+        else
+          displayState.hotbarScroll = 0.0
+        end
+        if displayState.screen and displayState.hasWorld then
+          playerCamera:updatePerspectiveObstruction(world)
+        end
+        audioEngine:update(dt, playerCamera, world, displayState.soundVolume)
+        if displayState.hasWorld and currentTime - lastPlayerSaveTime >= PLAYER_AUTOSAVE_INTERVAL then
+          saveCurrentPlayer(displayState, playerCamera)
+          world:saveDirtyChunks()
+          lastPlayerSaveTime = currentTime
+        end
+        local worldCycleSpeed = SUN_CYCLE_SPEED / (activeWorldProfile.dayLengthScale or 1.0)
+        devMenu:setNaturalTimeOfDay(timeOfDayForSimulationTime(currentTime, worldCycleSpeed))
+        local atmosphereTime = currentTime
+        if game.forceTimeOfDay then
+          atmosphereTime = simulationTimeForTimeOfDay(game.forceTimeOfDay, worldCycleSpeed)
+        end
+        if devMenu:usesTimeOverride() then
+          atmosphereTime = simulationTimeForTimeOfDay(devMenu:timeOfDay(), worldCycleSpeed)
+        end
+        updateRuntimeAtmosphereSettings(runtimeAtmosphereSettings, devMenu:fogStrength(),
+          activeWorldProfile, displayState.renderDistance)
+
+        local skyState=atmosphere.skyState(atmosphereTime,worldCycleSpeed,activeWorldProfile)
+        local sunDir = math3d.normalize(skyState.sunDirection)
+        local sky = atmosphere.forSun(sunDir,
+          runtimeAtmosphereSettings.fogStart or FOG_START,
+          runtimeAtmosphereSettings.fogEnd or FOG_END,
+          nil,activeWorldProfile,skyState)
+        local activeCamera = previewMode and worldgenPreviewCamera or playerCamera
+        local fovKick = previewMode and 0.0 or (playerCamera.fovOffset or 0.0)
+        local requestedFov = math.max(50, math.min(110,
+          displayState.fovDegrees or graphics.window.fovDegrees or 70))
+        CAMERA_FOV = math.rad(requestedFov + fovKick)
         local projection = math3d.perspective(CAMERA_FOV, windowWidth / windowHeight, CAMERA_NEAR, CAMERA_FAR)
-        local view = math3d.lookAt(playerCamera.position, playerCamera:getCenter(), {0, 1, 0})
+        local viewPosition = activeCamera.getViewPosition and activeCamera:getViewPosition() or activeCamera.position
+        local underwaterTarget = not previewMode and world:isPointSubmerged(viewPosition) and 1.0 or 0.0
+        local underwaterBlend = 1.0 - math.exp(-math.min(dt, 0.1) * 14.0)
+        displayState.underwaterAmount = (displayState.underwaterAmount or 0.0) +
+          (underwaterTarget - (displayState.underwaterAmount or 0.0)) * underwaterBlend
+        local viewCenter = activeCamera.getViewCenter and activeCamera:getViewCenter() or activeCamera:getCenter()
+        local viewUp = activeCamera.getViewUp and activeCamera:getViewUp() or {0, 1, 0}
+        local view = math3d.lookAt(viewPosition, viewCenter, viewUp)
         local frustum = math3d.frustumPlanes(math3d.multiplyMat4(projection, view))
-        local visibleMeshes = visibleTerrainMeshes(terrainMeshes, frustum)
-        if displayState.debugScreen and not displayState.screen then
+        local centerChunkX = World.chunkCoord(activeCamera.position[1])
+        local centerChunkZ = World.chunkCoord(activeCamera.position[3])
+        local visibleNearMeshes = previewMode and {} or visibleTerrainMeshes(
+          terrainMeshes, frustum, centerChunkX, centerChunkZ, world.chunkRadius
+        )
+        local visibleMeshes = appendMeshes({}, visibleNearMeshes)
+        if not previewMode then
+          appendMeshes(visibleMeshes, distantTerrain:visible(
+            frustum, math3d.aabbInFrustum, centerChunkX, centerChunkZ, world.chunkRadius
+          ))
+        end
+        local visibleDielectrics = previewMode and {} or visibleDielectricMeshes(visibleNearMeshes)
+        local visibleWater = previewMode and {} or visibleWaterMeshes(visibleMeshes)
+        if displayState.debugScreen and not displayState.screen and not previewMode then
           displayState.debugSampleTimer = displayState.debugSampleTimer + dt
           if not displayState.debugInfo or displayState.debugSampleTimer >= 0.25 then
             displayState.debugInfo = buildDebugInfo(
@@ -1940,57 +4453,313 @@ function game.run()
         elseif not displayState.debugScreen then
           displayState.debugInfo = nil
         end
-        local lightSpaceMatrix = effects.lightSpaceMatrix(playerCamera.position, sunDir, TERRAIN_MAX_H, SHADOW_DISTANCE, SHADOW_NEAR, SHADOW_FAR)
-        effects.renderShadowPass(shadowShader, shadowMap, shadowLocations, visibleMeshes, characterMesh, lightSpaceMatrix, model, SHADOW_MAP_SIZE, windowWidth, windowHeight, atlasTex)
+        effects.lightSpaceMatrices = effects.cascadeShadowMatrices(activeCamera.position,
+          sunDir, TERRAIN_MAX_H, graphics.shadows.cascadeSplits,
+          graphics.shadows.cascadeMapSizes, SHADOW.near, SHADOW.far)
+        if not previewMode then
+          effects.renderShadowPass(shadowShader, shadowMap, shadowLocations,
+            visibleNearMeshes, nil, effects.lightSpaceMatrices, model,
+            windowWidth, windowHeight, atlasTex)
+        end
+        effects.renderVolumetricFog(volumetricFog, volumetricFogShaders, activeCamera,
+          sunDir, sky, CAMERA_FOV, windowWidth, windowHeight,
+          currentWaterLevel or WATER_LEVEL,
+          previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings,
+          shadowMap, effects.lightSpaceMatrices[#effects.lightSpaceMatrices])
+        if not previewMode and currentWaterLevel and #visibleWater > 0 then
+          -- Terrain caustics and the surface must read the same current FFT field.
+          effects.updateOceanSimulation(ocean, dt)
+        end
 
         sceneTarget = effects.ensureSceneTarget(sceneTarget, windowWidth, windowHeight)
-        gl.glBindFramebuffer(GL_FRAMEBUFFER, sceneTarget.framebuffer[0])
+        waterBackgroundTarget = effects.ensureSceneTarget(waterBackgroundTarget, windowWidth, windowHeight)
+        bloomChain = effects.ensureBloomChain(bloomChain, windowWidth, windowHeight, POST.bloomLevels or 6)
+        gl.glBindFramebuffer(GL.FRAMEBUFFER, sceneTarget.framebuffer[0])
         gl.glViewport(0, 0, windowWidth, windowHeight)
 
         gl.glUseProgram(shader)
-        gl.glUniformMatrix4fv(locP, 1, 0, ffi.new("float[16]", projection))
-        gl.glUniformMatrix4fv(locV, 1, 0, ffi.new("float[16]", view))
-        gl.glUniformMatrix4fv(locLightSpaceMatrix, 1, 0, ffi.new("float[16]", lightSpaceMatrix))
-        gl.glUniform3f(locViewPos, playerCamera.position[1], playerCamera.position[2], playerCamera.position[3])
-        gl.glUniform3f(locLight, -sunDir[1], -sunDir[2], -sunDir[3])
-        gl.glUniform1f(locTime, currentTime)
-        gl.glUniform3f(locAmbientColor, sky.ambient[1], sky.ambient[2], sky.ambient[3])
-        gl.glUniform3f(locLightColor, sky.lightColor[1], sky.lightColor[2], sky.lightColor[3])
-        gl.glUniform3f(locMoonLightColor, sky.moonLightColor[1], sky.moonLightColor[2], sky.moonLightColor[3])
-        gl.glUniform3f(locLightingParams, sky.daylight, sky.moonAmount, sky.ambientFloor)
-        gl.glUniform1f(locShadowStrength, sky.shadowStrength)
+        gl.glUniformMatrix4fv(terrainLocations.projection, 1, 0, ffi.new("float[16]", projection))
+        gl.glUniformMatrix4fv(terrainLocations.view, 1, 0, ffi.new("float[16]", view))
+        gl.glUniformMatrix4fv(shadowLocations.terrainMatrices[1], 1, 0,
+          ffi.new("float[16]", effects.lightSpaceMatrices[1]))
+        gl.glUniformMatrix4fv(shadowLocations.terrainMatrices[2], 1, 0,
+          ffi.new("float[16]", effects.lightSpaceMatrices[2]))
+        gl.glUniformMatrix4fv(shadowLocations.terrainMatrices[3], 1, 0,
+          ffi.new("float[16]", effects.lightSpaceMatrices[3]))
+        gl.glUniform3f(shadowLocations.terrainSplits,
+          graphics.shadows.cascadeSplits[1], graphics.shadows.cascadeSplits[2],
+          graphics.shadows.cascadeSplits[3])
+        gl.glUniform1f(shadowLocations.terrainSoftness, graphics.shadows.softness or 1.0)
+        gl.glUniform3f(terrainLocations.viewPos, viewPosition[1], viewPosition[2], viewPosition[3])
+        gl.glUniform3f(terrainLocations.light, -sunDir[1], -sunDir[2], -sunDir[3])
+        gl.glUniform1f(terrainLocations.time, currentTime)
+        gl.glUniform3f(terrainLocations.ambientColor, sky.ambient[1], sky.ambient[2], sky.ambient[3])
+        gl.glUniform3f(terrainLocations.lightColor, sky.lightColor[1], sky.lightColor[2], sky.lightColor[3])
+        gl.glUniform3f(terrainLocations.moonLightColor, sky.moonLightColor[1], sky.moonLightColor[2], sky.moonLightColor[3])
+        gl.glUniform3f(terrainLocations.lightingParams, sky.daylight, sky.moonAmount, sky.ambientFloor)
+        local carriedRed, carriedGreen, carriedBlue = 0.0, 0.0, 0.0
+        if not previewMode and displayState.inventory then
+          carriedRed, carriedGreen, carriedBlue = lighting.heldEmission(
+            displayState.inventory.slots[displayState.selectedSlot])
+        end
+        local carriedPosition = viewPosition
+        if not previewMode then
+          local carriedFront = playerCamera:getFront()
+          local carriedRight = playerCamera:getRight()
+          carriedPosition = {
+            viewPosition[1] + carriedFront[1] * 0.35 + carriedRight[1] * 0.28,
+            viewPosition[2] + carriedFront[2] * 0.35 - 0.35,
+            viewPosition[3] + carriedFront[3] * 0.35 + carriedRight[3] * 0.28
+          }
+        end
+        gl.glUniform3f(terrainLocations.carriedLightPosition,
+          carriedPosition[1], carriedPosition[2], carriedPosition[3])
+        gl.glUniform3f(terrainLocations.carriedLightEmission,
+          carriedRed, carriedGreen, carriedBlue)
+        -- Flood fill from the hand, so the carried light stops at walls instead
+        -- of shining through them. Only runs when the player crosses a voxel,
+        -- edits a block, or first takes an emitter in hand.
+        local carriedVolume = carriedLight.update(previewMode and nil or world,
+          carriedPosition[1], carriedPosition[2], carriedPosition[3],
+          carriedRed > 0 or carriedGreen > 0 or carriedBlue > 0)
+        gl.glUniform4f(terrainLocations.carriedVolume,
+          carriedVolume.originX, carriedVolume.originY, carriedVolume.originZ,
+          1.0 / carriedLight.SIZE)
+        -- The sheet moves, so the shadows have to follow it frame by frame. Both
+        -- come from cloudSheetOffset, which is the only thing keeping the shade
+        -- under the cloud that cast it.
+        local cloudOriginX, cloudOriginZ, cloudSpan = cloudSheetOffset(playerCamera, currentTime)
+        local cloudsVisible = not previewMode and displayState.clouds ~= false and
+          activeWorldProfile.hasClouds
+        cloudShadow.originX = cloudOriginX - cloudSpan * 0.5
+        cloudShadow.originZ = cloudOriginZ - cloudSpan * 0.5
+        cloudShadow.inverseSpan = 1.0 / cloudSpan
+        cloudShadow.altitude = CLOUD.bottom
+        cloudShadow.texture = cloudShadowTexture
+        cloudShadow.strength = cloudsVisible and
+          (graphics.atmosphere.cloudShadowStrength or 0.0) or 0.0
+        gl.glUniform4f(terrainLocations.cloudShadow, cloudShadow.originX,
+          cloudShadow.originZ, cloudShadow.inverseSpan, cloudShadow.altitude)
+        gl.glUniform1f(terrainLocations.cloudShadowStrength, cloudShadow.strength)
+        gl.glUniform1f(terrainLocations.shadowStrength, sky.shadowStrength)
+        gl.glUniform1f(terrainLocations.waterLevel,
+          previewMode and -1000.0 or (currentWaterLevel or -1000.0))
+        gl.glUniform3f(terrainLocations.waterCascadeSizes,
+          ocean.cascadeSizes[1], ocean.cascadeSizes[2], ocean.cascadeSizes[3])
+        gl.glUniform3f(terrainLocations.waterNormalWeights,
+          ocean.normalWeights[1], ocean.normalWeights[2], ocean.normalWeights[3])
+        gl.glUniform1f(terrainLocations.causticStrength, graphics.water.causticStrength or 0.42)
 
         gl.glClearColor(sky.fogColor[1], sky.fogColor[2], sky.fogColor[3], 1.0)
-        gl.glClear(GL_COLOR_BUFFER_BIT + GL_DEPTH_BUFFER_BIT)
-        drawSky(skyShader, skyMesh, skyLocations, moonTexture, sunTexture, cloudTexture, playerCamera, sunDir, sky, currentTime)
-        gl.glClear(GL_DEPTH_BUFFER_BIT)
+        gl.glClear(GL.COLOR_BUFFER_BIT + GL.DEPTH_BUFFER_BIT)
+        drawSky(skyShader,skyMesh,skyLocations,moonTexture,activeCamera,sunDir,sky,
+          skyState,currentTime,activeWorldProfile)
+        drawNightSky(programs.stars,nightSky.locations,nightSky.state,activeCamera,
+          skyState,sky,activeWorldProfile,currentTime)
+        gl.glClear(GL.DEPTH_BUFFER_BIT)
 
-        gl.glUseProgram(shader)
-        gl.glActiveTexture(GL_TEXTURE0)
-        gl.glBindTexture(GL_TEXTURE_2D, atlasTex[0])
-        gl.glActiveTexture(GL_TEXTURE1)
-        gl.glBindTexture(GL_TEXTURE_2D, shadowMap.depthTexture[0])
-        gl.glActiveTexture(GL_TEXTURE0)
-        for _, mesh in ipairs(visibleMeshes) do
-          rendering.draw(mesh)
-        end
-        if characterMesh then
-          rendering.draw(characterMesh)
-        end
-        drawClouds(cloudShader, cloudMesh, cloudLocations, playerCamera, view, projection, currentTime, sky)
-        if currentWaterLevel then
-          effects.drawWater(waterShader, waterMesh, waterLocations, playerCamera, view, projection, sunDir, sky, currentTime, currentWaterLevel, waterTexture)
-        end
-
-        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
-        gl.glViewport(0, 0, windowWidth, windowHeight)
-        effects.drawAtmospherePost(atmospherePostShader, skyMesh, atmospherePostLocations, sceneTarget, playerCamera, sunDir, sky, CAMERA_FOV, windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR, currentWaterLevel or -1000.0, graphics.atmosphere, displayState.screen == "pause" and 1.15 or 0.0, underwaterOverlayTexture, currentTime)
-        if displayState.screen then
-          hudOverlay:drawMenu(windowWidth, windowHeight, displayState.screen, displayState.menuMouseX, displayState.menuMouseY, displayState, currentTime)
+        if previewMode then
+          gl.glUseProgram(worldgenPreviewShader)
+          gl.glUniformMatrix4fv(worldgenPreviewLocations.projection, 1, 0, ffi.new("float[16]", projection))
+          gl.glUniformMatrix4fv(worldgenPreviewLocations.view, 1, 0, ffi.new("float[16]", view))
+          gl.glUniform3f(worldgenPreviewLocations.lightDir, sunDir[1], sunDir[2], sunDir[3])
+          rendering.draw(worldgenPreviewMesh)
         else
-          hudOverlay:draw(windowWidth, windowHeight, currentTime, displayState.selectedSlot)
+          gl.glUseProgram(shader)
+          gl.glActiveTexture(GL.TEXTURE0)
+          gl.glBindTexture(GL.TEXTURE_2D, atlasTex[0])
+          gl.glActiveTexture(GL.TEXTURE1)
+          gl.glBindTexture(GL.TEXTURE_2D, shadowMap.cascades[1].depthTexture[0])
+          gl.glActiveTexture(GL.TEXTURE2)
+          gl.glBindTexture(GL.TEXTURE_2D, ocean.normalTexture)
+          gl.glActiveTexture(GL.TEXTURE3)
+          gl.glBindTexture(GL.TEXTURE_2D, shadowMap.cascades[2].depthTexture[0])
+          gl.glActiveTexture(0x84C4)
+          gl.glBindTexture(GL.TEXTURE_2D, shadowMap.cascades[3].depthTexture[0])
+          gl.glActiveTexture(GL.TEXTURE5)
+          gl.glBindTexture(GL.TEXTURE_3D, carriedLight.texture() or 0)
+          gl.glActiveTexture(GL.TEXTURE6)
+          gl.glBindTexture(GL.TEXTURE_2D, cloudShadowTexture)
+          gl.glActiveTexture(GL.TEXTURE0)
+          for _, mesh in ipairs(visibleMeshes) do
+            rendering.draw(mesh)
+          end
+          if characterMesh and playerCamera:isThirdPerson() then
+            local playerModel = characterModel(playerCamera)
+            local animation = character.animationState(playerCamera, displayState, currentTime)
+            gl.glUseProgram(characterShader)
+            gl.glUniformMatrix4fv(characterLocations.projection, 1, 0,
+              ffi.new("float[16]", projection))
+            gl.glUniformMatrix4fv(characterLocations.view, 1, 0,
+              ffi.new("float[16]", view))
+            gl.glUniformMatrix4fv(characterLocations.model, 1, 0,
+              ffi.new("float[16]", playerModel))
+            gl.glUniform1i(characterLocations.texture, 0)
+            gl.glUniform3f(characterLocations.light, sunDir[1], sunDir[2], sunDir[3])
+            gl.glUniform3f(characterLocations.ambient,
+              sky.ambient[1], sky.ambient[2], sky.ambient[3])
+            gl.glUniform3f(characterLocations.lightColor,
+              sky.lightColor[1], sky.lightColor[2], sky.lightColor[3])
+            gl.glUniform4f(characterLocations.anim0,
+              animation.anim0[1], animation.anim0[2], animation.anim0[3], animation.anim0[4])
+            gl.glUniform4f(characterLocations.anim1,
+              animation.anim1[1], animation.anim1[2], animation.anim1[3], animation.anim1[4])
+            gl.glActiveTexture(GL.TEXTURE0)
+            gl.glBindTexture(GL.TEXTURE_2D, characterTexture[0])
+            rendering.draw(characterMesh)
+            gl.glUseProgram(shader)
+            gl.glActiveTexture(GL.TEXTURE0)
+            gl.glBindTexture(GL.TEXTURE_2D, atlasTex[0])
+          end
+          drawDroppedItems(droppedItems, droppedItemMeshes, terrainLocations.model, model)
+          drawFallingTrees(fallingTrees,fallingTreeMeshes,terrainLocations.model,model)
+          effects.blockParticles:draw()
+          effects.miningOverlay:draw(displayState,projection,view)
+          if #visibleDielectrics > 0 then
+            effects.copySceneTarget(sceneTarget, waterBackgroundTarget)
+            effects.drawDielectrics(
+              dielectricShader, visibleDielectrics, dielectricLocations, playerCamera,
+              view, projection, sunDir, sky, waterBackgroundTarget,
+              windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR,
+              atlasTex, graphics.dielectrics, model
+            )
+          end
+          if activeWorldProfile.hasClouds and displayState.clouds ~= false then
+            drawClouds(cloudShader, cloudMesh, cloudLocations, playerCamera, view, projection, currentTime, sky)
+          end
+          if currentWaterLevel and #visibleWater > 0 then
+            effects.copySceneTarget(sceneTarget, waterBackgroundTarget)
+            effects.drawWater(
+              waterShader, visibleWater, waterLocations, playerCamera, view, projection, sunDir, sky,
+              currentWaterLevel, ocean, waterBackgroundTarget, windowWidth, windowHeight,
+              currentTime, CAMERA_NEAR, CAMERA_FAR, cloudShadow
+            )
+          end
+        end
+
+        effects.eyeExposureTexture = effects.updateEyeAdaptation(
+          effects.eyeAdaptationRuntime.shader, effects.eyeAdaptationRuntime.locations,
+          effects.eyeAdaptationRuntime.state,
+          sceneTarget.colorTexture[0], sceneTarget.depthTexture[0], skyMesh, dt,
+          activePostSettings, windowWidth, windowHeight)
+
+        -- Bloom reads the HDR scene before it is graded, so anything brighter
+        -- than the threshold bleeds. Runs at half resolution downward, so the
+        -- whole chain costs about as much as one full-resolution pass.
+        local bloomTexture = nil
+        if activePostSettings.bloom ~= false and displayState.bloom ~= false then
+          bloomTexture = effects.renderBloom(bloomShaders, bloomChain, sceneTarget.colorTexture[0], skyMesh, {
+            threshold = activePostSettings.bloomThreshold or 0.70,
+            softKnee = activePostSettings.bloomSoftKnee or 0.60,
+            radius = activePostSettings.bloomRadius or 1.0,
+            clampMax = activePostSettings.bloomClamp or 12.0
+          })
+        end
+
+        effects.godRaysTexture = nil
+        if not previewMode and activePostSettings.godRays ~= false and
+            (displayState.underwaterAmount or 0.0) < 0.01 then
+          effects.godRaysRuntime.target = effects.ensureGodRaysTarget(
+            effects.godRaysRuntime.target, windowWidth, windowHeight,
+            activePostSettings.godRaysResolutionScale or 0.25)
+          effects.godRaysTexture = effects.renderGodRays(
+            effects.godRaysRuntime.shader, effects.godRaysRuntime.target,
+            effects.godRaysRuntime.locations, sceneTarget.depthTexture[0], skyMesh,
+            activeCamera, sunDir, sky.sunAureole or sky.lightColor, CAMERA_FOV,
+            windowWidth, windowHeight, activePostSettings,
+            (sky.daylight or 0.0) * (1.0 - (displayState.underwaterAmount or 0.0)))
+        end
+
+        gl.glBindFramebuffer(GL.FRAMEBUFFER, 0)
+        gl.glViewport(0, 0, windowWidth, windowHeight)
+        local motionX, motionY = motionBlur.vector(
+          displayState.motionBlur, activeCamera.yaw, activeCamera.pitch,
+          displayState.motionBlurPreviousYaw, displayState.motionBlurPreviousPitch,
+          math.deg(CAMERA_FOV), windowWidth / math.max(1, windowHeight),
+          not previewMode and not displayState.screen)
+        displayState.motionBlurPreviousYaw = activeCamera.yaw
+        displayState.motionBlurPreviousPitch = activeCamera.pitch
+        local localSkyVisibility = 1.0
+        if not previewMode then
+          local atmospherePosition = activeCamera.getViewPosition and
+            activeCamera:getViewPosition() or activeCamera.position
+          localSkyVisibility = world:skyLightAt(
+            math.floor(atmospherePosition[1]), math.floor(atmospherePosition[2]),
+            math.floor(atmospherePosition[3])) / 15.0
+        end
+        effects.drawAtmospherePost(atmospherePostShader, skyMesh,
+          atmospherePostLocations, sceneTarget, activeCamera, CAMERA_FOV,
+          windowWidth, windowHeight, CAMERA_NEAR, CAMERA_FAR,
+          previewMode and 0.0 or displayState.underwaterAmount,
+          localSkyVisibility,
+          previewMode and previewAtmosphereSettings or runtimeAtmosphereSettings,
+          math.max(displayState.screen == "pause" and 1.15 or 0.0,
+            displayState.headDamageBlur or 0.0),
+          underwaterOverlayTexture, currentTime, bloomTexture, activePostSettings,
+          volumetricFog, effects.eyeExposureTexture, effects.godRaysTexture,
+          {motionX, motionY})
+        -- Inventory screens are live overlays. Keep the in-world survival UI
+        -- underneath, then add the creative/survival container on top of it.
+        -- The developer tools are drawn last and follow the same layering rule.
+        if not previewMode and not displayState.hideHud and
+            (not displayState.screen or displayState.inventoryOverlayOpen) then
+          -- The held model is camera-relative, but its light remains anchored
+          -- to the world. Transform the sun into view space and sample the
+          -- player's local skylight so caves, night, and water affect it too.
+          local heldLightDir={
+            view[1]*sunDir[1]+view[5]*sunDir[2]+view[9]*sunDir[3],
+            view[2]*sunDir[1]+view[6]*sunDir[2]+view[10]*sunDir[3],
+            view[3]*sunDir[1]+view[7]*sunDir[2]+view[11]*sunDir[3]
+          }
+          local heldLocalLight=world:skyLightAt(
+            math.floor(playerCamera.position[1]),math.floor(playerCamera.position[2]),
+            math.floor(playerCamera.position[3]))/15
+          hudOverlay:draw(windowWidth, windowHeight, currentTime, displayState.selectedSlot, displayState,
+            {id = atlasTex},{
+              ambient=sky.ambient,
+              sunColor=sky.lightColor,
+              moonColor=sky.moonLightColor,
+              ambientFloor=sky.ambientFloor,
+              lightDir=heldLightDir,
+              localLight=heldLocalLight,
+              underwater=(displayState.underwaterAmount or 0.0)>0.5,
+              heldTransform=devMenu:heldItemTransform(),
+              heldMotion=displayState.viewBobbing == false and {lookX=displayState.heldMotion.lookX,lookY=displayState.heldMotion.lookY} or displayState.heldMotion
+            })
           if displayState.debugScreen and displayState.debugInfo then
             hudOverlay:drawDebug(windowWidth, windowHeight, displayState.debugInfo)
+          end
+        end
+        if displayState.inventoryOverlayOpen then
+          hudOverlay:drawInventory(windowWidth, windowHeight, displayState.screen, displayState,
+            displayState.menuMouseX, displayState.menuMouseY, {id = atlasTex}, currentTime)
+        elseif displayState.screen then
+          hudOverlay:drawMenu(windowWidth, windowHeight, displayState.screen, displayState.menuMouseX, displayState.menuMouseY, displayState, currentTime)
+        end
+        -- Captured before the developer panel goes on, so a screenshot is of
+        -- the game rather than of the tools.
+        if displayState.screenshotRequested then
+          displayState.screenshotRequested = false
+          local name = game.captureScreenshot(windowWidth, windowHeight)
+          hudOverlay:setNotice(name and ("Saved screenshot as " .. name) or "Could not save a screenshot", currentTime)
+          print(name and ("Saved screenshot as screenshots/" .. name) or "Failed to write a screenshot")
+        end
+
+        devMenu:draw(window, windowWidth, windowHeight, dt)
+        displayState.devMenuOpen = devMenu:isOpen()
+
+        if game.screenshotSchedule and #game.screenshotSchedule > 0 then
+          local due = game.screenshotSchedule[1]
+          if currentTime >= due.at then
+            table.remove(game.screenshotSchedule, 1)
+            if game.captureFrame(due.path, windowWidth, windowHeight) then
+              print(string.format("Captured %s at %.1f s", due.path, currentTime))
+            else
+              print("Failed to write " .. due.path)
+            end
+            if #game.screenshotSchedule == 0 and game.exitAfterScreenshots then
+              glfw.glfwSetWindowShouldClose(window, 1)
+            end
           end
         end
 
@@ -1999,13 +4768,36 @@ function game.run()
       end
     end
 
+    saveUserSettings(displayState)
+    saveCurrentPlayer(displayState, playerCamera)
+    audioEngine:close()
+    world:close()
+    carriedLight.release()
+    effects.releaseBloomChain(bloomChain)
+    effects.releaseGodRays(effects.godRaysRuntime)
+    effects.godRaysRuntime = nil
+    effects.releaseEyeAdaptation(effects.eyeAdaptationRuntime.state)
+    effects.eyeAdaptationRuntime = nil
+    effects.releaseVolumetricFog(volumetricFog, volumetricFogShaders)
+    astronomy.field.release(nightSky.state)
+    gl.glDeleteProgram(programs.stars)
+    effects.releaseOceanSimulation(ocean)
+    effects.releaseSceneTarget(waterBackgroundTarget)
+    effects.releaseSceneTarget(sceneTarget)
+    devMenu:release()
+    rendering.release(worldgenPreviewMesh)
+    releaseDroppedItemMeshes(droppedItemMeshes)
+    releaseFallingTreeMeshes(fallingTreeMeshes)
     releaseTerrainMeshes(terrainMeshes)
+    distantTerrain:clear()
     rendering.release(characterMesh)
+    effects.miningOverlay:release()
+    effects.blockParticles:release()
+    effects.blockParticles = nil
     rendering.release(skyMesh)
     rendering.release(cloudMesh)
-    rendering.release(waterMesh)
     hudOverlay:release()
-  end)
+  end, debug.traceback)
 
   glfw.glfwTerminate()
 

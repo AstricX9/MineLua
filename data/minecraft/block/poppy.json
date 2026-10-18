@@ -1,0 +1,14 @@
+{
+  "name": "Poppy",
+  "texture": "./textures/blocks/flower_rose.png",
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "flower": true,
+    "cross": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true
+  }
+}

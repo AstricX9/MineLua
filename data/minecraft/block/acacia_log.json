@@ -1,0 +1,11 @@
+{
+  "name": "Acacia Log",
+  "texture": {
+    "top": "./textures/blocks/log_acacia_top.png",
+    "bottom": "./textures/blocks/log_acacia_top.png",
+    "side": "./textures/blocks/log_acacia.png"
+  },
+  "hardness": 2.0,
+  "preferredTool": "axe",
+  "properties": {"solid": true, "soundMaterial": "wood"}
+}

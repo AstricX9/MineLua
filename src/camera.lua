@@ -1,5 +1,7 @@
 local ffi = require("ffi")
 local glfw = require("glfw")
+local persistence = require("state_persistence")
+local inputBindings = require("input_bindings")
 
 local Camera = {}
 Camera.__index = Camera
@@ -36,7 +38,28 @@ local function isDown(window, key)
   return glfw.glfwGetKey(window, key) == glfw.GLFW_PRESS
 end
 
+local function actionDown(self, window, action)
+  return inputBindings.actionDown(window, self.controlBindings, action)
+end
+
 local EPSILON = 0.0001
+
+-- Approach the desired velocity as a vector. This gives starts, stops and
+-- direction changes a short, controllable transition instead of snapping the
+-- player's momentum onto a new heading in one frame.
+local function approachHorizontalVelocity(x, z, targetX, targetZ, amount)
+  local deltaX = targetX - x
+  local deltaZ = targetZ - z
+  local distance = math.sqrt(deltaX * deltaX + deltaZ * deltaZ)
+  if distance <= amount or distance < EPSILON then return targetX, targetZ end
+  local scale = amount / distance
+  return x + deltaX * scale, z + deltaZ * scale
+end
+
+local function damp(current, target, sharpness, dt)
+  if sharpness <= 0.0 then return target end
+  return target + (current - target) * math.exp(-sharpness * dt)
+end
 
 function Camera.new(options)
   options = options or {}
@@ -45,6 +68,8 @@ function Camera.new(options)
     position = options.position or {16.5, 30.0, 16.5},
     yaw = options.yaw or -90.0,
     pitch = options.pitch or 0.0,
+    targetYaw = options.yaw or -90.0,
+    targetPitch = options.pitch or 0.0,
     lastX = options.lastX or 640.0,
     lastY = options.lastY or 360.0,
     firstMouse = true,
@@ -65,21 +90,78 @@ function Camera.new(options)
     sprintSpeed = options.sprintSpeed or 7.2,
     crouchSpeed = options.crouchSpeed or 2.4,
     flySpeed = options.flySpeed or 9.5,
-    acceleration = options.acceleration or 34.0,
-    airAcceleration = options.airAcceleration or 8.0,
+    acceleration = options.acceleration or 55.0,
+    airAcceleration = options.airAcceleration or 14.0,
     flyAcceleration = options.flyAcceleration or 24.0,
-    groundFriction = options.groundFriction or 38.0,
+    groundFriction = options.groundFriction or 46.0,
     airFriction = options.airFriction or 2.0,
     flyFriction = options.flyFriction or 18.0,
-    gravity = options.gravity or 19.5,
-    jumpSpeed = options.jumpSpeed or 6.4,
+    gravity = options.gravity or 15.5,
+    jumpSpeed = options.jumpSpeed or 6.6,
     reach = options.reach or 6.0,
-    stepHeight = options.stepHeight or 1.08,
+    -- Vanilla-style step clearance is below a full voxel. A value above one
+    -- silently climbed block ledges and felt like forced auto-jump.
+    stepHeight = options.stepHeight or 0.60,
+    swimUpSpeed = options.swimUpSpeed or 4.6,
+    swimSinkSpeed = options.swimSinkSpeed or 0.65,
+    swimAcceleration = options.swimAcceleration or 18.0,
     groundSnap = options.groundSnap or 0.36,
     coyoteTime = options.coyoteTime or 0.10,
     jumpBufferTime = options.jumpBufferTime or 0.12,
-    mouseSensitivity = options.mouseSensitivity or 0.085
+    mouseSensitivity = options.mouseSensitivity or 0.085,
+    mouseSmoothing = options.mouseSmoothing ~= nil and options.mouseSmoothing or 42.0,
+    invertMouse = options.invertMouse or false,
+    mouseTurnVelocity = 0.0,
+    moveInputX = 0.0,
+    moveInputZ = 0.0,
+    sprinting = false,
+    movementMultiplier = 1.0,
+    sprintConditionMultiplier = 1.0,
+    damageShake = 0.0,
+    damageShakePhase = 0.0,
+    damageViewYaw = 0.0,
+    damageViewPitch = 0.0,
+    lastLandingImpact = nil,
+    bobPhase = 0.0,
+    viewBobX = 0.0,
+    viewBobY = 0.0,
+    viewBobPitch = 0.0,
+    viewRoll = 0.0,
+    stepViewOffset = 0.0,
+    landingViewOffset = 0.0,
+    viewBobbingEnabled = options.viewBobbingEnabled ~= false,
+    fovOffset = 0.0,
+    -- 0 = first person, 1 = camera behind the player, 2 = camera facing them.
+    perspective = options.perspective or 0,
+    thirdPersonDistance = options.thirdPersonDistance or 4.0,
+    thirdPersonActualDistance = options.thirdPersonDistance or 4.0
   }, Camera)
+end
+
+function Camera:cyclePerspective()
+  self.perspective = ((self.perspective or 0) + 1) % 3
+  return self.perspective
+end
+
+function Camera:isThirdPerson()
+  return (self.perspective or 0) ~= 0
+end
+
+-- Pull the camera toward the player when a solid block sits between the eye
+-- and the requested third-person position. This avoids seeing through walls
+-- while retaining the familiar four-block camera distance in open space.
+function Camera:updatePerspectiveObstruction(world)
+  if not self:isThirdPerson() then
+    self.thirdPersonActualDistance = self.thirdPersonDistance
+    return
+  end
+
+  local front = self:getFront()
+  local direction = self.perspective == 1 and
+    {-front[1], -front[2], -front[3]} or front
+  local desired = self.thirdPersonDistance or 4.0
+  local hit = world and world.raycast and world:raycast(self.position, direction, desired, 0.08) or nil
+  self.thirdPersonActualDistance = hit and math.max(0.25, hit.distance - 0.18) or desired
 end
 
 function Camera:getFront()
@@ -103,7 +185,7 @@ function Camera:getRight(front)
   return normalize({-front[3], 0.0, front[1]})
 end
 
-function Camera:updateMouse(window)
+function Camera:updateMouse(window, dt)
   local xpos = ffi.new("double[1]")
   local ypos = ffi.new("double[1]")
   glfw.glfwGetCursorPos(window, xpos, ypos)
@@ -114,16 +196,26 @@ function Camera:updateMouse(window)
   if self.firstMouse then
     self.lastX = x
     self.lastY = y
+    self.targetYaw = self.yaw
+    self.targetPitch = self.pitch
     self.firstMouse = false
   end
 
   local xoffset = (x - self.lastX) * self.mouseSensitivity
   local yoffset = (self.lastY - y) * self.mouseSensitivity
+  if self.invertMouse then yoffset = -yoffset end
   self.lastX = x
   self.lastY = y
 
-  self.yaw = self.yaw + xoffset
-  self.pitch = clamp(self.pitch + yoffset, -88.0, 88.0)
+  self.targetYaw = (self.targetYaw or self.yaw) + xoffset
+  self.targetPitch = clamp((self.targetPitch or self.pitch) + yoffset, -88.0, 88.0)
+
+  local frameDt = math.min(dt or (1.0 / 60.0), 0.05)
+  local previousYaw = self.yaw
+  self.yaw = damp(self.yaw, self.targetYaw, self.mouseSmoothing, frameDt)
+  self.pitch = clamp(damp(self.pitch, self.targetPitch, self.mouseSmoothing, frameDt), -88.0, 88.0)
+  local turnRate = (self.yaw - previousYaw) / math.max(frameDt, 0.0001)
+  self.mouseTurnVelocity = damp(self.mouseTurnVelocity, turnRate, 18.0, frameDt)
 end
 
 function Camera:getBodyHeight()
@@ -160,8 +252,15 @@ function Camera:hasCollisionData(world, blockX, blockZ)
   return world:containsBlock(blockX, blockZ)
 end
 
+local function collisionHeightAt(world,x,y,z)
+  if world.collisionHeightAt then return world:collisionHeightAt(x,y,z) end
+  return world:isSolidBlock(x,y,z) and 1.0 or 0.0
+end
+
 function Camera:hasBodyClearance(world, x, z, feetY, allowMissingCollision)
   local range = self:getAabbBlockRange(x, z, feetY)
+  local bodyBottom=feetY+EPSILON
+  local bodyTop=feetY+self:getBodyHeight()-EPSILON
 
   for blockX = range.minX, range.maxX do
     for blockZ = range.minZ, range.maxZ do
@@ -171,7 +270,8 @@ function Camera:hasBodyClearance(world, x, z, feetY, allowMissingCollision)
 
       if self:hasCollisionData(world, blockX, blockZ) then
         for y = range.minY, range.maxY do
-          if world:isSolidBlock(blockX, y, blockZ) then
+          local height=collisionHeightAt(world,blockX,y,blockZ)
+          if height>0 and y+height>bodyBottom and y<bodyTop then
             return false
           end
         end
@@ -179,6 +279,48 @@ function Camera:hasBodyClearance(world, x, z, feetY, allowMissingCollision)
     end
   end
   return true
+end
+
+-- Flight passes through chunks that have not generated yet, otherwise
+-- unstreamed terrain would wall the player in. Outrun the streamer and those
+-- chunks materialise around you. The test below is deliberately narrow -- the
+-- head being literally inside a solid block, which normal movement never
+-- produces -- so ground snap and step-ups cannot trigger it.
+local MAX_UNSTICK_RISE = 12
+
+function Camera:isHeadInsideBlock(world)
+  local pos = self.position
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+  if not self:hasCollisionData(world, blockX, blockZ) then
+    return false
+  end
+  local blockY=math.floor(pos[2])
+  return pos[2]<blockY+collisionHeightAt(world,blockX,blockY,blockZ)
+end
+
+function Camera:resolveTerrainOverlap(world)
+  if not self:isHeadInsideBlock(world) then
+    return false
+  end
+
+  local pos = self.position
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+
+  for rise = 1, MAX_UNSTICK_RISE do
+    local clearBody = self:hasBodyClearance(world, pos[1], pos[3], pos[2] - self.eyeHeight + rise, true)
+    local headY=pos[2]+rise
+    local headBlockY=math.floor(headY)
+    local clearHead = headY>=headBlockY+
+      collisionHeightAt(world,blockX,headBlockY,blockZ)
+    if clearBody and clearHead then
+      pos[2] = pos[2] + rise
+      self.velocityY = 0.0
+      self.velocity[2] = 0.0
+      return true
+    end
+  end
+
+  return false
 end
 
 function Camera:getSupportY(world, x, z)
@@ -196,8 +338,9 @@ function Camera:getSupportY(world, x, z)
 
       local sampleY = nil
       for y = searchTop, searchBottom, -1 do
-        if world:isSolidBlock(blockX, y, blockZ) then
-          sampleY = y + 1.0
+        local height=collisionHeightAt(world,blockX,y,blockZ)
+        if height>0 then
+          sampleY = y + height
           break
         end
       end
@@ -241,21 +384,16 @@ function Camera:findSpawnY(world, x, z)
   end
 
   for y = maxHeight, 0, -1 do
-    local hasSupport = false
+    local supportHeight = 0.0
     for blockX = range.minX, range.maxX do
       for blockZ = range.minZ, range.maxZ do
-        if world:isSolidBlock(blockX, y, blockZ) then
-          hasSupport = true
-          break
-        end
-      end
-      if hasSupport then
-        break
+        supportHeight=math.max(supportHeight,
+          collisionHeightAt(world,blockX,y,blockZ))
       end
     end
 
-    if hasSupport then
-      local feetY = y + 1.0
+    if supportHeight>0 then
+      local feetY = y + supportHeight
       if self:hasBodyClearance(world, x, z, feetY, false) then
         return feetY + self.eyeHeight
       end
@@ -292,6 +430,40 @@ function Camera:canOccupyAt(world, x, z, eyeY, allowMissingCollision)
   return self:hasBodyClearance(world, x, z, eyeY - self.eyeHeight, allowMissingCollision)
 end
 
+-- Missing chunks are only safe to ignore when the whole player is above the
+-- generator's vertical envelope. This is the useful middle ground used by a
+-- streamed voxel world: ordinary play cannot enter terrain before collision
+-- arrives, while high creative flight is not fenced in by an invisible wall.
+function Camera:canFlyThroughUnloaded(world, eyeY)
+  if world and world.semiBlockingChunks == false then return true end
+  local terrainTop = world and world.maxHeight or 255
+  local feetY = eyeY - self.eyeHeight
+  return feetY > terrainTop + 1.0
+end
+
+-- Whether the body would still be standing on something at this spot. Support
+-- is measured over the whole footprint, the same way the ground check is, so a
+-- position this accepts is never one the player would fall out of.
+function Camera:hasFootingAt(world, x, z)
+  local support = self:getSupportY(world, x, z)
+  if not support then return false end
+  -- A drop deeper than a single step is a ledge, not a slope.
+  return support >= (self.position[2] - self.eyeHeight) - self.stepHeight
+end
+
+function Camera:isBodyInLiquid(world)
+  if not world.isLiquidBlock then return false end
+  local pos = self.position
+  local feetY = pos[2] - self.eyeHeight
+  local blockX, blockZ = math.floor(pos[1]), math.floor(pos[3])
+  local bottomY = math.floor(feetY + EPSILON)
+  local topY = math.floor(feetY + self:getBodyHeight() - EPSILON)
+  for y = bottomY, topY do
+    if world:isLiquidBlock(blockX, y, blockZ) then return true end
+  end
+  return false
+end
+
 function Camera:applyHorizontalInput(dt, window)
   local front = self:getHorizontalFront()
   local right = self:getRight(front)
@@ -299,21 +471,21 @@ function Camera:applyHorizontalInput(dt, window)
   local inputZ = 0.0
   local forwardInput = 0.0
 
-  if isDown(window, glfw.GLFW_KEY_W) then
+  if actionDown(self, window, "forward") then
     inputX = inputX + front[1]
     inputZ = inputZ + front[3]
     forwardInput = forwardInput + 1.0
   end
-  if isDown(window, glfw.GLFW_KEY_S) then
+  if actionDown(self, window, "back") then
     inputX = inputX - front[1]
     inputZ = inputZ - front[3]
     forwardInput = forwardInput - 1.0
   end
-  if isDown(window, glfw.GLFW_KEY_D) then
+  if actionDown(self, window, "right") then
     inputX = inputX + right[1]
     inputZ = inputZ + right[3]
   end
-  if isDown(window, glfw.GLFW_KEY_A) then
+  if actionDown(self, window, "left") then
     inputX = inputX - right[1]
     inputZ = inputZ - right[3]
   end
@@ -324,8 +496,14 @@ function Camera:applyHorizontalInput(dt, window)
     inputZ = inputZ / inputLength
   end
 
-  local crouching = (isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) or isDown(window, glfw.GLFW_KEY_C)) and not self.flying
+  local crouching = actionDown(self, window, "sneak") and not self.flying
+  -- Remembered for the movement step, which refuses to walk a crouching player
+  -- off a ledge.
+  self.crouching = crouching
   local sprinting = isDown(window, glfw.GLFW_KEY_LEFT_SHIFT) and forwardInput > 0.0 and not crouching
+  self.sprinting = sprinting
+  self.moveInputX = inputX
+  self.moveInputZ = inputZ
   local targetEyeHeight = crouching and self.crouchEyeHeight or self.standEyeHeight
   self.eyeHeight = moveToward(self.eyeHeight, targetEyeHeight, 5.5 * dt)
 
@@ -335,7 +513,10 @@ function Camera:applyHorizontalInput(dt, window)
   elseif crouching then
     maxSpeed = self.crouchSpeed
   elseif sprinting then
-    maxSpeed = self.sprintSpeed
+    maxSpeed = self.sprintSpeed * math.max(0.0, self.sprintConditionMultiplier or 1.0)
+  end
+  if not self.flying then
+    maxSpeed = maxSpeed * math.max(0.0, self.movementMultiplier or 1.0)
   end
 
   local targetX = inputX * maxSpeed
@@ -346,8 +527,116 @@ function Camera:applyHorizontalInput(dt, window)
     accel = self.flying and self.flyFriction or (self.grounded and self.groundFriction or self.airFriction)
   end
 
-  self.velocity[1] = moveToward(self.velocity[1], targetX, accel * dt)
-  self.velocity[3] = moveToward(self.velocity[3], targetZ, accel * dt)
+  self.velocity[1], self.velocity[3] =
+    approachHorizontalVelocity(self.velocity[1], self.velocity[3], targetX, targetZ, accel * dt)
+end
+
+-- Visual motion is intentionally separate from the physical position. The
+-- collision body remains exact while small, damped offsets soften block steps,
+-- footfalls and landings for the rendered camera.
+function Camera:updateViewMotion(dt, previousY, wasGrounded, impactVelocityY)
+  dt = math.min(dt, 0.05)
+  local speed = math.sqrt(self.velocity[1] * self.velocity[1] + self.velocity[3] * self.velocity[3])
+  local moving = self.viewBobbingEnabled and self.grounded and speed > 0.18 and not self.flying
+  local intensity = moving and clamp(speed / math.max(self.sprintSpeed, 0.01), 0.0, 1.0) or 0.0
+
+  if moving then self.bobPhase = self.bobPhase + speed * dt * 1.85 end
+  -- A single weighted gait drives all of the walk motion.  The stronger ends
+  -- of the lateral curve read as weight settling over each foot, while the
+  -- eased vertical lift avoids the mechanical speed of a plain sine wave.
+  -- This follows ClassiCube's useful coupling of horizontal bob, alternating
+  -- roll and a same-phase pitch pulse, with damping added for MineLua.
+  local footSide = math.cos(self.bobPhase)
+  local weightedSide = footSide * (0.78 + 0.22 * math.abs(footSide))
+  local strideLift = math.abs(math.sin(self.bobPhase))
+  local weightedLift = strideLift ^ 1.65
+  local targetBobX = weightedSide * 0.034 * intensity
+  local targetBobY = (weightedLift - 0.42) * 0.056 * intensity
+  local targetBobPitch = weightedLift * 0.72 * intensity
+  self.viewBobX = damp(self.viewBobX, targetBobX, 13.0, dt)
+  self.viewBobY = damp(self.viewBobY, targetBobY, 13.0, dt)
+  self.viewBobPitch = damp(self.viewBobPitch, targetBobPitch, 11.0, dt)
+
+  local verticalStep = self.position[2] - previousY
+  if self.viewBobbingEnabled and wasGrounded and self.grounded and math.abs(verticalStep) > 0.02 then
+    self.stepViewOffset = clamp(self.stepViewOffset - verticalStep, -0.45, 0.45)
+  end
+  if self.viewBobbingEnabled and not wasGrounded and self.grounded and impactVelocityY < -2.0 then
+    self.landingViewOffset = self.landingViewOffset - clamp((-impactVelocityY - 2.0) * 0.012, 0.0, 0.10)
+  end
+  self.stepViewOffset = damp(self.stepViewOffset, 0.0, 13.0, dt)
+  self.landingViewOffset = damp(self.landingViewOffset, 0.0, 10.0, dt)
+
+  local right = self:getRight()
+  local lateralSpeed = self.velocity[1] * right[1] + self.velocity[3] * right[3]
+  local targetRoll = 0.0
+  if self.viewBobbingEnabled then
+    local footRoll = moving and (-weightedSide * 0.72 * intensity) or 0.0
+    targetRoll = clamp(footRoll - lateralSpeed / math.max(self.sprintSpeed, 0.01) * 0.55 -
+      self.mouseTurnVelocity * 0.0025, -1.25, 1.25)
+  end
+  self.viewRoll = damp(self.viewRoll, targetRoll, 9.5, dt)
+
+  local sprintAmount = self.sprinting and clamp(speed / math.max(self.sprintSpeed, 0.01), 0.0, 1.0) or 0.0
+  self.fovOffset = damp(self.fovOffset, sprintAmount * 3.5, 7.0, dt)
+end
+
+-- The bob pitch is visual-only. Movement and collision continue to use
+-- getFront(), while the rendered view gets the small weighted stride tilt.
+function Camera:getViewFront()
+  local radYaw = math.rad(self.yaw + (self.damageViewYaw or 0.0))
+  local radPitch = math.rad(self.pitch + (self.viewBobPitch or 0.0) +
+    (self.damageViewPitch or 0.0))
+  local front = normalize({
+    math.cos(radYaw) * math.cos(radPitch),
+    math.sin(radPitch),
+    math.sin(radYaw) * math.cos(radPitch)
+  })
+  if self.perspective == 2 then
+    return {-front[1], -front[2], -front[3]}
+  end
+  return front
+end
+
+function Camera:getViewPosition()
+  local right = self:getRight()
+  local position = {
+    self.position[1] + right[1] * self.viewBobX,
+    self.position[2] + self.viewBobY + self.stepViewOffset + self.landingViewOffset,
+    self.position[3] + right[3] * self.viewBobX
+  }
+  if self:isThirdPerson() then
+    local front = self:getFront()
+    local direction = self.perspective == 1 and -1.0 or 1.0
+    local distance = self.thirdPersonActualDistance or self.thirdPersonDistance or 4.0
+    position[1] = position[1] + front[1] * distance * direction
+    position[2] = position[2] + front[2] * distance * direction
+    position[3] = position[3] + front[3] * distance * direction
+  end
+  return position
+end
+
+function Camera:getViewUp()
+  local front = self:getViewFront()
+  local right = self:getRight(front)
+  local baseUp = {
+    right[2] * front[3] - right[3] * front[2],
+    right[3] * front[1] - right[1] * front[3],
+    right[1] * front[2] - right[2] * front[1]
+  }
+  local roll = math.rad(self.viewRoll)
+  local cosine, sine = math.cos(roll), math.sin(roll)
+  return normalize({
+    baseUp[1] * cosine + right[1] * sine,
+    baseUp[2] * cosine + right[2] * sine,
+    baseUp[3] * cosine + right[3] * sine
+  })
+end
+
+function Camera:getViewCenter()
+  local position = self:getViewPosition()
+  local front = self:getViewFront()
+  return {position[1] + front[1], position[2] + front[2], position[3] + front[3]}
 end
 
 function Camera:updateFlightToggle(window)
@@ -372,20 +661,27 @@ end
 
 function Camera:moveHorizontally(dt, world)
   local pos = self.position
-  local nextX = pos[1] + self.velocity[1] * dt
+  -- Crouching on the ground also refuses steps that would leave nothing
+  -- underfoot, so building out over a drop does not cost you the fall.
+  local sneaking = self.crouching and self.grounded and not self.flying
 
-  if self.flying and self:canOccupyAt(world, nextX, pos[3], pos[2], true) then
-    pos[1] = nextX
-  elseif not self.flying and self:canStandAt(world, nextX, pos[3]) then
+  local function canStepTo(x, z)
+    if self.flying then
+      return self:canOccupyAt(world, x, z, pos[2], self:canFlyThroughUnloaded(world, pos[2]))
+    end
+    if not self:canOccupyAt(world, x, z, pos[2], false) then return false end
+    return not sneaking or self:hasFootingAt(world, x, z)
+  end
+
+  local nextX = pos[1] + self.velocity[1] * dt
+  if canStepTo(nextX, pos[3]) then
     pos[1] = nextX
   else
     self.velocity[1] = 0.0
   end
 
   local nextZ = pos[3] + self.velocity[3] * dt
-  if self.flying and self:canOccupyAt(world, pos[1], nextZ, pos[2], true) then
-    pos[3] = nextZ
-  elseif not self.flying and self:canStandAt(world, pos[1], nextZ) then
+  if canStepTo(pos[1], nextZ) then
     pos[3] = nextZ
   else
     self.velocity[3] = 0.0
@@ -395,10 +691,10 @@ end
 function Camera:applyVerticalMovement(dt, window, world)
   if self.flying then
     local verticalInput = 0.0
-    if isDown(window, glfw.GLFW_KEY_SPACE) then
+    if actionDown(self, window, "jump") then
       verticalInput = verticalInput + 1.0
     end
-    if isDown(window, glfw.GLFW_KEY_LEFT_CONTROL) or isDown(window, glfw.GLFW_KEY_C) then
+    if actionDown(self, window, "sneak") then
       verticalInput = verticalInput - 1.0
     end
 
@@ -407,21 +703,62 @@ function Camera:applyVerticalMovement(dt, window, world)
     self.velocityY = moveToward(self.velocityY, targetY, accel * dt)
     self.velocity[2] = self.velocityY
     local nextY = self.position[2] + self.velocityY * dt
-    if self:canOccupyAt(world, self.position[1], self.position[3], nextY, true) then
+    local allowMissing = self:canFlyThroughUnloaded(world, nextY)
+    if self:canOccupyAt(world, self.position[1], self.position[3], nextY, allowMissing) then
       self.position[2] = nextY
     else
       self.velocityY = 0.0
       self.velocity[2] = 0.0
     end
     self.grounded = false
-    self.jumpWasDown = isDown(window, glfw.GLFW_KEY_SPACE)
+    self.jumpWasDown = actionDown(self, window, "jump")
+    return
+  end
+
+  if self:isBodyInLiquid(world) then
+    local jumpDown = actionDown(self, window, "jump")
+    local descendDown = actionDown(self, window, "sneak")
+    local front = self:getFront()
+    local aimIntent = 0.0
+    if actionDown(self, window, "forward") then aimIntent = aimIntent + front[2] end
+    if actionDown(self, window, "back") then aimIntent = aimIntent - front[2] end
+
+    -- Aimed swimming and dedicated rise/dive controls are additive. Looking up
+    -- while holding W reinforces Space; looking the other way counteracts it.
+    -- The small extra range lets combined input feel meaningfully stronger
+    -- without producing an excessive launch at the water surface.
+    local verticalIntent = aimIntent + (jumpDown and 1.0 or 0.0) - (descendDown and 1.0 or 0.0)
+    local targetY = -self.swimSinkSpeed
+    if math.abs(verticalIntent) > 0.02 then
+      targetY = clamp(verticalIntent, -1.35, 1.35) * self.swimUpSpeed
+    end
+    self.velocityY = moveToward(self.velocityY, targetY, self.swimAcceleration * dt)
+    self.velocity[2] = self.velocityY
+
+    local nextY = self.position[2] + self.velocityY * dt
+    if self:canOccupyAt(world, self.position[1], self.position[3], nextY, false) then
+      self.position[2] = nextY
+    else
+      self.velocityY = 0.0
+      self.velocity[2] = 0.0
+    end
+
+    self.grounded = false
+    self.coyoteTimer = 0.0
+    self.jumpBuffer = 0.0
+    self.jumpWasDown = jumpDown
     return
   end
 
   local pos = self.position
   local groundY = self:getGroundY(world)
   local distanceToGround = pos[2] - groundY
-  local onGround = distanceToGround <= self.groundSnap and self.velocityY <= 0.0
+  -- Ground snap keeps an already-grounded player attached to small downward
+  -- steps. Applying that same tolerance in the air ends every jump early by
+  -- teleporting through the last groundSnap metres of the fall.
+  local followingGround = self.grounded and distanceToGround <= self.groundSnap
+  local touchingGround = distanceToGround <= EPSILON
+  local onGround = (followingGround or touchingGround) and self.velocityY <= 0.0
 
   if onGround then
     self.grounded = true
@@ -435,8 +772,10 @@ function Camera:applyVerticalMovement(dt, window, world)
     self.coyoteTimer = math.max(0.0, self.coyoteTimer - dt)
   end
 
-  local jumpDown = isDown(window, glfw.GLFW_KEY_SPACE)
-  if jumpDown then
+  local jumpDown = actionDown(self, window, "jump")
+  -- Buffer only the press edge. Holding space must not trigger another jump on
+  -- the first grounded frame after landing.
+  if jumpDown and not self.jumpWasDown then
     self.jumpBuffer = self.jumpBufferTime
   else
     self.jumpBuffer = math.max(0.0, self.jumpBuffer - dt)
@@ -452,7 +791,24 @@ function Camera:applyVerticalMovement(dt, window, world)
 
   self.velocity[2] = self.velocityY
   self.velocityY = self.velocityY - self.gravity * dt
-  pos[2] = pos[2] + self.velocityY * dt
+  local nextY = pos[2] + self.velocityY * dt
+
+  -- Vertical motion uses the same complete body AABB as horizontal motion.
+  -- This stops a jump from crossing a wall lip or ceiling before the later
+  -- ground snap has a chance to notice it.
+  if self:canOccupyAt(world, pos[1], pos[3], nextY, false) then
+    pos[2] = nextY
+  elseif self.velocityY > 0.0 then
+    self.velocityY = 0.0
+    self.velocity[2] = 0.0
+  else
+    local landingY = self:getGroundY(world)
+    pos[2] = landingY
+    self.velocityY = 0.0
+    self.velocity[2] = 0.0
+    self.grounded = true
+    self.coyoteTimer = self.coyoteTime
+  end
 
   groundY = self:getGroundY(world)
   if pos[2] < groundY then
@@ -470,11 +826,35 @@ function Camera:updateMovement(dt, window, world)
   self:applyHorizontalInput(dt, window)
   self:moveHorizontally(dt, world)
   self:applyVerticalMovement(dt, window, world)
+  -- Only flight can enter unloaded terrain and later materialise inside it.
+  -- Ground movement must never use the upward unstick teleport, because that
+  -- can lift a jumping player through a newly contacted wall.
+  if self.flying then
+    self:resolveTerrainOverlap(world)
+  end
 end
 
-function Camera:update(dt, window, world)
-  self:updateMouse(window)
+function Camera:update(dt, window, world, allowMouseLook)
+  local previousY = self.position[2]
+  local wasGrounded = self.grounded
+  local impactVelocityY = self.velocityY
+  if allowMouseLook ~= false then
+    self:updateMouse(window, dt)
+  else
+    -- An interactive overlay needs the desktop cursor, but it must not turn
+    -- the player while that cursor is being used. Re-anchor mouse look when
+    -- gameplay takes the cursor back so closing the overlay cannot cause a
+    -- sudden camera jump.
+    self.firstMouse = true
+  end
   self:updateMovement(dt, window, world)
+  self.lastLandingImpact = not wasGrounded and self.grounded and impactVelocityY < 0 and
+    -impactVelocityY or nil
+  self.damageShakePhase = (self.damageShakePhase or 0.0) + dt * 23.0
+  local shake = math.max(0.0, self.damageShake or 0.0)
+  self.damageViewYaw = math.sin(self.damageShakePhase * 0.83) * shake
+  self.damageViewPitch = math.sin(self.damageShakePhase * 1.31 + 0.8) * shake * 0.72
+  self:updateViewMotion(dt, previousY, wasGrounded, impactVelocityY)
 end
 
 function Camera:getCenter()
@@ -484,6 +864,23 @@ function Camera:getCenter()
     self.position[2] + front[2],
     self.position[3] + front[3]
   }
+end
+
+function Camera:saveState()
+  return persistence.snapshot(self)
+end
+
+function Camera:restoreState(saved)
+  persistence.restore(self, saved)
+  -- The physical mouse position is process-local. Re-anchor it on the first
+  -- gameplay frame while preserving the restored view angles.
+  self.firstMouse = true
+  self.targetYaw = self.yaw
+  self.targetPitch = self.pitch
+  self.mouseTurnVelocity = 0.0
+  self.viewBobX, self.viewBobY, self.viewBobPitch, self.viewRoll = 0.0, 0.0, 0.0, 0.0
+  self.stepViewOffset, self.landingViewOffset, self.fovOffset = 0.0, 0.0, 0.0
+  return self
 end
 
 return Camera

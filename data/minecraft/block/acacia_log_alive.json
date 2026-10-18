@@ -1,0 +1,18 @@
+{
+  "name": "Living Acacia Log",
+  "texture": {
+    "top": "./textures/blocks/log_acacia_top.png",
+    "bottom": "./textures/blocks/log_acacia_top.png",
+    "side": "./textures/blocks/log_acacia.png"
+  },
+  "hardness": 2.0,
+  "preferredTool": "axe",
+  "requiredToolTier": 1,
+  "properties": {
+    "solid": true,
+    "aliveTree": true,
+    "hidden": true,
+    "drop": "acacia_log",
+    "soundMaterial": "wood"
+  }
+}

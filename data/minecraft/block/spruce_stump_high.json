@@ -1,0 +1,18 @@
+{
+  "name": "High Spruce Stump",
+  "texture": {
+    "top": "./textures/blocks/log_spruce_top.png",
+    "bottom": "./textures/blocks/log_spruce_top.png",
+    "side": "./textures/blocks/log_spruce.png"
+  },
+  "hardness": 1.0,
+  "preferredTool": "axe",
+  "requiredToolTier": 1,
+  "properties": {
+    "solid": true,
+    "hidden": true,
+    "renderHeight": 0.37,
+    "collisionHeight": 0.37,
+    "drop": "spruce_log"
+  }
+}

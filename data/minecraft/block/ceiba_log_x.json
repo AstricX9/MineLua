@@ -1,0 +1,11 @@
+{
+  "name": "Ceiba Log (X Axis)",
+  "texture": {
+    "top": "./textures/blocks/log_jungle_top.png",
+    "bottom": "./textures/blocks/log_jungle_top.png",
+    "side": "./textures/blocks/log_jungle.png"
+  },
+  "hardness": 2.0,
+  "preferredTool": "axe",
+  "properties": {"solid": true, "logAxis": "x", "hidden": true, "drop": "ceiba_log", "soundMaterial": "wood"}
+}

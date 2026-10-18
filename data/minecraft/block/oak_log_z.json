@@ -1,0 +1,14 @@
+{
+  "name": "Oak Log (Z Axis)",
+  "texture": {
+    "top": "./textures/blocks/log_oak_top.png",
+    "bottom": "./textures/blocks/log_oak_top.png",
+    "side": "./textures/blocks/log_oak.png"
+  },
+  "properties": {
+    "solid": true,
+    "logAxis": "z",
+    "hidden": true,
+    "drop": "oak_log"
+  }
+}

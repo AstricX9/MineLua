@@ -1,21 +1,106 @@
 local ffi = require("ffi")
 local blocks = require("blocks")
 local terrain = require("terrain")
+local foliageVariation = require("foliage_variation")
+local heldItem = require("held_item")
 
 local M = {}
 
-M.STRIDE_FLOATS = 14
+M.STRIDE_FLOATS = 18
 
 local MATERIAL_SOLID = 0.0
 local MATERIAL_LEAVES = 1.0
 local MATERIAL_FOLIAGE = 2.0
+local MATERIAL_ICE = 3.0
+local MATERIAL_GLASS = 4.0
 
-local function blockAtLocal(chunk, x, y, z)
-  if x < 0 or x > 15 or y < 0 or y > 255 or z < 0 or z > 15 then
-    return 0
+local WHITE = {1.0, 1.0, 1.0}
+-- Hoisted: this used to be built fresh on every vertexAO call, which meant one
+-- table allocation per vertex of every face in the chunk.
+--
+-- Indexed by how many of the three blocks around a corner are solid. These are
+-- deliberately shallower than they were: at 0.52 for a fully occupied corner
+-- and zero for a hard crease, occlusion was drawing near-black lines along
+-- every terrace and doorway, which reads as dirt rather than as shade.
+local AO_LEVELS = {1.00, 0.87, 0.76, 0.66}
+-- Two solid sides meet in a crease, which stays the darkest case -- but a
+-- crease outdoors at noon is not unlit, and this used to be exactly zero.
+local AO_CREASE = 0.55
+
+-- y-rows meshed between yields. Smaller keeps the frame budget tight at the cost
+-- of a little more coroutine overhead.
+local MESH_YIELD_ROWS = 32
+
+-- Flat id -> boolean lookups, so the hot paths stop walking
+-- blocks.list[id].properties.<field> several times per vertex.
+local aoSolid, faceSolid, faceLeaves, faceCutout, faceDielectric
+-- Buried-block rejection. `plainCube` is a block that draws as an ordinary full
+-- cube, so it can emit nothing at all once every side is covered; `coversFace`
+-- is a block that covers one side of such a cube. Underground chunks are about
+-- sixteen thousand solid blocks that emit a few hundred faces between them, and
+-- proving each one hidden through six general neighbour lookups was most of the
+-- time a chunk took to mesh.
+local plainCube, coversFace
+local lookupCount = -1
+
+local function ensureLookups()
+  local n = 0
+  for _ in pairs(blocks.list) do n = n + 1 end
+  if n == lookupCount then
+    return
   end
-  return chunk:getBlock(x, y, z)
+
+  lookupCount = n
+  aoSolid, faceSolid, faceLeaves, faceCutout, faceDielectric = {}, {}, {}, {}, {}
+  plainCube, coversFace = {}, {}
+  for id, def in pairs(blocks.list) do
+    local p = def.properties
+    local dielectric = p and (p.ice or p.glass) or false
+    aoSolid[id] = (p and p.solid and not p.cutout and not dielectric) or false
+    -- Keep the opaque contact face behind a transparent dielectric block. It
+    -- becomes the transmitted scene sampled by the dedicated material pass.
+    faceSolid[id] = (p and p.solid and not dielectric) or false
+    faceLeaves[id] = (p and p.leaves) or false
+    faceCutout[id] = (p and p.cutout) or false
+    faceDielectric[id] = dielectric
+    -- Anything with its own shape -- a shortened block, a sprite, crossed
+    -- planes, leaves, glass -- still has to go through the general path, since
+    -- occludes_face answers differently for it.
+    plainCube[id] = (p and p.solid and not p.cutout and not dielectric and
+      not p.leaves and not p.cross and not p.extrudedSprite and not p.liquid and
+      (p.renderHeight == nil or tonumber(p.renderHeight) == 1.0)) or false
+  end
+  -- occludes_face, for a plain cube neighbour, reduces to exactly this: the
+  -- identity test it does first is already implied for a solid, non-cutout id.
+  for id in pairs(blocks.list) do
+    coversFace[id] = (not faceCutout[id]) and faceSolid[id] == true
+  end
 end
+
+-- The four quad corners for each face direction, as (sx, sy, sz) selectors. The
+-- same triple gives the vertex position (x+sx, y+sy, z+sz) and the corner that
+-- ambient occlusion and smooth lighting sample around.
+local FACE_CORNERS = {
+  {{1,0,1}, {1,0,0}, {1,1,0}, {1,1,1}}, -- 1: +X
+  {{0,0,0}, {0,0,1}, {0,1,1}, {0,1,0}}, -- 2: -X
+  {{0,1,1}, {1,1,1}, {1,1,0}, {0,1,0}}, -- 3: +Y
+  {{0,0,0}, {1,0,0}, {1,0,1}, {0,0,1}}, -- 4: -Y
+  {{0,0,1}, {1,0,1}, {1,1,1}, {0,1,1}}, -- 5: +Z
+  {{1,0,0}, {0,0,0}, {0,1,0}, {1,1,0}}  -- 6: -Z
+}
+
+-- Two triangles from four corners: A B C, C D A.
+local CORNER_ORDER = {1, 2, 3, 3, 4, 1}
+-- Corner n always carries the same UV: A=(u0,v1) B=(u1,v1) C=(u1,v0) D=(u0,v0).
+local CORNER_HIGH_U = {false, true, true, false}
+local CORNER_HIGH_V = {true, true, false, false}
+
+-- Reused across faces so the per-corner results cost no allocation.
+local cornerLight = {0.0, 0.0, 0.0, 0.0}
+local cornerBlockRed = {0.0, 0.0, 0.0, 0.0}
+local cornerBlockGreen = {0.0, 0.0, 0.0, 0.0}
+local cornerBlockBlue = {0.0, 0.0, 0.0, 0.0}
+local cornerHeight = {0.0, 0.0, 0.0, 0.0}
 
 local function lightCurve(level)
   local darkness = 1.0 - math.max(0.0, math.min(15.0, level)) / 15.0
@@ -23,11 +108,10 @@ local function lightCurve(level)
 end
 
 local function isSolidForAO(id)
-  if not id or id == 0 then
+  if id == 0 then
     return false
   end
-  local def = blocks.list[id]
-  return def and def.properties and def.properties.solid and not def.properties.cutout
+  return aoSolid[id] == true
 end
 
 local function cornerBasis(nx, ny, nz, cx, cy, cz)
@@ -53,6 +137,48 @@ local function cornerBasis(nx, ny, nz, cx, cy, cz)
   return ox, oy, oz, ax, ay, az, bx, by, bz
 end
 
+-- Sky light, block light and ambient occlusion for one face corner, resolved
+-- together.
+--
+-- They were three separate helpers, and each one recomputed the same corner
+-- basis and the same four neighbouring cell positions before sampling. Corner
+-- lighting is about three quarters of the time a chunk takes to mesh, so doing
+-- that arithmetic once instead of three times is worth the slightly longer
+-- function. The samples taken, and the values returned, are unchanged.
+local function cornerLighting(skyAt, blockLightAt, sampleBlock,
+    x, y, z, nx, ny, nz, cx, cy, cz)
+  local ox, oy, oz, ax, ay, az, bx, by, bz = cornerBasis(nx, ny, nz, cx, cy, cz)
+  local x0, y0, z0 = x + ox, y + oy, z + oz
+  local x1, y1, z1 = x0 + ax, y0 + ay, z0 + az
+  local x2, y2, z2 = x0 + bx, y0 + by, z0 + bz
+  local x3, y3, z3 = x0 + ax + bx, y0 + ay + by, z0 + az + bz
+
+  local sideA = isSolidForAO(sampleBlock(x1, y1, z1))
+  local sideB = isSolidForAO(sampleBlock(x2, y2, z2))
+  local ao
+  if sideA and sideB then
+    -- A hard crease goes darkest whatever sits diagonally across it, and the
+    -- diagonal is not sampled at all in that case.
+    ao = AO_CREASE
+  else
+    local corner = isSolidForAO(sampleBlock(x3, y3, z3))
+    ao = AO_LEVELS[(sideA and 1 or 0) + (sideB and 1 or 0) + (corner and 1 or 0) + 1]
+  end
+
+  local sky = (skyAt(x0, y0, z0) + skyAt(x1, y1, z1) +
+    skyAt(x2, y2, z2) + skyAt(x3, y3, z3)) * 0.25
+
+  local r0, g0, b0 = blockLightAt(x0, y0, z0)
+  local r1, g1, b1 = blockLightAt(x1, y1, z1)
+  local r2, g2, b2 = blockLightAt(x2, y2, z2)
+  local r3, g3, b3 = blockLightAt(x3, y3, z3)
+
+  return lightCurve(sky) * ao,
+    lightCurve((r0 + r1 + r2 + r3) * 0.25) * ao,
+    lightCurve((g0 + g1 + g2 + g3) * 0.25) * ao,
+    lightCurve((b0 + b1 + b2 + b3) * 0.25) * ao
+end
+
 local function smoothSkyLight(skyAt, x, y, z, nx, ny, nz, cx, cy, cz)
   local ox, oy, oz, ax, ay, az, bx, by, bz = cornerBasis(nx, ny, nz, cx, cy, cz)
   local baseX, baseY, baseZ = x + ox, y + oy, z + oz
@@ -64,19 +190,31 @@ local function smoothSkyLight(skyAt, x, y, z, nx, ny, nz, cx, cy, cz)
   ) * 0.25
 end
 
-local function vertexAO(chunk, x, y, z, nx, ny, nz, cx, cy, cz)
+local function smoothBlockLight(blockLightAt, x, y, z, nx, ny, nz, cx, cy, cz)
+  local ox, oy, oz, ax, ay, az, bx, by, bz = cornerBasis(nx, ny, nz, cx, cy, cz)
+  local baseX, baseY, baseZ = x + ox, y + oy, z + oz
+  local r0, g0, b0 = blockLightAt(baseX, baseY, baseZ)
+  local r1, g1, b1 = blockLightAt(baseX + ax, baseY + ay, baseZ + az)
+  local r2, g2, b2 = blockLightAt(baseX + bx, baseY + by, baseZ + bz)
+  local r3, g3, b3 = blockLightAt(baseX + ax + bx, baseY + ay + by, baseZ + az + bz)
+  return lightCurve((r0 + r1 + r2 + r3) * 0.25),
+    lightCurve((g0 + g1 + g2 + g3) * 0.25),
+    lightCurve((b0 + b1 + b2 + b3) * 0.25)
+end
+
+local function vertexAO(sampleBlock, x, y, z, nx, ny, nz, cx, cy, cz)
   local ox, oy, oz, ax, ay, az, bx, by, bz = cornerBasis(nx, ny, nz, cx, cy, cz)
 
-  local sideA = isSolidForAO(blockAtLocal(chunk, x + ox + ax, y + oy + ay, z + oz + az))
-  local sideB = isSolidForAO(blockAtLocal(chunk, x + ox + bx, y + oy + by, z + oz + bz))
-  local corner = isSolidForAO(blockAtLocal(chunk, x + ox + ax + bx, y + oy + ay + by, z + oz + az + bz))
+  local sideA = isSolidForAO(sampleBlock(x + ox + ax, y + oy + ay, z + oz + az))
+  local sideB = isSolidForAO(sampleBlock(x + ox + bx, y + oy + by, z + oz + bz))
+  local corner = isSolidForAO(sampleBlock(x + ox + ax + bx, y + oy + ay + by, z + oz + az + bz))
 
   if sideA and sideB then
-    return 0.45
+    return AO_CREASE
   end
 
   local occupied = (sideA and 1 or 0) + (sideB and 1 or 0) + (corner and 1 or 0)
-  return ({1.00, 0.82, 0.67, 0.52})[occupied + 1]
+  return AO_LEVELS[occupied + 1]
 end
 
 local function materialFor(def)
@@ -84,116 +222,195 @@ local function materialFor(def)
   if props and props.cross then
     return MATERIAL_FOLIAGE
   end
+  if props and props.glass then
+    return MATERIAL_GLASS
+  end
+  if props and props.ice then
+    return MATERIAL_ICE
+  end
   if props and props.leaves then
     return MATERIAL_LEAVES
   end
   return MATERIAL_SOLID
 end
 
-local function push_vertex(verts, vx, vy, vz, nx, ny, nz, r, g, b, u, v, material, heightFactor, vertexLight)
-  verts[#verts+1] = vx; verts[#verts+1] = vy; verts[#verts+1] = vz
-  verts[#verts+1] = nx; verts[#verts+1] = ny; verts[#verts+1] = nz
-  verts[#verts+1] = r; verts[#verts+1] = g; verts[#verts+1] = b
-  verts[#verts+1] = u; verts[#verts+1] = v
-  verts[#verts+1] = material or MATERIAL_SOLID
-  verts[#verts+1] = heightFactor or 0.0
-  verts[#verts+1] = vertexLight or 1.0
+local function push_vertex(verts, n, vx, vy, vz, nx, ny, nz, r, g, b, u, v,
+    material, heightFactor, vertexLight, blockRed, blockGreen, blockBlue)
+  verts[n + 1] = vx; verts[n + 2] = vy; verts[n + 3] = vz
+  verts[n + 4] = nx; verts[n + 5] = ny; verts[n + 6] = nz
+  verts[n + 7] = r; verts[n + 8] = g; verts[n + 9] = b
+  verts[n + 10] = u; verts[n + 11] = v
+  verts[n + 12] = material
+  verts[n + 13] = heightFactor
+  verts[n + 14] = vertexLight
+  verts[n + 15] = blockRed or 0.0
+  verts[n + 16] = blockGreen or 0.0
+  verts[n + 17] = blockBlue or 0.0
+  -- Keep the traditional final component as scalar skylight for mesh tools
+  -- and resource-pack code that reads lighting from the end of the vertex.
+  verts[n + 18] = vertexLight
+  return n + 18
 end
 
--- Appends a quad (two triangles) for a single face to given verts table
-local function append_face(verts, chunk, lx, ly, lz, x, y, z, nx, ny, nz, r, g, b, uv, def, skyAt)
-  local x0, x1 = x, x + 1
-  local y0, y1 = y, y + 1
-  local z0, z1 = z, z + 1
-
-  local u0, v0 = uv.u0, uv.v0
-  local u1, v1 = uv.u1, uv.v1
+-- Appends a quad (two triangles) for a single face. The quad has six vertices
+-- but only four distinct corners, so lighting and AO are evaluated four times.
+local function append_face(verts, n, sampleBlock, lx, ly, lz, x, y, z, dir,
+    nx, ny, nz, r, g, b, uv, def, skyAt, blockLightAt, auxiliary, shapeHeight)
+  local corners = FACE_CORNERS[dir]
   local material = materialFor(def)
-  local function info(vx, vy, vz, cx, cy, cz)
-    local sky = smoothSkyLight(skyAt, lx, ly, lz, nx, ny, nz, cx, cy, cz)
-    local ao = vertexAO(chunk, lx, ly, lz, nx, ny, nz, cx, cy, cz)
-    if material == MATERIAL_LEAVES then
-      ao = math.max(0.78, ao)
-    end
-    return material, material == MATERIAL_LEAVES and cy or 0.0, lightCurve(sky) * ao
-  end
-
-  if nx == 1 then -- right (+X)
-    local m,h,l = info(x1,y0,z1,1,0,1); push_vertex(verts,x1,y0,z1,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-    m,h,l = info(x1,y0,z0,1,0,0); push_vertex(verts,x1,y0,z0,nx,ny,nz,r,g,b,u1,v1,m,h,l)
-    m,h,l = info(x1,y1,z0,1,1,0); push_vertex(verts,x1,y1,z0,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x1,y1,z0,1,1,0); push_vertex(verts,x1,y1,z0,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x1,y1,z1,1,1,1); push_vertex(verts,x1,y1,z1,nx,ny,nz,r,g,b,u0,v0,m,h,l)
-    m,h,l = info(x1,y0,z1,1,0,1); push_vertex(verts,x1,y0,z1,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-  elseif nx == -1 then -- left (-X)
-    local m,h,l = info(x0,y0,z0,0,0,0); push_vertex(verts,x0,y0,z0,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-    m,h,l = info(x0,y0,z1,0,0,1); push_vertex(verts,x0,y0,z1,nx,ny,nz,r,g,b,u1,v1,m,h,l)
-    m,h,l = info(x0,y1,z1,0,1,1); push_vertex(verts,x0,y1,z1,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x0,y1,z1,0,1,1); push_vertex(verts,x0,y1,z1,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x0,y1,z0,0,1,0); push_vertex(verts,x0,y1,z0,nx,ny,nz,r,g,b,u0,v0,m,h,l)
-    m,h,l = info(x0,y0,z0,0,0,0); push_vertex(verts,x0,y0,z0,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-  elseif ny == 1 then -- top (+Y)
-    local m,h,l = info(x0,y1,z1,0,1,1); push_vertex(verts,x0,y1,z1,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-    m,h,l = info(x1,y1,z1,1,1,1); push_vertex(verts,x1,y1,z1,nx,ny,nz,r,g,b,u1,v1,m,h,l)
-    m,h,l = info(x1,y1,z0,1,1,0); push_vertex(verts,x1,y1,z0,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x1,y1,z0,1,1,0); push_vertex(verts,x1,y1,z0,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x0,y1,z0,0,1,0); push_vertex(verts,x0,y1,z0,nx,ny,nz,r,g,b,u0,v0,m,h,l)
-    m,h,l = info(x0,y1,z1,0,1,1); push_vertex(verts,x0,y1,z1,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-  elseif ny == -1 then -- bottom (-Y)
-    local m,h,l = info(x0,y0,z0,0,0,0); push_vertex(verts,x0,y0,z0,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-    m,h,l = info(x1,y0,z0,1,0,0); push_vertex(verts,x1,y0,z0,nx,ny,nz,r,g,b,u1,v1,m,h,l)
-    m,h,l = info(x1,y0,z1,1,0,1); push_vertex(verts,x1,y0,z1,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x1,y0,z1,1,0,1); push_vertex(verts,x1,y0,z1,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x0,y0,z1,0,0,1); push_vertex(verts,x0,y0,z1,nx,ny,nz,r,g,b,u0,v0,m,h,l)
-    m,h,l = info(x0,y0,z0,0,0,0); push_vertex(verts,x0,y0,z0,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-  elseif nz == 1 then -- front (+Z)
-    local m,h,l = info(x0,y0,z1,0,0,1); push_vertex(verts,x0,y0,z1,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-    m,h,l = info(x1,y0,z1,1,0,1); push_vertex(verts,x1,y0,z1,nx,ny,nz,r,g,b,u1,v1,m,h,l)
-    m,h,l = info(x1,y1,z1,1,1,1); push_vertex(verts,x1,y1,z1,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x1,y1,z1,1,1,1); push_vertex(verts,x1,y1,z1,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x0,y1,z1,0,1,1); push_vertex(verts,x0,y1,z1,nx,ny,nz,r,g,b,u0,v0,m,h,l)
-    m,h,l = info(x0,y0,z1,0,0,1); push_vertex(verts,x0,y0,z1,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-  elseif nz == -1 then -- back (-Z)
-    local m,h,l = info(x1,y0,z0,1,0,0); push_vertex(verts,x1,y0,z0,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-    m,h,l = info(x0,y0,z0,0,0,0); push_vertex(verts,x0,y0,z0,nx,ny,nz,r,g,b,u1,v1,m,h,l)
-    m,h,l = info(x0,y1,z0,0,1,0); push_vertex(verts,x0,y1,z0,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x0,y1,z0,0,1,0); push_vertex(verts,x0,y1,z0,nx,ny,nz,r,g,b,u1,v0,m,h,l)
-    m,h,l = info(x1,y1,z0,1,1,0); push_vertex(verts,x1,y1,z0,nx,ny,nz,r,g,b,u0,v0,m,h,l)
-    m,h,l = info(x1,y0,z0,1,0,0); push_vertex(verts,x1,y0,z0,nx,ny,nz,r,g,b,u0,v1,m,h,l)
-  end
-end
-
-local function append_cross_quad(verts, p0, p1, p2, p3, nx, nz, r, g, b, uv, baseY, vertexLight)
+  shapeHeight = shapeHeight or 1.0
   local u0, v0 = uv.u0, uv.v0
   local u1, v1 = uv.u1, uv.v1
-  push_vertex(verts, p0[1],p0[2],p0[3], nx,0,nz, r,g,b, u0,v1, MATERIAL_FOLIAGE, p0[2] - baseY, vertexLight)
-  push_vertex(verts, p1[1],p1[2],p1[3], nx,0,nz, r,g,b, u1,v1, MATERIAL_FOLIAGE, p1[2] - baseY, vertexLight)
-  push_vertex(verts, p2[1],p2[2],p2[3], nx,0,nz, r,g,b, u1,v0, MATERIAL_FOLIAGE, p2[2] - baseY, vertexLight)
-  push_vertex(verts, p2[1],p2[2],p2[3], nx,0,nz, r,g,b, u1,v0, MATERIAL_FOLIAGE, p2[2] - baseY, vertexLight)
-  push_vertex(verts, p3[1],p3[2],p3[3], nx,0,nz, r,g,b, u0,v0, MATERIAL_FOLIAGE, p3[2] - baseY, vertexLight)
-  push_vertex(verts, p0[1],p0[2],p0[3], nx,0,nz, r,g,b, u0,v1, MATERIAL_FOLIAGE, p0[2] - baseY, vertexLight)
+
+  for i = 1, 4 do
+    local c = corners[i]
+    local cx, cy, cz = c[1], c[2], c[3]
+    cornerLight[i], cornerBlockRed[i], cornerBlockGreen[i], cornerBlockBlue[i] =
+      cornerLighting(skyAt, blockLightAt, sampleBlock,
+        lx, ly, lz, nx, ny, nz, cx, cy, cz)
+    cornerHeight[i] = material == MATERIAL_LEAVES and cy or
+      ((material == MATERIAL_ICE or material == MATERIAL_GLASS) and (auxiliary or 1.0) or 0.0)
+  end
+
+  for i = 1, 6 do
+    local ci = CORNER_ORDER[i]
+    local c = corners[ci]
+    local vertexY = c[2] == 1 and shapeHeight or 0.0
+    local vertexV = CORNER_HIGH_V[ci] and v1 or v0
+    if (dir == 1 or dir == 2 or dir == 5 or dir == 6) and c[2] == 1 then
+      vertexV = v0 + (1.0 - shapeHeight) * (v1 - v0)
+    end
+    n = push_vertex(verts, n,
+      x + c[1], y + vertexY, z + c[3],
+      nx, ny, nz, r, g, b,
+      CORNER_HIGH_U[ci] and u1 or u0,
+      vertexV,
+      material, cornerHeight[ci], cornerLight[ci],
+      cornerBlockRed[ci], cornerBlockGreen[ci], cornerBlockBlue[ci])
+  end
+
+  return n
 end
 
-local function append_cross(verts, chunk, lx, ly, lz, x, y, z, r, g, b, uv, skyAt)
-  local inset = 0.0625
-  local x0, x1 = x + inset, x + 1.0 - inset
-  local y0, y1 = y, y + 1.0
-  local z0, z1 = z + inset, z + 1.0 - inset
-  local n = 0.70710678
+local function append_cross(verts, n, lx, ly, lz, x, y, z, r, g, b, uv,
+    skyAt, blockLightAt, transform)
+  transform = transform or {}
+  local centerX = x + 0.5 + (transform.offsetX or 0.0)
+  local centerZ = z + 0.5 + (transform.offsetZ or 0.0)
+  local halfWidth = 0.4375 * (transform.widthScale or 1.0)
+  local y0, y1 = y, y + (transform.heightScale or 1.0)
+  local angle = transform.rotation or math.pi * 0.25
+  local sky = math.max(skyAt(lx, ly, lz), skyAt(lx, ly + 1, lz))
+  local light = lightCurve(sky)
+  local red0, green0, blue0 = blockLightAt(lx, ly, lz)
+  local red1, green1, blue1 = blockLightAt(lx, ly + 1, lz)
+  local blockRed = lightCurve(math.max(red0, red1))
+  local blockGreen = lightCurve(math.max(green0, green1))
+  local blockBlue = lightCurve(math.max(blue0, blue1))
+  local u0, v0 = uv.u0, uv.v0
+  local u1, v1 = uv.u1, uv.v1
+
+  local function blade(directionX, directionZ)
+    local ax, az = centerX - directionX * halfWidth, centerZ - directionZ * halfWidth
+    local bx, bz = centerX + directionX * halfWidth, centerZ + directionZ * halfWidth
+    local nx, nz = -directionZ, directionX
+    n = push_vertex(verts,n,ax,y0,az,nx,0,nz,r,g,b,u0,v1,MATERIAL_FOLIAGE,0,light,blockRed,blockGreen,blockBlue)
+    n = push_vertex(verts,n,bx,y0,bz,nx,0,nz,r,g,b,u1,v1,MATERIAL_FOLIAGE,0,light,blockRed,blockGreen,blockBlue)
+    n = push_vertex(verts,n,bx,y1,bz,nx,0,nz,r,g,b,u1,v0,MATERIAL_FOLIAGE,1,light,blockRed,blockGreen,blockBlue)
+    n = push_vertex(verts,n,bx,y1,bz,nx,0,nz,r,g,b,u1,v0,MATERIAL_FOLIAGE,1,light,blockRed,blockGreen,blockBlue)
+    n = push_vertex(verts,n,ax,y1,az,nx,0,nz,r,g,b,u0,v0,MATERIAL_FOLIAGE,1,light,blockRed,blockGreen,blockBlue)
+    n = push_vertex(verts,n,ax,y0,az,nx,0,nz,r,g,b,u0,v1,MATERIAL_FOLIAGE,0,light,blockRed,blockGreen,blockBlue)
+  end
+  blade(math.cos(angle), math.sin(angle))
+  blade(-math.sin(angle), math.cos(angle))
+
+  return n
+end
+
+local extrudedSpriteModels = {}
+
+-- Placed sprite-shaped props share the generated-item geometry used by the
+-- first-person hand. Each opaque source texel becomes a tiny box with proper
+-- face normals; transparent texels create no geometry or depth surface.
+local function append_extruded_sprite(verts, n, def, lx, ly, lz, x, y, z,
+    r, g, b, uv, skyAt, blockLightAt)
+  local cached = extrudedSpriteModels[def.id]
+  if not cached then
+    local model = heldItem.model(def)
+    cached = model and model.sprite and model.vertices or {}
+    extrudedSpriteModels[def.id] = cached
+  end
+
   local sky = math.max(skyAt(lx, ly, lz), skyAt(lx, ly + 1, lz))
   local vertexLight = lightCurve(sky)
+  local red, green, blue = blockLightAt(lx, ly, lz)
+  local blockRed, blockGreen, blockBlue = lightCurve(red), lightCurve(green), lightCurve(blue)
+  local thickness = tonumber(def.properties and def.properties.spriteThickness) or 0.125
+  local uSpan, vSpan = uv.u1 - uv.u0, uv.v1 - uv.v0
+  local stride = heldItem.STRIDE_FLOATS
 
-  append_cross_quad(verts, {x0,y0,z0}, {x1,y0,z1}, {x1,y1,z1}, {x0,y1,z0}, -n, n, r, g, b, uv, y, vertexLight)
-  append_cross_quad(verts, {x1,y0,z0}, {x0,y0,z1}, {x0,y1,z1}, {x1,y1,z0}, n, n, r, g, b, uv, y, vertexLight)
+  for index = 1, #cached, stride do
+    local vx, vy, vz = cached[index], cached[index + 1], cached[index + 2]
+    local nx, ny, nz = cached[index + 3], cached[index + 4], cached[index + 5]
+    local u, v = uv.u0 + cached[index + 6] * uSpan, uv.v0 + cached[index + 7] * vSpan
+    n = push_vertex(verts, n,
+      x + 0.5 + vx, y + 0.5 + vy, z + 0.5 + vz * thickness,
+      nx, ny, nz, r, g, b, u, v, MATERIAL_SOLID, 0.0, vertexLight,
+      blockRed, blockGreen, blockBlue)
+  end
+
+  return n
+end
+
+-- Resolves one face colour without building a closure or a fresh colour table.
+local function faceRGB(def, face, biomeTint, tintAllFaces, ao)
+  local colors = def.colors
+  local color = (colors and colors[face]) or def.color or WHITE
+  local r, g, b = color[1], color[2], color[3]
+
+  if biomeTint and (face == "top" or tintAllFaces) then
+    r = r * biomeTint[1]
+    g = g * biomeTint[2]
+    b = b * biomeTint[3]
+  end
+
+  return r * ao, g * ao, b * ao
 end
 
 function M.meshChunk(chunk, maxh, offsetX, offsetZ, options)
   options = options or {}
+  ensureLookups()
+
   local step = options.yieldStep
   offsetX = offsetX or 0
   offsetZ = offsetZ or 0
   local verts = {}
+  local dielectricVerts = {}
+  local n = 0
+  local dielectricN = 0
   local skyLightAtWorld = options.skyLightAt
+  local blockLightAtWorld = options.blockLightAt
+  local blockAtWorld = options.blockAt
+  -- Yielding once per x-slice made a single step up to 9 ms, which the frame
+  -- budget can only overshoot. Yield every MESH_YIELD_ROWS y-rows instead.
+  local sinceYield = 0
+
+  -- Local (lx, y, lz) -> block id. With a world sampler the mesher sees into
+  -- neighbouring chunks, so boundary faces get culled and AO is correct there.
+  -- Without one it falls back to this chunk alone, treating outside as air.
+  local sampleBlock
+  if blockAtWorld then
+    sampleBlock = function(lx, y, lz)
+      return blockAtWorld(lx + offsetX, y, lz + offsetZ)
+    end
+  else
+    sampleBlock = function(lx, y, lz)
+      if lx < 0 or lx > 15 or y < 0 or y > 255 or lz < 0 or lz > 15 then
+        return 0
+      end
+      return chunk:getBlock(lx, y, lz)
+    end
+  end
 
   local function skyAt(lx, y, lz)
     if skyLightAtWorld then
@@ -208,22 +425,35 @@ function M.meshChunk(chunk, maxh, offsetX, offsetZ, options)
     return chunk:getSkyLight(lx, y, lz)
   end
 
-  local function occludes_face(x, y, z, currentId)
-    if x < 0 or x > 15 or y < 0 or y > 255 or z < 0 or z > 15 then return false end
-    local id = chunk:getBlock(x, y, z)
+  local function blockLightAt(lx, y, lz)
+    if blockLightAtWorld then
+      return blockLightAtWorld(lx + offsetX, y, lz + offsetZ)
+    end
+    if lx < 0 or lx > 15 or lz < 0 or lz > 15 or y < 0 or y > maxh then
+      return 0, 0, 0
+    end
+    if chunk.getBlockLight then return chunk:getBlockLight(lx, y, lz) end
+    return 0, 0, 0
+  end
+
+  local function occludes_face(x, y, z, currentId, currentIsLeaves, currentIsDielectric)
+    local id = sampleBlock(x, y, z)
     if id == 0 then return false end
-    if id == currentId then
-      return true
+    if id == currentId then return true end
+    if currentIsDielectric and faceDielectric[id] then return false end
+    if currentIsLeaves and faceLeaves[id] then return true end
+    if faceCutout[id] then return false end
+    return faceSolid[id] == true
+  end
+
+  local function dielectricThickness(x, y, z, dx, dy, dz, currentId)
+    local thickness = 1
+    for distance = 1, 11 do
+      local id = sampleBlock(x + dx * distance, y + dy * distance, z + dz * distance)
+      if id ~= currentId then break end
+      thickness = thickness + 1
     end
-    local def = blocks.list[id]
-    local currentDef = blocks.list[currentId]
-    if def and currentDef and def.properties and currentDef.properties and def.properties.leaves and currentDef.properties.leaves then
-      return true
-    end
-    if def and def.properties and def.properties.cutout then
-      return false
-    end
-    return def and def.properties and def.properties.solid
+    return thickness
   end
 
   for x = 0, 15 do
@@ -231,13 +461,30 @@ function M.meshChunk(chunk, maxh, offsetX, offsetZ, options)
       for z = 0, 15 do
         local id = chunk:getBlock(x, y, z)
         if id ~= 0 then
+          -- Reject a fully buried cube before touching its definition, biome
+          -- tint or face loop. Only the chunk interior takes this path; the
+          -- one-cell shell keeps using the sampler so it still sees across
+          -- chunk borders.
+          if plainCube[id] and x > 0 and x < 15 and z > 0 and z < 15 and
+              y > 0 and y < maxh and
+              coversFace[chunk:getBlock(x + 1, y, z)] and
+              coversFace[chunk:getBlock(x - 1, y, z)] and
+              coversFace[chunk:getBlock(x, y + 1, z)] and
+              coversFace[chunk:getBlock(x, y - 1, z)] and
+              coversFace[chunk:getBlock(x, y, z + 1)] and
+              coversFace[chunk:getBlock(x, y, z - 1)] then
+            goto continue_block
+          end
+
           local def = blocks.list[id]
           if not def then
             goto continue_block
           end
-          if def.properties and def.properties.liquid then
+          local props = def.properties
+          if props and props.liquid then
             goto continue_block
           end
+
           -- Keep block colors crisp; directional lighting and fog handle depth.
           local ao = 0.98
           local wx = x + offsetX
@@ -246,38 +493,94 @@ function M.meshChunk(chunk, maxh, offsetX, offsetZ, options)
           if def.biomeTint then
             biomeTint = terrain.grassColorAt(wx, wz)
           end
+          -- Leaves use grayscale mask textures just like cross-plane plants.
+          -- Tinting only their top face leaves the four visible sides white,
+          -- which made temperate spruce crowns look permanently snow-covered.
+          local tintAllFaces = (props and (props.plant or props.leaves)) and true or false
 
-          local function faceColor(face)
-            local color = (def.colors and def.colors[face]) or def.color or {1.0, 1.0, 1.0}
-            if biomeTint and (face == "top" or (def.properties and def.properties.plant)) then
-              color = {
-                color[1] * biomeTint[1],
-                color[2] * biomeTint[2],
-                color[3] * biomeTint[3]
-              }
-            end
-            return color[1] * ao, color[2] * ao, color[3] * ao
-          end
-
-          if def.properties and def.properties.cross then
-            local r,g,b = faceColor("side")
-            append_cross(verts, chunk, x, y, z, wx, y, wz, r, g, b, def.uvs.side or def.uvs.top, skyAt)
+          if props and props.extrudedSprite then
+            local r, g, b = faceRGB(def, "side", biomeTint, tintAllFaces, ao)
+            n = append_extruded_sprite(verts, n, def, x, y, z, wx, y, wz,
+              r, g, b, def.uvs.side or def.uvs.top, skyAt, blockLightAt)
             goto continue_block
           end
 
-          if not occludes_face(x+1, y, z, id) then local r,g,b = faceColor("side"); append_face(verts, chunk, x, y, z, wx, y, wz,  1, 0, 0, r,g,b, def.uvs.side, def, skyAt) end
-          if not occludes_face(x-1, y, z, id) then local r,g,b = faceColor("side"); append_face(verts, chunk, x, y, z, wx, y, wz, -1, 0, 0, r,g,b, def.uvs.side, def, skyAt) end
-          if not occludes_face(x, y+1, z, id) then local r,g,b = faceColor("top"); append_face(verts, chunk, x, y, z, wx, y, wz,  0,  1, 0, r,g,b, def.uvs.top, def, skyAt) end
-          if not occludes_face(x, y-1, z, id) then local r,g,b = faceColor("bottom"); append_face(verts, chunk, x, y, z, wx, y, wz,  0, -1, 0, r,g,b, def.uvs.bottom, def, skyAt) end
-          if not occludes_face(x, y, z+1, id) then local r,g,b = faceColor("side"); append_face(verts, chunk, x, y, z, wx, y, wz,  0, 0,  1, r,g,b, def.uvs.side, def, skyAt) end
-          if not occludes_face(x, y, z-1, id) then local r,g,b = faceColor("side"); append_face(verts, chunk, x, y, z, wx, y, wz,  0, 0, -1, r,g,b, def.uvs.side, def, skyAt) end
+          if props and props.cross then
+            local r, g, b = faceRGB(def, "side", biomeTint, tintAllFaces, ao)
+            local transform = nil
+            if props.randomTransform then
+              local seedY = props.half == "upper" and y - 1 or y
+              transform = foliageVariation.at(wx, seedY, wz, 0)
+              if props.doublePlant then transform.heightScale = 1.0 end
+            end
+            n = append_cross(verts, n, x, y, z, wx, y, wz, r, g, b,
+              def.uvs.side or def.uvs.top, skyAt, blockLightAt, transform)
+            goto continue_block
+          end
+
+          local currentIsLeaves = faceLeaves[id] == true
+          local currentIsDielectric = faceDielectric[id] == true
+          local renderHeight = tonumber(props and props.renderHeight) or 1.0
+          local targetVerts = currentIsDielectric and dielectricVerts or verts
+          local targetN = currentIsDielectric and dielectricN or n
+          local uvs = def.uvs
+          local logAxis = props and props.logAxis
+
+          if not occludes_face(x + 1, y, z, id, currentIsLeaves, currentIsDielectric) then
+            local face = logAxis == "x" and "top" or "side"
+            local r, g, b = faceRGB(def, face, biomeTint, tintAllFaces, ao)
+            local thickness = currentIsDielectric and dielectricThickness(x, y, z, -1, 0, 0, id) or nil
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 1, 1, 0, 0, r, g, b, uvs[face], def, skyAt, blockLightAt, thickness, renderHeight)
+          end
+          if not occludes_face(x - 1, y, z, id, currentIsLeaves, currentIsDielectric) then
+            local face = logAxis == "x" and "bottom" or "side"
+            local r, g, b = faceRGB(def, face, biomeTint, tintAllFaces, ao)
+            local thickness = currentIsDielectric and dielectricThickness(x, y, z, 1, 0, 0, id) or nil
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 2, -1, 0, 0, r, g, b, uvs[face], def, skyAt, blockLightAt, thickness, renderHeight)
+          end
+          if renderHeight < 1.0 or not occludes_face(x, y + 1, z, id, currentIsLeaves, currentIsDielectric) then
+            local face = logAxis and "side" or "top"
+            local r, g, b = faceRGB(def, face, biomeTint, tintAllFaces, ao)
+            local thickness = currentIsDielectric and dielectricThickness(x, y, z, 0, -1, 0, id) or nil
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 3, 0, 1, 0, r, g, b, uvs[face], def, skyAt, blockLightAt, thickness, renderHeight)
+          end
+          if not occludes_face(x, y - 1, z, id, currentIsLeaves, currentIsDielectric) then
+            local face = logAxis and "side" or "bottom"
+            local r, g, b = faceRGB(def, face, biomeTint, tintAllFaces, ao)
+            local thickness = currentIsDielectric and dielectricThickness(x, y, z, 0, 1, 0, id) or nil
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 4, 0, -1, 0, r, g, b, uvs[face], def, skyAt, blockLightAt, thickness, renderHeight)
+          end
+          if not occludes_face(x, y, z + 1, id, currentIsLeaves, currentIsDielectric) then
+            local face = logAxis == "z" and "top" or "front"
+            local r, g, b = faceRGB(def, face, biomeTint, tintAllFaces, ao)
+            local thickness = currentIsDielectric and dielectricThickness(x, y, z, 0, 0, -1, id) or nil
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 5, 0, 0, 1, r, g, b, uvs[face] or uvs.side, def, skyAt, blockLightAt, thickness, renderHeight)
+          end
+          if not occludes_face(x, y, z - 1, id, currentIsLeaves, currentIsDielectric) then
+            local face = logAxis == "z" and "bottom" or "back"
+            local r, g, b = faceRGB(def, face, biomeTint, tintAllFaces, ao)
+            local thickness = currentIsDielectric and dielectricThickness(x, y, z, 0, 0, 1, id) or nil
+            targetN = append_face(targetVerts, targetN, sampleBlock, x, y, z, wx, y, wz, 6, 0, 0, -1, r, g, b, uvs[face] or uvs.side, def, skyAt, blockLightAt, thickness, renderHeight)
+          end
+
+          if currentIsDielectric then
+            dielectricN = targetN
+          else
+            n = targetN
+          end
         end
         ::continue_block::
       end
+
+      sinceYield = sinceYield + 1
+      if step and sinceYield >= MESH_YIELD_ROWS then
+        sinceYield = 0
+        step()
+      end
     end
-    if step then step() end
   end
-  return verts
+
+  return verts, dielectricVerts
 end
 
 return M

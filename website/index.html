@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Fixed width on purpose. Small screens scale the page rather than reflow it. -->
+<meta name="viewport" content="width=1000">
+<title>Tamarton — an experimental voxel world</title>
+<meta name="description" content="Tamarton is a voxel sandbox focused on atmosphere, exploration and believable environments. Currently in early development.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<meta property="og:title" content="Tamarton">
+<meta property="og:description" content="An experimental voxel world. Currently in early development.">
+<meta property="og:image" content="assets/art/hero.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Sunset at the top of the page, deep night at the bottom. site.js drives it. -->
+<div class="backdrop" aria-hidden="true">
+  <div class="layer sunset"></div>
+  <div class="layer night"></div>
+  <div class="layer stars"></div>
+</div>
+
+<div class="page" id="top">
+
+  <header class="bar panel">
+    <img src="assets/logo.png" alt="">
+    <span class="word">Tamarton</span>
+    <nav>
+      <a href="#what">What it is</a>
+      <a href="#development">Development</a>
+      <a href="#vision">Vision</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#devlog">Devlog</a>
+    </nav>
+  </header>
+
+  <section class="hero panel" style="padding-top:0">
+    <div class="hero-art"><img src="assets/art/hero.png" alt=""></div>
+    <div class="hero-body">
+      <h1>TAMARTON</h1>
+      <p class="kicker">An experimental voxel world.</p>
+      <p class="blurb">
+        A voxel sandbox focused on atmosphere, exploration and believable
+        environments. Currently in early development.
+      </p>
+      <div class="buttons">
+        <a class="btn" href="#development">Development</a>
+        <a class="btn ghost" href="#devlog">Devlog</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="rule"></div>
+
+  <section id="what">
+    <span class="label">What Tamarton is</span>
+    <div class="concepts">
+      <div class="concept panel">
+        <h3>A world with a real sky</h3>
+        <p>Atmospheric scattering, celestial movement, recognizable constellations and physically inspired lighting.</p>
+      </div>
+      <div class="concept panel">
+        <h3>Voxel terrain</h3>
+        <p>A fully editable block world, rendered with a more grounded visual style.</p>
+      </div>
+      <div class="concept panel">
+        <h3>Atmosphere matters</h3>
+        <p>Weather, fog, ambience, lighting and sound intended to make places feel distinct.</p>
+      </div>
+      <div class="concept panel">
+        <h3>Built to experiment</h3>
+        <p>Systems will change heavily during development.</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="rule"></div>
+
+  <section id="development">
+    <span class="label">Current development</span>
+
+    <div class="group">
+      <span class="pill working">Working</span>
+      <div class="shots">
+        <figure class="shot panel">
+          <img src="assets/art/dev-terrain.png" alt="Blocky hills under a daylight sky">
+          <figcaption>Voxel terrain</figcaption>
+        </figure>
+        <figure class="shot panel">
+          <img src="assets/art/dev-streaming.png" alt="Distant terrain fading into haze">
+          <figcaption>World streaming</figcaption>
+        </figure>
+        <figure class="shot panel">
+          <img src="assets/art/dev-daynight.png" alt="Low sun over a warm landscape">
+          <figcaption>Day-night cycle</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <div class="group">
+      <span class="pill prototype">Prototype</span>
+      <div class="shots">
+        <figure class="shot panel">
+          <img src="assets/art/dev-scattering.png" alt="Deep sunset gradient over dark ridges">
+          <figcaption>Atmospheric scattering</figcaption>
+        </figure>
+        <figure class="shot panel">
+          <img src="assets/art/dev-stars.png" alt="Night sky with a constellation picked out">
+          <figcaption>Stars / constellations</figcaption>
+        </figure>
+        <figure class="shot panel">
+          <img src="assets/art/dev-worldgen.png" alt="Layered mountain ridges">
+          <figcaption>Terrain generation</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <div class="group">
+      <span class="pill experiment">Experimenting with</span>
+      <div class="shots four">
+        <figure class="shot panel">
+          <img src="assets/art/dev-weather.png" alt="Rain falling under a storm sky">
+          <figcaption>Weather</figcaption>
+        </figure>
+        <figure class="shot panel">
+          <img src="assets/art/dev-caves.png" alt="Cross-section of caves under the surface">
+          <figcaption>Caves</figcaption>
+        </figure>
+        <figure class="shot panel">
+          <img src="assets/art/dev-ambience.png" alt="Fogged valley at first light">
+          <figcaption>Biome ambience</figcaption>
+        </figure>
+        <figure class="shot panel">
+          <img src="assets/art/dev-water.png" alt="Open water meeting a green shore">
+          <figcaption>Water</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <div class="rule"></div>
+
+  <section id="vision">
+    <span class="label">The vision</span>
+    <h2>Where I want to take it</h2>
+
+    <div class="vision" style="margin-top:22px">
+      <figure class="want panel">
+        <img src="assets/art/vision-sky.png" alt="Night sky with constellations over dark hills">
+        <figcaption class="text">
+          <h3>Real night sky</h3>
+          <p>Real constellations, moon phases and changing celestial conditions.</p>
+        </figcaption>
+      </figure>
+      <figure class="want panel">
+        <img src="assets/art/vision-weather.png" alt="Storm front over a green landscape">
+        <figcaption class="text">
+          <h3>Living weather</h3>
+          <p>Clouds, storms, fog and local atmospheric conditions.</p>
+        </figcaption>
+      </figure>
+      <figure class="want panel">
+        <img src="assets/art/vision-worlds.png" alt="Cave system running under the surface">
+        <figcaption class="text">
+          <h3>Deeper worlds</h3>
+          <p>Caves, geology, varied terrain and environments.</p>
+        </figcaption>
+      </figure>
+      <figure class="want panel">
+        <img src="assets/art/vision-ambience.png" alt="Mist sitting in a valley at dawn">
+        <figcaption class="text">
+          <h3>Ambience</h3>
+          <p>Different acoustic environments, wind, wildlife and environmental sound.</p>
+        </figcaption>
+      </figure>
+    </div>
+
+    <p class="note">These are development goals, not guaranteed features.</p>
+  </section>
+
+  <div class="rule"></div>
+
+  <section id="roadmap">
+    <span class="label">Roadmap</span>
+
+    <div class="roadmap">
+      <div class="phase now panel">
+        <h3>Now</h3>
+        <ul>
+          <li>Core renderer</li>
+          <li>Terrain</li>
+          <li>World format</li>
+          <li>Lighting</li>
+        </ul>
+      </div>
+      <div class="phase panel">
+        <h3>Next</h3>
+        <ul>
+          <li>Atmosphere</li>
+          <li>Biomes</li>
+          <li>World generation</li>
+          <li>Interaction</li>
+        </ul>
+      </div>
+      <div class="phase panel">
+        <h3>Later</h3>
+        <ul>
+          <li>Weather</li>
+          <li>Survival systems</li>
+          <li>Multiplayer</li>
+          <li>Modding</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="note">Priorities may change as the game develops.</p>
+  </section>
+
+  <div class="rule"></div>
+
+  <section id="devlog">
+    <span class="label">Devlog</span>
+
+    <div class="entries">
+      <article class="entry panel">
+        <time datetime="2026-08-22">August 22</time>
+        <div>
+          <h3>A new name</h3>
+          <p>MineLua becomes Tamarton.</p>
+        </div>
+      </article>
+      <article class="entry panel">
+        <time datetime="2026-08-21">August 21</time>
+        <div>
+          <h3>Atmospheric scattering experiments</h3>
+          <p>The sun is a real disc now, shaded through the air it sets behind.</p>
+        </div>
+      </article>
+      <article class="entry panel">
+        <time datetime="2026-06-25">June 25</time>
+        <div>
+          <h3>Terrain streaming without murdering the framerate</h3>
+          <p>Chunk work runs on a time budget instead of a step count.</p>
+        </div>
+      </article>
+      <article class="entry panel">
+        <time datetime="2026-06-23">June 23</time>
+        <div>
+          <h3>Making stars match the real sky</h3>
+          <p>First pass at the night sky. Real constellations still to come.</p>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <footer class="panel">
+    <div class="foot">
+      <span class="word">Tamarton</span>
+      <span class="state">In early development</span>
+      <span class="small">
+        An independent project, not affiliated with Mojang or Microsoft.
+      </span>
+    </div>
+  </footer>
+
+</div>
+
+<script src="site.js"></script>
+</body>
+</html>

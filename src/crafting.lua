@@ -1,3 +1,4 @@
+local filesystem = require("filesystem")
 local json = require("json")
 
 local crafting = {}
@@ -13,29 +14,11 @@ local function loadDataFile(path)
   return json.decode(content)
 end
 
-local function parentDir(path)
-  return (path:gsub("\\", "/"):match("^(.*)/[^/]*$") or "")
-end
-
-local function joinPath(base, child)
-  if child:match("^%a:[/\\]") or child:sub(1, 1) == "/" or child:sub(1, 1) == "\\" then
-    return child
-  end
-  if base == "" then
-    return child
-  end
-  return base .. "/" .. child
-end
-
 local function copyResult(result)
   return {
     item = result.item,
     count = result.count or 1
   }
-end
-
-local function isArray(value)
-  return type(value) == "table" and value[1] ~= nil
 end
 
 local function stripNamespace(id)
@@ -45,11 +28,35 @@ local function stripNamespace(id)
   return id:gsub("^minecraft:", "")
 end
 
+local function normalizeTagId(id)
+  if type(id) ~= "string" then
+    return nil
+  end
+  id = id:gsub("^#", "")
+  if not id:find(":", 1, true) then
+    id = "minecraft:" .. id
+  end
+  return id
+end
+
 local function normalizeIngredient(value)
   if type(value) == "string" then
+    if value:sub(1, 1) == "#" then
+      return {tag = normalizeTagId(value)}
+    end
     return stripNamespace(value)
   end
   if type(value) == "table" then
+    if value.tag then
+      return {tag = normalizeTagId(value.tag)}
+    end
+    if value[1] ~= nil then
+      local alternatives = {}
+      for i = 1, #value do
+        alternatives[i] = normalizeIngredient(value[i])
+      end
+      return {alternatives = alternatives}
+    end
     return stripNamespace(value.item or value.id or value.block)
   end
   return value
@@ -79,7 +86,6 @@ local function normalizeRecipe(recipe)
   end
 
   local normalized = {
-    id = recipe.id,
     type = recipeType,
     result = normalizeResult(recipe.result)
   }
@@ -104,57 +110,52 @@ local function normalizeRecipe(recipe)
   return normalized
 end
 
-local function normalizeRecipes(decoded)
-  local source = decoded
-  if type(decoded) == "table" and decoded.recipes then
-    source = decoded.recipes
+local function ingredientMatches(expected, actual, tags)
+  actual = normalizeIngredient(actual)
+  if type(expected) ~= "table" then
+    return expected == actual
   end
-
-  if type(source) ~= "table" then
-    return {}
+  if expected.tag then
+    local members = tags and tags[expected.tag]
+    return members and members[actual] == true or false
   end
-
-  if not isArray(source) then
-    local single = normalizeRecipe(source)
-    return single and {single} or {}
-  end
-
-  local recipes = {}
-  for i = 1, #source do
-    local recipe = normalizeRecipe(source[i])
-    if recipe then
-      recipes[#recipes + 1] = recipe
+  for _, alternative in ipairs(expected.alternatives or {}) do
+    if ingredientMatches(alternative, actual, tags) then
+      return true
     end
   end
-
-  return recipes
+  return false
 end
 
-local function sortedCounts(items)
-  local counts = {}
+local function shapelessMatches(recipe, items, tags)
+  local actual = {}
   for i = 1, #items do
     local item = normalizeIngredient(items[i])
     if item and item ~= "" then
-      counts[item] = (counts[item] or 0) + 1
+      actual[#actual + 1] = item
     end
   end
-  return counts
-end
-
-local function countsMatch(a, b)
-  for key, value in pairs(a) do
-    if b[key] ~= value then
-      return false
-    end
+  if #actual ~= #(recipe.ingredients or {}) then
+    return false
   end
 
-  for key, value in pairs(b) do
-    if a[key] ~= value then
-      return false
+  local used = {}
+  local function assign(ingredientIndex)
+    if ingredientIndex > #recipe.ingredients then
+      return true
     end
+    local expected = recipe.ingredients[ingredientIndex]
+    for itemIndex = 1, #actual do
+      if not used[itemIndex] and ingredientMatches(expected, actual[itemIndex], tags) then
+        used[itemIndex] = true
+        if assign(ingredientIndex + 1) then return true end
+        used[itemIndex] = nil
+      end
+    end
+    return false
   end
 
-  return true
+  return assign(1)
 end
 
 local function normalizeGrid(grid)
@@ -189,7 +190,7 @@ local function normalizeGrid(grid)
   return normalized
 end
 
-local function shapedMatches(recipe, grid)
+local function shapedMatches(recipe, grid, tags)
   local normalized = normalizeGrid(grid)
   if #normalized ~= #recipe.pattern then
     return false
@@ -204,7 +205,10 @@ local function shapedMatches(recipe, grid)
     for x = 1, #patternRow do
       local symbol = patternRow:sub(x, x)
       local expected = symbol == " " and "" or recipe.key[symbol]
-      if (normalized[y][x] or "") ~= (expected or "") then
+      local actual = normalized[y][x] or ""
+      if expected == "" and actual ~= "" then
+        return false
+      elseif expected ~= "" and not ingredientMatches(expected, actual, tags) then
         return false
       end
     end
@@ -213,38 +217,94 @@ local function shapedMatches(recipe, grid)
   return true
 end
 
-function crafting.load(path)
-  path = path or "data/recipes.json"
-  local decoded = loadDataFile(path)
+local function collectIngredientTags(ingredient, result)
+  if type(ingredient) ~= "table" then return end
+  if ingredient.tag then
+    result[ingredient.tag] = true
+  end
+  for _, alternative in ipairs(ingredient.alternatives or {}) do
+    collectIngredientTags(alternative, result)
+  end
+end
+
+local function recipeTagIds(recipes)
+  local result = {}
+  for _, recipe in ipairs(recipes) do
+    for _, ingredient in ipairs(recipe.ingredients or {}) do
+      collectIngredientTags(ingredient, result)
+    end
+    for _, ingredient in pairs(recipe.key or {}) do
+      collectIngredientTags(ingredient, result)
+    end
+  end
+  return result
+end
+
+local function loadTag(tagId, dataRoot, tags, loading)
+  tagId = normalizeTagId(tagId)
+  if tags[tagId] then return tags[tagId] end
+  if loading[tagId] then
+    error("Circular crafting item tag: #" .. tagId)
+  end
+  loading[tagId] = true
+
+  local namespace, path = tagId:match("^([^:]+):(.+)$")
+  local decoded = loadDataFile(dataRoot .. "/" .. namespace .. "/tags/item/" .. path .. ".json")
+  if type(decoded) ~= "table" then
+    error("Missing crafting item tag: #" .. tagId)
+  end
+
+  local members = {}
+  for _, value in ipairs(decoded.values or decoded) do
+    if type(value) == "string" and value:sub(1, 1) == "#" then
+      local nested = loadTag(value, dataRoot, tags, loading)
+      for item in pairs(nested) do members[item] = true end
+    else
+      local item = normalizeIngredient(value)
+      if type(item) == "string" and item ~= "" then members[item] = true end
+    end
+  end
+
+  loading[tagId] = nil
+  tags[tagId] = members
+  return members
+end
+
+function crafting.load(dataRoot)
+  dataRoot = (dataRoot or "data"):gsub("[\\/]+$", "")
   local recipes = {}
 
-  if type(decoded) == "table" and decoded.files then
-    local base = parentDir(path)
-    for i = 1, #decoded.files do
-      local fileRecipes = normalizeRecipes(loadDataFile(joinPath(base, decoded.files[i])))
-      for j = 1, #fileRecipes do
-        recipes[#recipes + 1] = fileRecipes[j]
+  for _, namespaceEntry in ipairs(filesystem.entries(dataRoot)) do
+    if namespaceEntry.isDirectory and not namespaceEntry.isReparsePoint then
+      local namespace = namespaceEntry.name
+      local recipeRoot = dataRoot .. "/" .. namespace .. "/recipe"
+      for _, path in ipairs(filesystem.files(recipeRoot, ".json")) do
+        local recipe = normalizeRecipe(loadDataFile(path))
+        if not recipe then
+          error("Invalid crafting recipe: " .. path)
+        end
+        local relative = path:sub(#recipeRoot + 2):gsub("\\", "/"):gsub("%.json$", "")
+        recipe.id = namespace .. ":" .. relative
+        recipes[#recipes + 1] = recipe
       end
     end
-  else
-    recipes = normalizeRecipes(decoded)
+  end
+
+  local tags = {}
+  for tagId in pairs(recipeTagIds(recipes)) do
+    loadTag(tagId, dataRoot, tags, {})
   end
 
   return {
-    recipes = recipes
+    recipes = recipes,
+    tags = tags
   }
 end
 
-function crafting.normalizeRecipe(recipe)
-  return normalizeRecipe(recipe)
-end
-
 function crafting.matchShapeless(recipeBook, items)
-  local inputCounts = sortedCounts(items)
-
   for i = 1, #recipeBook.recipes do
     local recipe = recipeBook.recipes[i]
-    if recipe.type == "shapeless" and countsMatch(inputCounts, sortedCounts(recipe.ingredients or {})) then
+    if recipe.type == "shapeless" and shapelessMatches(recipe, items, recipeBook.tags) then
       return copyResult(recipe.result)
     end
   end
@@ -255,7 +315,7 @@ end
 function crafting.matchGrid(recipeBook, grid)
   for i = 1, #recipeBook.recipes do
     local recipe = recipeBook.recipes[i]
-    if recipe.type == "shaped" and shapedMatches(recipe, grid) then
+    if recipe.type == "shaped" and shapedMatches(recipe, grid, recipeBook.tags) then
       return copyResult(recipe.result)
     end
   end

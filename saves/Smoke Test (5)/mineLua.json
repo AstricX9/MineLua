@@ -1,0 +1,12 @@
+{
+  "allowCheats": false,
+  "bonusChest": false,
+  "gameMode": "creative",
+  "generateStructures": true,
+  "generatorType": "default",
+  "lastPlayed": 1788070593000,
+  "saveFormat": "minecraft-like",
+  "seed": 1,
+  "worldId": "earth",
+  "worldName": "Smoke Test"
+}

@@ -2,22 +2,79 @@ local ffi = require("ffi")
 local blocks = require("blocks")
 local settings = require("graphics_settings").terrainGeneration or {}
 local texture = require("texture")
+local worldProfiles = require("world_profiles")
+local showcase = require("showcase")
+local voxelTrees = require("voxel_trees")
 
 local terrain = {}
 
 terrain.SEA_LEVEL = settings.seaLevel or 63
 terrain.activeSeed = settings.seed or 1
+
+-- The noise hashes run hundreds of thousands of times per chunk, so anything
+-- they touch is hoisted: the library functions to locals, and the seed term to
+-- a value folded only when the seed changes rather than looked up through two
+-- tables and multiplied out on every call.
+local floor = math.floor
+local bit = require("bit")
+local tobit = bit.tobit
+local wgnoise = require("worldgen.noise")
+local imul, mix32 = wgnoise.imul, wgnoise.mix32
+
+local seedKey = 0
+
+local function refreshSeedTerm()
+  seedKey = imul(tobit((terrain.activeSeed or settings.seed or 1) * 101), 1442695041)
+end
+refreshSeedTerm()
+terrain.activeWorldId = "earth"
+terrain.activeProfile = worldProfiles.get(terrain.activeWorldId)
+
+local function createWorldgen(profile, seed)
+  local generator = require("worldgen." .. profile.generator)
+  assert(type(generator) == "table" and type(generator.new) == "function",
+    "world generator must expose new(settings, seed): " .. profile.generator)
+  return generator.new(settings, seed)
+end
+
+local worldgen = createWorldgen(terrain.activeProfile, terrain.activeSeed)
 local macroCache = {}
 local macroCacheCount = 0
 local MACRO_CACHE_LIMIT = 160000
+
+function terrain.setWorldProfile(worldId)
+  local profile = worldProfiles.get(worldId)
+  if profile.id == terrain.activeWorldId then return profile end
+  terrain.activeWorldId = profile.id
+  terrain.activeProfile = profile
+  worldgen = createWorldgen(profile, terrain.activeSeed)
+  macroCache = {}
+  macroCacheCount = 0
+  return profile
+end
+
+function terrain.worldProfile()
+  return terrain.activeProfile
+end
 
 function terrain.setSeed(seed)
   local nextSeed = tonumber(seed) or settings.seed or 1
   if terrain.activeSeed ~= nextSeed then
     terrain.activeSeed = nextSeed
+    refreshSeedTerm()
+    worldgen:setSeed(nextSeed)
     macroCache = {}
     macroCacheCount = 0
   end
+end
+
+function terrain.refreshGenerationSettings()
+  terrain.SEA_LEVEL = settings.seaLevel or 63
+  terrain.RELIEF_GAIN = settings.reliefGain or 2.4
+  terrain.LOCAL_RELIEF_GAIN = settings.localReliefGain or 2.0
+  worldgen:refresh(settings)
+  macroCache = {}
+  macroCacheCount = 0
 end
 
 local SUPERFLAT_LAYERS = {
@@ -37,9 +94,9 @@ local biomeProfiles = {
     maxHeight = 0.35,
     topBlock = "grass",
     fillerBlock = "dirt",
-    treeSpacing = 6,
-    treeChance = 0.48,
-    treeGenerators = {"big", "oak", "oak"}
+    treeSpacing = 7,
+    treeChance = 0.52,
+    treeGenerators = {"ceiba", "jungle", "jungle", "mangrove", "fig", "big"}
   },
   swampland = {
     name = "Swampland",
@@ -53,7 +110,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 10,
     treeChance = 0.10,
-    treeGenerators = {"oak"}
+    treeGenerators = {"willow", "mangrove", "fig", "jungle", "oak"}
   },
   seasonalForest = {
     name = "Seasonal Forest",
@@ -66,7 +123,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 8,
     treeChance = 0.28,
-    treeGenerators = {"oak", "oak", "big"}
+    treeGenerators = {"maple", "jungle", "acacia", "oak", "big"}
   },
   savanna = {
     name = "Savanna",
@@ -79,7 +136,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 13,
     treeChance = 0.05,
-    treeGenerators = {"oak"}
+    treeGenerators = {"acacia", "acacia", "baobab", "oak"}
   },
   shrubland = {
     name = "Shrubland",
@@ -92,7 +149,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 13,
     treeChance = 0.06,
-    treeGenerators = {"oak"}
+    treeGenerators = {"acacia", "birch", "oak"}
   },
   plains = {
     name = "Plains",
@@ -105,7 +162,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 18,
     treeChance = 0.015,
-    treeGenerators = {"oak"}
+    treeGenerators = {"oak", "birch"}
   },
   forest = {
     name = "Forest",
@@ -119,7 +176,7 @@ local biomeProfiles = {
     fillerBlock = "dirt",
     treeSpacing = 7,
     treeChance = 0.38,
-    treeGenerators = {"forest", "oak", "oak", "big"}
+    treeGenerators = {"forest", "oak", "birch", "birch", "maple", "big"}
   },
   taiga = {
     name = "Taiga",
@@ -134,7 +191,7 @@ local biomeProfiles = {
     treeSpacing = 8,
     treeChance = 0.34,
     snow = true,
-    treeGenerators = {"taiga1", "taiga2", "taiga2"}
+    treeGenerators = {"spruce", "pine", "pine", "cypress"}
   },
   desert = {
     name = "Desert",
@@ -206,6 +263,90 @@ local biomeProfiles = {
     maxHeight = 0.1,
     topBlock = "sand",
     fillerBlock = "sand",
+    treeSpacing = 12,
+    treeChance = 0.18,
+    treeGenerators = {"palm", "palm", "palm"}
+  },
+  rockyShore = {
+    name = "Rocky Shore",
+    temperature = 0.5,
+    rainfall = 0.45,
+    minHeight = 0.0,
+    maxHeight = 0.12,
+    topBlock = "gravel",
+    fillerBlock = "stone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  frozenShore = {
+    name = "Frozen Shore",
+    temperature = 0.05,
+    rainfall = 0.35,
+    minHeight = 0.0,
+    maxHeight = 0.12,
+    topBlock = "gravel",
+    fillerBlock = "dirt",
+    treeSpacing = 16,
+    treeChance = 0.0,
+    snow = true
+  },
+  mars_lowlands = {
+    name = "Martian Northern Plains",
+    color = 0xA94F29,
+    temperature = 0.18,
+    rainfall = 0.0,
+    topBlock = "red_sand",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_highlands = {
+    name = "Martian Cratered Highlands",
+    color = 0xB86234,
+    temperature = 0.14,
+    rainfall = 0.0,
+    topBlock = "red_sand",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_crater = {
+    name = "Martian Impact Terrain",
+    color = 0x75402E,
+    temperature = 0.13,
+    rainfall = 0.0,
+    topBlock = "red_sand",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_volcanic = {
+    name = "Martian Volcanic Rise",
+    color = 0x312C2A,
+    temperature = 0.12,
+    rainfall = 0.0,
+    topBlock = "stone",
+    fillerBlock = "stone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_canyon = {
+    name = "Martian Fault Canyon",
+    color = 0x65301F,
+    temperature = 0.16,
+    rainfall = 0.0,
+    topBlock = "stone",
+    fillerBlock = "red_sandstone",
+    treeSpacing = 16,
+    treeChance = 0.0
+  },
+  mars_polar = {
+    name = "Martian Polar Cap",
+    color = 0xD5DEE3,
+    temperature = 0.02,
+    rainfall = 0.0,
+    topBlock = "packed_ice",
+    fillerBlock = "packed_ice",
     treeSpacing = 16,
     treeChance = 0.0
   }
@@ -218,6 +359,17 @@ void stbi_image_free(void *retval_from_stbi_load);
 
 local stbi = ffi.load("lib/stb_image.dll")
 local grassColormap = false
+
+-- Compensates for fbm() clustering near 0.5 (see terrain.heightAt). Tune this to
+-- make the world hillier or flatter; 1.0 restores the original flat behaviour.
+-- Columns generated between yields in fillChunk's density loop. Smaller means a
+-- tighter frame budget cap and slightly more coroutine overhead.
+local DENSITY_YIELD_COLUMNS = 4
+
+terrain.RELIEF_GAIN = settings.reliefGain or 2.4
+-- Extra gain on the short-wavelength terms, which are the only ones that vary
+-- inside a single render distance. Raise for hillier ground, 1.0 to disable.
+terrain.LOCAL_RELIEF_GAIN = settings.localReliefGain or 2.0
 
 local function clamp(value, minValue, maxValue)
   if value < minValue then
@@ -238,16 +390,16 @@ local function smoothstep(t)
   return t * t * (3.0 - 2.0 * t)
 end
 
+-- Salts are small constants, so their term stays well inside the exact range of
+-- a double; the world seed is folded into seedKey once instead.
 local function hash2(x, z, seed)
-  seed = seed + (terrain.activeSeed or settings.seed or 1) * 101
-  local n = x * 374761393 + z * 668265263 + seed * 1442695041
-  n = math.sin(n) * 43758.5453123
-  return n - math.floor(n)
+  return mix32(tobit(tobit(x * 374761393) + tobit(z * 668265263) +
+    seed * 1442695041 + seedKey))
 end
 
 local function valueNoise(x, z, seed)
-  local x0 = math.floor(x)
-  local z0 = math.floor(z)
+  local x0 = floor(x)
+  local z0 = floor(z)
   local x1 = x0 + 1
   local z1 = z0 + 1
 
@@ -265,31 +417,27 @@ local function valueNoise(x, z, seed)
 end
 
 local function hash3(x, y, z, seed)
-  seed = seed + (terrain.activeSeed or settings.seed or 1) * 101
-  local n = x * 374761393 + y * 1442695041 + z * 668265263 + seed * 1274126177
-  n = math.sin(n) * 43758.5453123
-  return n - math.floor(n)
+  return mix32(tobit(tobit(x * 374761393) + tobit(y * 1442695041) +
+    tobit(z * 668265263) + seed * 1274126177 + seedKey))
 end
 
+-- The eight lattice corners were read through a closure defined on every call.
+-- That allocation, once per octave per cell, dominated the density pass; reading
+-- them directly is the same arithmetic without it.
 local function valueNoise3(x, y, z, seed)
-  local x0 = math.floor(x)
-  local y0 = math.floor(y)
-  local z0 = math.floor(z)
+  local x0 = floor(x)
+  local y0 = floor(y)
+  local z0 = floor(z)
+  local x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
   local sx = smoothstep(x - x0)
   local sy = smoothstep(y - y0)
   local sz = smoothstep(z - z0)
 
-  local function sample(dx, dy, dz)
-    return hash3(x0 + dx, y0 + dy, z0 + dz, seed)
-  end
-
-  local x00 = lerp(sample(0, 0, 0), sample(1, 0, 0), sx)
-  local x10 = lerp(sample(0, 1, 0), sample(1, 1, 0), sx)
-  local x01 = lerp(sample(0, 0, 1), sample(1, 0, 1), sx)
-  local x11 = lerp(sample(0, 1, 1), sample(1, 1, 1), sx)
-  local y0v = lerp(x00, x10, sy)
-  local y1v = lerp(x01, x11, sy)
-  return lerp(y0v, y1v, sz)
+  local x00 = lerp(hash3(x0, y0, z0, seed), hash3(x1, y0, z0, seed), sx)
+  local x10 = lerp(hash3(x0, y1, z0, seed), hash3(x1, y1, z0, seed), sx)
+  local x01 = lerp(hash3(x0, y0, z1, seed), hash3(x1, y0, z1, seed), sx)
+  local x11 = lerp(hash3(x0, y1, z1, seed), hash3(x1, y1, z1, seed), sx)
+  return lerp(lerp(x00, x10, sy), lerp(x01, x11, sy), sz)
 end
 
 local function fbm(x, z, seed, octaves, frequency)
@@ -324,10 +472,6 @@ local function fbm3(x, y, z, seed, octaves, frequency)
   return total / normalization
 end
 
-local function ridged(value)
-  return 1.0 - math.abs(value * 2.0 - 1.0)
-end
-
 local function edge(value, edge0, edge1)
   if edge0 == edge1 then
     return value >= edge1 and 1.0 or 0.0
@@ -335,81 +479,8 @@ local function edge(value, edge0, edge1)
   return smoothstep((value - edge0) / (edge1 - edge0))
 end
 
-local function rotated(x, z, angle)
-  local c = math.cos(angle)
-  local s = math.sin(angle)
-  return x * c + z * s, -x * s + z * c
-end
-
-local function mountainChain(x, z, seed, scale, angle, stretch)
-  local rx, rz = rotated(x, z, angle)
-  return ridged(fbm(rx, rz * stretch, seed, 5, scale))
-end
-
 local function macroSignals(x, z)
-  local continentScale = settings.continentScale or 0.00036
-  local biomeScale = settings.biomeScale or 0.00092
-  local regionScale = settings.regionScale or 0.00125
-  local mountainScale = settings.mountainScale or 0.00078
-  local riverScale = settings.riverScale or 0.00115
-  local warpScale = settings.macroWarpScale or 0.00062
-  local warpAmount = settings.macroWarpAmount or 360.0
-
-  local warpX = (fbm(x + 9100.0, z - 4100.0, 53, 3, warpScale) - 0.5) * warpAmount
-  local warpZ = (fbm(x - 2800.0, z + 7600.0, 59, 3, warpScale) - 0.5) * warpAmount
-  local wx = x + warpX
-  local wz = z + warpZ
-
-  local continentBase = fbm(wx, wz, 11, 6, continentScale)
-  local continentShape = fbm(wx + 6200.0, wz - 5800.0, 13, 4, continentScale * 2.15)
-  local continent = clamp(continentBase * 0.78 + continentShape * 0.22, 0.0, 1.0)
-  local land = edge(continent, 0.38, 0.53)
-
-  local regionalElevation = fbm(wx - 14000.0, wz + 9300.0, 17, 4, regionScale)
-  local broadHills = fbm(wx + 4100.0, wz - 3700.0, 19, 4, regionScale * 2.35)
-  local localHills = fbm(x - 700.0, z + 350.0, 23, 4, settings.detailScale or 0.026)
-  local surfaceDetail = fbm(x - 90.0, z + 210.0, 31, 3, 0.052)
-  local micro = fbm(x + 830.0, z - 620.0, 33, 2, 0.095)
-
-  local chainA = mountainChain(wx + 300.0, wz - 450.0, 97, mountainScale, 0.58, 0.34)
-  local chainB = mountainChain(wx - 12000.0, wz + 9400.0, 101, mountainScale * 0.72, -0.82, 0.28)
-  local chainC = mountainChain(wx + 19000.0, wz + 2100.0, 103, mountainScale * 1.18, 1.36, 0.42)
-  local chainNoise = math.max(chainA, chainB * 0.92, chainC * 0.72)
-  local mountainGate = edge(regionalElevation, 0.50, 0.78) * edge(land, 0.35, 0.80)
-  local mountain = edge(chainNoise, 0.50, 0.82) * mountainGate
-  local ridge = ridged(fbm(wx + 1700.0, wz - 2200.0, 37, 5, 0.0048))
-
-  local riverBase = ridged(fbm(wx + 3200.0, wz - 8400.0, 401, 5, riverScale))
-  local riverDetail = ridged(fbm(wx - 2300.0, wz + 5100.0, 409, 4, riverScale * 2.15))
-  local riverField = riverBase * 0.82 + riverDetail * 0.18
-  local river = edge(riverField, 0.86, 0.98) * edge(land, 0.28, 0.76) * (1.0 - mountain * 0.62)
-
-  local lakeField = fbm(wx - 8300.0, wz + 11800.0, 421, 3, regionScale * 1.55)
-  local lake = edge(0.20 - lakeField, 0.00, 0.09) * edge(land, 0.45, 0.90) * (1.0 - mountain * 0.75)
-
-  local temperatureRaw = fbm(wx + 1200.0, wz - 800.0, 71, 4, biomeScale)
-  local rainfallRaw = fbm(wx - 500.0, wz + 900.0, 83, 4, biomeScale * 1.18)
-  local temperature = clamp((temperatureRaw - 0.28) / 0.46, 0.0, 1.0)
-  local rainfall = clamp((rainfallRaw - 0.24) / 0.52, 0.0, 1.0)
-
-  return {
-    continent = continent,
-    land = land,
-    coast = 1.0 - math.abs(land * 2.0 - 1.0),
-    regionalElevation = regionalElevation,
-    broadHills = broadHills,
-    localHills = localHills,
-    surfaceDetail = surfaceDetail,
-    micro = micro,
-    mountain = mountain,
-    ridge = ridge,
-    river = river,
-    lake = lake,
-    temperature = temperature,
-    rainfall = rainfall,
-    warpX = warpX,
-    warpZ = warpZ
-  }
+  return worldgen:macroAt(x, z)
 end
 
 function terrain.macroAt(x, z)
@@ -506,55 +577,8 @@ local function sampleGrassColor(temperature, rainfall)
   }
 end
 
-local function biomeSignals(x, z)
-  local macro = terrain.macroAt(x, z)
-  return macro.temperature, macro.rainfall, macro.mountain, macro.land
-end
-
-local function classicBiomeForClimate(temperature, rainfall)
-  rainfall = rainfall * temperature
-
-  if temperature < 0.1 then
-    return "tundra"
-  end
-
-  if rainfall < 0.2 then
-    if temperature < 0.5 then
-      return "tundra"
-    elseif temperature < 0.95 then
-      return "savanna"
-    end
-    return "desert"
-  end
-
-  if rainfall > 0.5 and temperature < 0.7 then
-    return "swampland"
-  end
-
-  if temperature < 0.5 then
-    return "taiga"
-  elseif temperature < 0.97 then
-    return rainfall < 0.35 and "shrubland" or "forest"
-  elseif rainfall < 0.45 then
-    return "plains"
-  elseif rainfall < 0.9 then
-    return "seasonalForest"
-  end
-
-  return "rainforest"
-end
-
 function terrain.biomeAt(x, z)
-  local temperature, rainfall, mountain, continent = biomeSignals(x, z)
-
-  if continent < 0.22 then
-    return "ocean"
-  end
-  if mountain > 0.56 then
-    return "mountains"
-  end
-
-  return classicBiomeForClimate(temperature, rainfall)
+  return worldgen:sampleColumn(x, z, 127).biome
 end
 
 function terrain.biomeProfileAt(x, z)
@@ -562,99 +586,63 @@ function terrain.biomeProfileAt(x, z)
   return biomeProfiles[biome] or biomeProfiles.plains, biome
 end
 
-local function smoothedBiomeHeight(x, z)
-  local centerProfile = terrain.biomeProfileAt(x, z)
-  local totalMin = 0.0
-  local totalMax = 0.0
-  local totalWeight = 0.0
-
-  for dx = -2, 2 do
-    for dz = -2, 2 do
-      local profile = terrain.biomeProfileAt(x + dx * 8, z + dz * 8)
-      local weight = 10.0 / math.sqrt(dx * dx + dz * dz + 0.2)
-      if profile.minHeight > centerProfile.minHeight then
-        weight = weight * 0.5
-      end
-
-      totalMin = totalMin + profile.minHeight * weight
-      totalMax = totalMax + profile.maxHeight * weight
-      totalWeight = totalWeight + weight
-    end
-  end
-
-  return totalMin / totalWeight, totalMax / totalWeight
+-- Climate is continuous even when the named biome changes. Biome profiles
+-- influence the regional signal, elevation cools it, and the resulting values
+-- drive snow, frozen water, and shoreline material using the same rules in the
+-- RTS preview and full chunk generator.
+function terrain.environmentAt(x, z, height, sourceBiome)
+  local sample = worldgen:sampleColumn(x, z, 127)
+  local biome = sample.biome
+  return {
+    biome = biome,
+    profile = biomeProfiles[biome] or biomeProfiles.plains,
+    temperature = sample.temperature,
+    moisture = sample.moisture,
+    rainfall = sample.rainfall,
+    hasSnow = sample.hasSnow,
+    freezeWater = sample.freezeWater,
+    coast = sample.coastType,
+    geology = sample.geology,
+    landform = sample.landform,
+    hydrology = sample.waterKind
+  }
 end
 
-function terrain.heightAt(x, z, maxHeight)
-  local sea = terrain.SEA_LEVEL
-  local macro = terrain.macroAt(x, z)
-  local biomeMin, biomeMax = smoothedBiomeHeight(x, z)
-  local land = macro.land
-  local mountainMask = macro.mountain
-  local broadHills = macro.broadHills
-  local lowlands = macro.localHills
-  local roughness = macro.surfaceDetail
-  local detail = macro.micro
-  local ridgeNoise = macro.ridge
-
-  local oceanFloor = sea - 34.0 + macro.continent * 28.0 + (broadHills - 0.50) * 8.0 + (roughness - 0.50) * 4.5
-  local coastlineShelf = sea - 4.0 + (broadHills - 0.50) * 5.0
-  oceanFloor = lerp(oceanFloor, coastlineShelf, edge(land, 0.15, 0.42))
-
-  local continentalBase = sea + 2.0 + land * 18.0 + (macro.regionalElevation - 0.50) * 11.0
-  local plainsAndHills = (broadHills - 0.50) * 13.0 + (lowlands - 0.50) * 6.5 + (roughness - 0.50) * 3.4 + (detail - 0.50) * 1.1
-  local biomeLift = biomeMin * 5.5 + biomeMax * 5.0
-  local height = continentalBase + plainsAndHills + biomeLift
-
-  local chainHeight = (mountainMask ^ 1.65) * (14.0 + ridgeNoise * ridgeNoise * 23.0)
-  local foothills = edge(mountainMask, 0.08, 0.42) * ridgeNoise * 7.0
-  height = height + chainHeight + foothills
-  height = lerp(oceanFloor, height, land)
-
-  if macro.lake > 0.0 and height > sea - 2.0 then
-    height = lerp(height, sea - 2.0 + (roughness - 0.5) * 1.4, macro.lake * 0.78)
-  end
-  if macro.river > 0.0 and height > sea - 3.0 then
-    local riverBed = sea - 2.0 + (roughness - 0.5) * 1.2
-    height = lerp(height, riverBed, macro.river * 0.86)
-  end
-
-  local profile, biome = terrain.biomeProfileAt(x, z)
-  if biome == "desert" then
-    height = height - 1.0 - math.abs(roughness - 0.5) * 1.4
-  elseif biome == "beach" then
-    height = lerp(height, sea - 1.0 + (roughness - 0.5) * 1.5, 0.55)
-  elseif biome == "forest" then
-    height = height + 0.8 + (lowlands - 0.5) * 1.7
-  elseif biome == "taiga" then
-    height = height + ridgeNoise * 1.8
-  elseif biome == "mountains" then
-    height = height + 1.5 + ridgeNoise * 3.0 + profile.maxHeight
-  end
-
-  local shelfNoise = fbm(x + 150.0, z - 910.0, 39, 2, 0.020)
-  height = height + (shelfNoise - 0.5) * lerp(0.8, 1.8, land)
-
-  return clamp(math.floor(height), 2, math.max(2, maxHeight - 4))
+function terrain.heightAt(x, z, maxHeight, fastPreview)
+  return worldgen:heightAt(x, z, maxHeight or 127)
 end
 
 function terrain.columnAt(x, z, maxHeight)
-  local macro = terrain.macroAt(x, z)
-  local height = terrain.heightAt(x, z, maxHeight)
-  local profile, biome = terrain.biomeProfileAt(x, z)
+  maxHeight = maxHeight or 127
+  local sample = worldgen:sampleColumn(x, z, maxHeight)
+  local height = sample.height
+  local biome = sample.biome
+  local profile = biomeProfiles[biome] or biomeProfiles.plains
   local stoneNoise = fbm(x, z, 41, 2, 1.0 / 16.0)
-  local fillerDepth = math.floor(stoneNoise * 2.0 + 2.5 + hash2(x, z, 311) * 0.45)
-  local topBlock = profile.topBlock
-  local fillerBlock = profile.fillerBlock
+  local fillerDepth = math.floor((stoneNoise * 2.0 + 2.5 + hash2(x, z, 311) * 0.45) *
+    (sample.soilDepthScale or 1.0))
+  local topBlock = sample.topBlock or profile.topBlock
+  local fillerBlock = sample.fillerBlock or profile.fillerBlock
 
-  if height <= terrain.SEA_LEVEL and biome ~= "ocean" then
-    biome = "beach"
+  if biome == "beach" then
     topBlock = "sand"
     fillerBlock = "sand"
-  elseif macro.river > 0.45 and height <= terrain.SEA_LEVEL + 1 then
-    topBlock = "sand"
-    fillerBlock = "sand"
-  elseif macro.lake > 0.50 and height <= terrain.SEA_LEVEL + 1 then
+  elseif biome == "rockyShore" or biome == "frozenShore" then
+    topBlock = blocks.gravel and "gravel" or "stone"
+    fillerBlock = biome == "rockyShore" and "stone" or "dirt"
+  elseif sample.riverCore > 0.22 and sample.waterLevel and height <= sample.waterLevel then
+    local riverBedNoise = hash2(x, z, 617)
+    if blocks.clay and riverBedNoise < 0.18 then
+      topBlock = "clay"
+      fillerBlock = "clay"
+    elseif blocks.gravel and riverBedNoise < 0.68 then
+      topBlock = "gravel"
+      fillerBlock = "gravel"
+    else
+      topBlock = "sand"
+      fillerBlock = "sand"
+    end
+  elseif sample.lake > 0.22 and sample.waterLevel and height <= sample.waterLevel then
     topBlock = blocks.clay and "clay" or "sand"
     fillerBlock = topBlock
   elseif biome == "ocean" and height > terrain.SEA_LEVEL - 7 then
@@ -669,14 +657,110 @@ function terrain.columnAt(x, z, maxHeight)
     height = height,
     biome = biome,
     profile = profile,
-    river = macro.river,
-    lake = macro.lake,
-    land = macro.land,
-    mountain = macro.mountain,
+    biomeFamily = sample.biomeFamily,
+    landform = sample.landform,
+    geology = sample.geology,
+    coastType = sample.coastType,
+    waterKind = sample.waterKind,
+    waterLevel = sample.waterLevel,
+    river = sample.river,
+    riverCore = sample.riverCore,
+    riverAccumulation = sample.riverAccumulation,
+    lake = sample.lake,
+    drainage = sample.drainage,
+    land = sample.land,
+    mountain = sample.mountain,
+    erosion = sample.erosion,
+    ruggedness = sample.ruggedness,
+    continentalness = sample.continentalness,
+    volcanism = sample.volcanism,
+    temperature = sample.temperature,
+    moisture = sample.moisture,
+    rainfall = sample.rainfall,
+    hasSnow = sample.hasSnow,
+    freezeWater = sample.freezeWater,
     topBlock = blockId(topBlock, "grass"),
     fillerBlock = blockId(fillerBlock, "dirt"),
     fillerDepth = math.max(1, fillerDepth)
   }
+end
+
+local unsafeSpawnBiomes = {
+  ocean = true,
+  beach = true,
+  rockyShore = true,
+  frozenShore = true,
+  swampland = true,
+  iceDesert = true,
+  mars_polar = true
+}
+
+local function spawnCandidateAt(x, z, maxHeight)
+  local center = terrain.columnAt(x, z, maxHeight)
+  if center.waterLevel or center.height < terrain.SEA_LEVEL + 4 or center.land < 0.52 or center.hasSnow or
+      center.river > 0.20 or center.lake > 0.20 or unsafeSpawnBiomes[center.biome] then
+    return nil
+  end
+
+  local minimum, maximum = center.height, center.height
+  for _, offset in ipairs({{-4, 0}, {4, 0}, {0, -4}, {0, 4}, {-3, -3}, {3, 3}}) do
+    local nearby = terrain.columnAt(x + offset[1], z + offset[2], maxHeight)
+    if nearby.waterLevel or nearby.height < terrain.SEA_LEVEL + 3 or nearby.hasSnow or
+        nearby.river > 0.28 or nearby.lake > 0.28 or
+        unsafeSpawnBiomes[nearby.biome] then
+      return nil
+    end
+    minimum = math.min(minimum, nearby.height)
+    maximum = math.max(maximum, nearby.height)
+  end
+
+  -- Leave enough reasonably level ground for the player's collision footprint
+  -- and first few steps instead of balancing them on a steep river bank.
+  if maximum - minimum > 4 then return nil end
+  return center
+end
+
+function terrain.findSafeSpawn(preferredX, preferredZ, maxHeight)
+  preferredX = math.floor(tonumber(preferredX) or 16)
+  preferredZ = math.floor(tonumber(preferredZ) or 16)
+  maxHeight = maxHeight or 127
+
+  local goldenAngle = math.pi * (3.0 - math.sqrt(5.0))
+  local fallback, fallbackRisk
+  local dryFallback, dryFallbackRisk
+  for index = 0, 8192 do
+    local radius = index == 0 and 0.0 or 18.5 * math.sqrt(index)
+    local angle = index * goldenAngle
+    local x = math.floor(preferredX + math.cos(angle) * radius + 0.5)
+    local z = math.floor(preferredZ + math.sin(angle) * radius + 0.5)
+    local candidate = spawnCandidateAt(x, z, maxHeight)
+    if candidate then return x + 0.5, z + 0.5, candidate end
+
+    -- Keep the safest dry point as a last resort for extremely ocean-heavy
+    -- seeds. This fallback still refuses actual ocean and active waterways.
+    local column = terrain.columnAt(x, z, maxHeight)
+    if not column.waterLevel and column.height >= terrain.SEA_LEVEL + 3 and not column.hasSnow and
+        column.river < 0.34 and column.lake < 0.34 and not unsafeSpawnBiomes[column.biome] then
+      local risk = radius * 0.002 + column.river * 8.0 + column.lake * 8.0
+      if not fallbackRisk or risk < fallbackRisk then
+        fallback, fallbackRisk = {x + 0.5, z + 0.5, column}, risk
+      end
+    end
+
+    -- Beaches and rough ground are less comfortable than the preferred spawn,
+    -- but still always beat an underwater fallback. Keep the nearest genuinely
+    -- dry column as the final guarantee.
+    if not column.waterLevel and column.biome ~= "ocean" then
+      local dryRisk = radius * 0.002 + math.max(terrain.SEA_LEVEL + 1 - column.height, 0) * 4.0
+      if not dryFallbackRisk or dryRisk < dryFallbackRisk then
+        dryFallback, dryFallbackRisk = {x + 0.5, z + 0.5, column}, dryRisk
+      end
+    end
+  end
+
+  if fallback then return fallback[1], fallback[2], fallback[3] end
+  if dryFallback then return dryFallback[1], dryFallback[2], dryFallback[3] end
+  error("Unable to find a dry spawn column for this seed")
 end
 
 function terrain.grassColorAt(x, z)
@@ -710,13 +794,41 @@ function terrain.grassColorAt(x, z)
   return color
 end
 
+-- Amplitudes of the noise terms in terrainDensityAt. DENSITY_NOISE_BOUND is
+-- derived from them, so if you change an amplitude the bound follows and
+-- fillChunk's fast path stays correct. fbm3 returns [0, 1).
+local DENSITY_LOW_AMPLITUDE = 8.0
+local DENSITY_DETAIL_AMPLITUDE = 3.0
+local DENSITY_MOUNTAIN_AMPLITUDE = 12.0
+local DENSITY_MOUNTAIN_BIAS = 0.47
+
+-- Largest distance the noise can move the density away from (column.height - y),
+-- in either direction. deepBias is excluded on purpose: it is only ever positive
+-- and only below y = 8, so it can push a cell towards solid but never towards air.
+terrain.DENSITY_NOISE_BOUND = math.ceil(
+  DENSITY_LOW_AMPLITUDE * 0.5 +
+  DENSITY_DETAIL_AMPLITUDE * 0.5 +
+  DENSITY_MOUNTAIN_AMPLITUDE * math.max(DENSITY_MOUNTAIN_BIAS, 1.0 - DENSITY_MOUNTAIN_BIAS)
+)
+
+-- The mountain term is gated on column.mountain and contributes exactly zero
+-- below the threshold, which is about nine columns in ten. Those need only the
+-- two unconditional terms, so their undecided band is half as tall -- and that
+-- band is the only place the expensive 3D noise is evaluated at all. Narrowing
+-- it stays exact for the same reason the wider bound is: outside the band the
+-- sign of the density is already settled.
+terrain.DENSITY_NOISE_BOUND_FLAT = math.ceil(
+  DENSITY_LOW_AMPLITUDE * 0.5 + DENSITY_DETAIL_AMPLITUDE * 0.5
+)
+terrain.DENSITY_MOUNTAIN_THRESHOLD = 0.35
+
 local function terrainDensityAt(worldX, y, worldZ, maxHeight, column)
   local base = column.height - y
   local deepBias = y < 8 and (8 - y) * 1.6 or 0.0
   local upperFade = smoothstep((y - terrain.SEA_LEVEL - 18) / math.max(1, maxHeight - terrain.SEA_LEVEL - 24))
-  local lowNoise = (fbm3(worldX, y, worldZ, 151, 3, 0.018) - 0.5) * 8.0
-  local detailNoise = (fbm3(worldX + 900.0, y * 1.7, worldZ - 450.0, 163, 2, 0.045) - 0.5) * 3.0
-  local mountainBoost = (column.mountain or 0.0) > 0.35 and (fbm3(worldX, y, worldZ, 167, 3, 0.026) - 0.47) * 12.0 * upperFade or 0.0
+  local lowNoise = (fbm3(worldX, y, worldZ, 151, 3, 0.018) - 0.5) * DENSITY_LOW_AMPLITUDE
+  local detailNoise = (fbm3(worldX + 900.0, y * 1.7, worldZ - 450.0, 163, 2, 0.045) - 0.5) * DENSITY_DETAIL_AMPLITUDE
+  local mountainBoost = (column.mountain or 0.0) > terrain.DENSITY_MOUNTAIN_THRESHOLD and (fbm3(worldX, y, worldZ, 167, 3, 0.026) - DENSITY_MOUNTAIN_BIAS) * DENSITY_MOUNTAIN_AMPLITUDE * upperFade or 0.0
   return base + deepBias + lowNoise + detailNoise + mountainBoost
 end
 
@@ -737,11 +849,19 @@ local function surfaceBlocksForColumn(column, y)
     topBlock = blocks.sand or topBlock
     fillerBlock = blocks.sand or fillerBlock
     underFillerBlock = blocks.sandstone or blocks.stone
-  elseif (column.river or 0.0) > 0.45 and y <= terrain.SEA_LEVEL + 1 then
-    topBlock = blocks.sand or topBlock
-    fillerBlock = blocks.sand or fillerBlock
-    underFillerBlock = blocks.sandstone or blocks.stone
-  elseif (column.lake or 0.0) > 0.50 and y <= terrain.SEA_LEVEL + 1 then
+  elseif column.biome == "rockyShore" then
+    topBlock = blocks.gravel or blocks.stone
+    fillerBlock = blocks.stone
+    underFillerBlock = blocks.stone
+  elseif column.biome == "frozenShore" then
+    topBlock = blocks.gravel or blocks.dirt or blocks.stone
+    fillerBlock = blocks.dirt or blocks.stone
+    underFillerBlock = blocks.stone
+  elseif (column.riverCore or 0.0) > 0.22 and column.waterLevel and y <= column.waterLevel then
+    -- columnAt already selected a deterministic gravel/clay/sand riverbed.
+    -- Preserve it here instead of flattening every channel back to sand.
+    underFillerBlock = blocks.stone
+  elseif (column.lake or 0.0) > 0.22 and column.waterLevel and y <= column.waterLevel then
     topBlock = blocks.clay or blocks.sand or topBlock
     fillerBlock = topBlock
   elseif column.biome == "iceDesert" then
@@ -765,6 +885,7 @@ local function surfaceBlocksForColumn(column, y)
 end
 
 local function applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
+  local surfaceFloor = terrain.activeProfile.surfaceMinTopY or (terrain.SEA_LEVEL - 4)
   for x = 0, width - 1 do
     for z = 0, depth - 1 do
       local worldX = x + offsetX
@@ -782,9 +903,9 @@ local function applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, ma
         elseif id == blocks.stone then
           if depthLeft == -1 then
             depthLeft = column.fillerDepth
-            if y >= terrain.SEA_LEVEL - 4 then
+            if y >= surfaceFloor then
               chunk:setBlock(x, y, z, topBlock)
-              if column.profile.snow and y > terrain.SEA_LEVEL + 1 and blocks.snow then
+              if column.hasSnow and y > terrain.SEA_LEVEL and blocks.snow then
                 chunk:setBlock(x, y, z, blocks.snow)
               end
             else
@@ -811,7 +932,8 @@ local function isTreeCenter(x, z, biome)
   end
 
   local macro = terrain.macroAt(x, z)
-  if macro.river > 0.32 or macro.lake > 0.28 or macro.land < 0.42 then
+  local minimumLand = biome == "beach" and 0.28 or 0.42
+  if macro.river > 0.32 or macro.lake > 0.28 or macro.land < minimumLand then
     return false
   end
 
@@ -839,6 +961,48 @@ local function isTreeCenter(x, z, biome)
   end
 
   return hash2(cellX, cellZ, 239) < profile.treeChance * (settings.treeDensity or 1.0) * densityScale
+end
+
+-- Trees are selected from one jittered point per biome-sized grid cell. Walking
+-- every block in the overlap margin and running the full worldgen pipeline just
+-- to reject almost all of them made vegetation more expensive than the terrain
+-- itself, especially with the wide overlap needed by authored tree crowns.
+-- Enumerate the possible jittered points for every spacing instead. The final
+-- biome check in isTreeCenter keeps this exactly equivalent to the old scan.
+local function treeCandidates(minX, minZ, maxX, maxZ)
+  local spacings = {}
+  for _, profile in pairs(biomeProfiles) do
+    local spacing = profile.treeSpacing
+    if profile.treeChance and profile.treeChance > 0.0 and spacing then
+      spacings[spacing] = true
+    end
+  end
+
+  local candidates, seen = {}, {}
+  for spacing in pairs(spacings) do
+    local minCellX, maxCellX = math.floor(minX / spacing), math.floor(maxX / spacing)
+    local minCellZ, maxCellZ = math.floor(minZ / spacing), math.floor(maxZ / spacing)
+    for cellX = minCellX, maxCellX do
+      for cellZ = minCellZ, maxCellZ do
+        local x = cellX * spacing + math.floor(hash2(cellX, cellZ, 211) * spacing)
+        local z = cellZ * spacing + math.floor(hash2(cellX, cellZ, 223) * spacing)
+        if x >= minX and x <= maxX and z >= minZ and z <= maxZ then
+          local key = x .. "," .. z
+          if not seen[key] then
+            seen[key] = true
+            candidates[#candidates + 1] = {x = x, z = z}
+          end
+        end
+      end
+    end
+  end
+
+  -- Preserve the old x-major/z-minor placement order. This matters when two
+  -- neighbouring canopies overlap inside the same chunk.
+  table.sort(candidates, function(a, b)
+    return a.x == b.x and a.z < b.z or a.x < b.x
+  end)
+  return candidates
 end
 
 local function setLocalBlock(chunk, lx, y, lz, id)
@@ -891,11 +1055,61 @@ local function chooseTreeGenerator(profile, x, z)
   return generators[index] or "oak"
 end
 
+function terrain.treeGeneratorForBiome(biome, x, z)
+  return chooseTreeGenerator(biomeProfiles[biome] or biomeProfiles.plains, x, z)
+end
+
+local TREE_MATERIALS = {
+  oak = {wood = "oak_log", leaves = "oak_leaves"},
+  forest = {wood = "oak_log", leaves = "oak_leaves"},
+  big = {wood = "oak_log", leaves = "oak_leaves"},
+  maple = {wood = "oak_log", leaves = "oak_leaves"},
+  willow = {wood = "oak_log", leaves = "oak_leaves"},
+  spruce = {wood = "spruce_log", leaves = "spruce_leaves"},
+  pine = {wood = "spruce_log", leaves = "spruce_leaves"},
+  cypress = {wood = "spruce_log", leaves = "spruce_leaves"},
+  taiga1 = {wood = "spruce_log", leaves = "spruce_leaves"},
+  taiga2 = {wood = "spruce_log", leaves = "spruce_leaves"},
+  birch = {wood = "birch_log", leaves = "birch_leaves"},
+  acacia = {wood = "acacia_log", leaves = "acacia_leaves"},
+  baobab = {wood = "acacia_log", leaves = "acacia_leaves"},
+  ceiba = {wood = "ceiba_log", leaves = "ceiba_leaves"},
+  jungle = {wood = "jungle_log", leaves = "jungle_leaves"},
+  fig = {wood = "jungle_log", leaves = "jungle_leaves"},
+  mangrove = {wood = "jungle_log", leaves = "jungle_leaves"}
+}
+
+local function addVoxelTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, species)
+  local names = TREE_MATERIALS[species] or TREE_MATERIALS.oak
+  local fallbackWood = blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local livingWood = blocks[names.wood .. "_alive"] or blocks[names.wood] or fallbackWood
+  local material = {
+    wood = livingWood,
+    -- Living trunks intentionally keep one connected block family so angled
+    -- branches are captured by whole-tree felling along with the main stem.
+    woodX = blocks[names.wood .. "_alive_x"] or livingWood,
+    woodZ = blocks[names.wood .. "_alive_z"] or livingWood,
+    leaves = blocks[names.leaves] or blocks.oak_leaves or blocks.grass
+  }
+  material.leaves2 = material.leaves
+
+  local seed = randomInt(treeX, treeZ, 397, 2147483000) + 1
+  local cloud = voxelTrees.generate(species, seed)
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or material.wood)
+  voxelTrees.emit(cloud, localX, groundY + 1, localZ, material,
+    function(x, y, z, id) setIfNotOpaque(chunk, x, y, z, id) end)
+end
+
 local function addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
   local trunkHeight = generator == "forest" and (randomInt(treeX, treeZ, 257, 3) + 5) or (randomInt(treeX, treeZ, 257, 3) + 4)
 
-  local logId = blocks.oak_log or blocks.oak_planks or blocks.dirt
-  local leavesId = blocks.oak_leaves or blocks.grass
+  local logId = generator == "birch" and
+    (blocks.birch_log_alive or blocks.birch_log) or
+    (blocks.oak_log_alive or blocks.oak_log)
+  local leavesId = generator == "birch" and blocks.birch_leaves or blocks.oak_leaves
+  logId = logId or blocks.oak_planks or blocks.dirt
+  leavesId = leavesId or blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
 
@@ -927,6 +1141,166 @@ local function addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY,
   end
 end
 
+
+local function addTropicalCanopy(chunk, centerX, centerY, centerZ, leavesId, radius, layers)
+  layers = layers or 3
+  for dy = 0, layers - 1 do
+    local taper = math.abs(dy - (layers - 1) * 0.5) / math.max(1, layers * 0.5)
+    local layerRadius = math.max(1, radius - math.floor(taper * 1.5))
+    local radiusSq = (layerRadius + 0.35) * (layerRadius + 0.35)
+    for dx = -layerRadius, layerRadius do
+      for dz = -layerRadius, layerRadius do
+        if dx * dx + dz * dz <= radiusSq then
+          setIfNotOpaque(chunk, centerX + dx, centerY + dy, centerZ + dz, leavesId)
+        end
+      end
+    end
+  end
+end
+
+local TREE_DIRECTIONS = {
+  {1,0}, {1,1}, {0,1}, {-1,1}, {-1,0}, {-1,-1}, {0,-1}, {1,-1}
+}
+
+local function addCeibaTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  local logId = blocks.ceiba_log_alive or blocks.ceiba_log or
+    blocks.jungle_log_alive or blocks.jungle_log or blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.ceiba_leaves or blocks.jungle_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = 17 + randomInt(treeX, treeZ, 331, 7)
+  local crownY = groundY + height - 3
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or logId)
+
+  -- Ceibas are defined by a towering, broad trunk and plank-like buttress
+  -- roots. A 2x2 column keeps that mass visible even beneath the canopy.
+  for y = groundY + 1, groundY + height - 1 do
+    for dx = 0, 1 do for dz = 0, 1 do
+      setIfNotOpaque(chunk, localX + dx, y, localZ + dz, logId)
+    end end
+  end
+  for direction = 1, 8, 2 do
+    local dx, dz = TREE_DIRECTIONS[direction][1], TREE_DIRECTIONS[direction][2]
+    for reach = 1, 4 do
+      local buttressHeight = math.max(1, 5 - reach)
+      for rise = 0, buttressHeight - 1 do
+        setIfNotOpaque(chunk, localX + dx * reach, groundY + 1 + rise,
+          localZ + dz * reach, logId)
+      end
+    end
+  end
+
+  addTropicalCanopy(chunk, localX, crownY, localZ, leavesId, 5, 4)
+  for direction = 1, #TREE_DIRECTIONS do
+    local dx, dz = TREE_DIRECTIONS[direction][1], TREE_DIRECTIONS[direction][2]
+    local reach = 3 + randomInt(treeX + direction, treeZ - direction, 337, 2)
+    local branchY = crownY + (direction % 2)
+    for step = 1, reach do
+      local by = branchY + math.floor(step / 3)
+      if step > 1 and by > branchY + math.floor((step - 1) / 3) then
+        setIfNotOpaque(chunk, localX + dx * (step - 1), by,
+          localZ + dz * (step - 1), logId)
+      end
+      if dx ~= 0 and dz ~= 0 then
+        setIfNotOpaque(chunk, localX + dx * step, by,
+          localZ + dz * (step - 1), logId)
+      end
+      setIfNotOpaque(chunk, localX + dx * step, by, localZ + dz * step, logId)
+    end
+    addTropicalCanopy(chunk, localX + dx * reach, branchY, localZ + dz * reach,
+      leavesId, 2, 3)
+  end
+end
+
+local function addJungleTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, fig)
+  local logId = blocks.jungle_log_alive or blocks.jungle_log or
+    blocks.ceiba_log_alive or blocks.ceiba_log or blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.jungle_leaves or blocks.ceiba_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = (fig and 8 or 11) + randomInt(treeX, treeZ, fig and 347 or 349, fig and 5 or 6)
+  local crownY = groundY + height - 3
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or logId)
+  for y = groundY + 1, groundY + height - 1 do
+    setIfNotOpaque(chunk, localX, y, localZ, logId)
+  end
+  if fig then
+    -- Strangler-fig-like secondary stems make a low, irregular tropical form.
+    for direction = 1, 4 do
+      local d = TREE_DIRECTIONS[direction * 2 - 1]
+      for y = groundY + 1, crownY - 1 do
+        if y < groundY + 3 or (y + direction) % 3 == 0 then
+          setIfNotOpaque(chunk, localX + d[1], y, localZ + d[2], logId)
+        end
+      end
+    end
+  end
+  addTropicalCanopy(chunk, localX, crownY, localZ, leavesId, fig and 4 or 3, fig and 4 or 5)
+  local branchCount = fig and 6 or 3
+  for branch = 1, branchCount do
+    local d = TREE_DIRECTIONS[1 + randomInt(treeX + branch, treeZ, 353, 8)]
+    local reach = 2 + randomInt(treeX, treeZ + branch, 359, 2)
+    for step = 1, reach do
+      setIfNotOpaque(chunk, localX + d[1] * step, crownY + math.floor(step / 2),
+        localZ + d[2] * step, logId)
+    end
+    addTropicalCanopy(chunk, localX + d[1] * reach, crownY,
+      localZ + d[2] * reach, leavesId, 2, 3)
+  end
+end
+
+local function addAcaciaTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  local logId = blocks.acacia_log_alive or blocks.acacia_log or
+    blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.acacia_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = 6 + randomInt(treeX, treeZ, 367, 4)
+  local direction = TREE_DIRECTIONS[1 + randomInt(treeX, treeZ, 369, 8)]
+  local tx, tz = localX, localZ
+  setLocalBlock(chunk, localX, groundY, localZ, blocks.dirt or logId)
+  for rise = 1, height do
+    if rise == height - 2 then
+      setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+      tx, tz = tx + direction[1], tz + direction[2]
+    end
+    setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+  end
+  addTropicalCanopy(chunk, tx, groundY + height, tz, leavesId, 3, 2)
+  local side = TREE_DIRECTIONS[(1 + randomInt(treeX, treeZ, 373, 8))]
+  for step = 1, 3 do
+    setIfNotOpaque(chunk, tx + side[1] * step, groundY + height - 1,
+      tz + side[2] * step, logId)
+  end
+  addTropicalCanopy(chunk, tx + side[1] * 3, groundY + height,
+    tz + side[2] * 3, leavesId, 2, 2)
+end
+
+local function addPalmTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  local logId = blocks.palm_log_alive or blocks.palm_log or
+    blocks.jungle_log_alive or blocks.jungle_log or blocks.oak_log_alive or blocks.oak_log
+  local leavesId = blocks.palm_leaves or blocks.jungle_leaves or blocks.oak_leaves
+  local localX, localZ = treeX - offsetX, treeZ - offsetZ
+  local height = 8 + randomInt(treeX, treeZ, 379, 5)
+  local lean = TREE_DIRECTIONS[1 + randomInt(treeX, treeZ, 383, 8)]
+  local tx, tz = localX, localZ
+  for rise = 1, height do
+    if rise == math.floor(height * 0.55) or rise == height - 1 then
+      setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+      tx, tz = tx + lean[1], tz + lean[2]
+    end
+    setIfNotOpaque(chunk, tx, groundY + rise, tz, logId)
+  end
+
+  setIfNotOpaque(chunk, tx, groundY + height + 1, tz, leavesId)
+  for direction = 1, #TREE_DIRECTIONS do
+    local dx, dz = TREE_DIRECTIONS[direction][1], TREE_DIRECTIONS[direction][2]
+    local reach = direction % 2 == 0 and 3 or 4
+    for step = 1, reach do
+      local drop = step == reach and 1 or 0
+      setIfNotOpaque(chunk, tx + dx * step, groundY + height + 1 - drop,
+        tz + dz * step, leavesId)
+    end
+  end
+end
+
 local function addBigTreeCluster(chunk, centerX, centerY, centerZ, leavesId)
   for layer = 0, 3 do
     local y = centerY + layer
@@ -952,7 +1326,7 @@ local function addBigTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
     trunkHeight = heightLimit - 1
   end
 
-  local logId = blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local logId = blocks.oak_log_alive or blocks.oak_log or blocks.oak_planks or blocks.dirt
   local leavesId = blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
@@ -994,19 +1368,22 @@ local function addBigTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
 end
 
 local function addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  local height = randomInt(treeX, treeZ, 281, 5) + 7
-  local trunkBareHeight = height - randomInt(treeX, treeZ, 283, 2) - 3
-  local leafHeight = height - trunkBareHeight
-  local maxRadius = 1 + randomInt(treeX, treeZ, 287, leafHeight + 1)
-  local logId = blocks.spruce_log or blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local height = randomInt(treeX, treeZ, 281, 6) + 13
+  local leafHeight = 7 + randomInt(treeX, treeZ, 283, 4)
+  local trunkBareHeight = height - leafHeight
+  local maxRadius = 3 + randomInt(treeX, treeZ, 287, 2)
+  local logId = blocks.spruce_log_alive or blocks.spruce_log or
+    blocks.oak_log_alive or blocks.oak_log or blocks.oak_planks or blocks.dirt
   local leavesId = blocks.spruce_leaves or blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
 
   setLocalBlock(chunk, localTreeX, groundY, localTreeZ, blocks.dirt or logId)
 
-  local radius = 0
   for y = groundY + height, groundY + trunkBareHeight, -1 do
+    local layer=groundY+height-y
+    local radius=math.min(maxRadius,
+      math.floor((layer/math.max(1,leafHeight))*maxRadius+0.35))
     for lx = localTreeX - radius, localTreeX + radius do
       local dx = lx - localTreeX
       for lz = localTreeZ - radius, localTreeZ + radius do
@@ -1017,11 +1394,6 @@ local function addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
       end
     end
 
-    if radius >= 1 and y == groundY + trunkBareHeight + 1 then
-      radius = radius - 1
-    elseif radius < maxRadius then
-      radius = radius + 1
-    end
   end
 
   for y = 0, height - 2 do
@@ -1034,11 +1406,12 @@ local function addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
 end
 
 local function addTaiga2Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  local height = randomInt(treeX, treeZ, 293, 4) + 6
-  local leafStart = 1 + randomInt(treeX, treeZ, 307, 2)
+  local height = randomInt(treeX, treeZ, 293, 5) + 11
+  local leafStart = 2 + randomInt(treeX, treeZ, 307, 2)
   local leafLayers = height - leafStart
-  local maxRadius = 2 + randomInt(treeX, treeZ, 311, 2)
-  local logId = blocks.spruce_log or blocks.oak_log or blocks.oak_planks or blocks.dirt
+  local maxRadius = 3 + randomInt(treeX, treeZ, 311, 2)
+  local logId = blocks.spruce_log_alive or blocks.spruce_log or
+    blocks.oak_log_alive or blocks.oak_log or blocks.oak_planks or blocks.dirt
   local leavesId = blocks.spruce_leaves or blocks.oak_leaves or blocks.grass
   local localTreeX = treeX - offsetX
   local localTreeZ = treeZ - offsetZ
@@ -1083,28 +1456,71 @@ end
 local function addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, biome)
   local profile = biomeProfiles[biome] or biomeProfiles.plains
   local generator = chooseTreeGenerator(profile, treeX, treeZ)
-  if generator == "taiga1" then
-    addTaiga1Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  elseif generator == "taiga2" then
-    addTaiga2Tree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
-  elseif generator == "big" then
-    addBigTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
+  if generator == "palm" then
+    addPalmTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY)
   else
-    addClassicOakTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
+    addVoxelTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, generator)
   end
 end
 
+-- Shared by world decoration now and sapling growth later; keeping the same
+-- deterministic selector means a planted/debug-generated tree has the biome's
+-- real silhouette instead of a separate miniature implementation.
+terrain.addTree = addTree
+
 local foliageProfiles = {
-  rainforest = {grass = 0.42, doubleGrass = 0.055},
-  swampland = {grass = 0.22, doubleGrass = 0.020},
-  seasonalForest = {grass = 0.36, doubleGrass = 0.040},
-  savanna = {grass = 0.20, doubleGrass = 0.012},
-  shrubland = {grass = 0.28, doubleGrass = 0.020},
-  plains = {grass = 0.44, doubleGrass = 0.048},
-  forest = {grass = 0.32, doubleGrass = 0.030},
-  taiga = {grass = 0.16, doubleGrass = 0.006},
-  mountains = {grass = 0.12, doubleGrass = 0.006}
+  rainforest = {
+    grass = 0.64, doubleGrass = 0.070, flowers = 0.055,
+    flowerTypes = {"blue_orchid", "allium", "dandelion", "poppy"}
+  },
+  swampland = {
+    grass = 0.38, doubleGrass = 0.030, flowers = 0.085,
+    flowerTypes = {"blue_orchid", "blue_orchid", "dandelion"}
+  },
+  seasonalForest = {
+    grass = 0.58, doubleGrass = 0.055, flowers = 0.090,
+    flowerTypes = {"poppy", "dandelion", "allium", "oxeye_daisy"}
+  },
+  savanna = {
+    grass = 0.32, doubleGrass = 0.018, flowers = 0.032,
+    flowerTypes = {"dandelion", "poppy"}
+  },
+  shrubland = {
+    grass = 0.48, doubleGrass = 0.032, flowers = 0.075,
+    flowerTypes = {"dandelion", "poppy", "allium"}
+  },
+  plains = {
+    grass = 0.68, doubleGrass = 0.065, flowers = 0.145,
+    flowerTypes = {
+      "dandelion", "poppy", "oxeye_daisy", "red_tulip", "orange_tulip",
+      "pink_tulip", "white_tulip"
+    }
+  },
+  forest = {
+    grass = 0.54, doubleGrass = 0.045, flowers = 0.072,
+    flowerTypes = {"poppy", "allium", "oxeye_daisy", "dandelion"}
+  },
+  taiga = {
+    grass = 0.27, doubleGrass = 0.010, flowers = 0.024,
+    flowerTypes = {"dandelion", "oxeye_daisy"}
+  },
+  mountains = {
+    grass = 0.22, doubleGrass = 0.010, flowers = 0.028,
+    flowerTypes = {"dandelion", "allium", "oxeye_daisy"}
+  }
 }
+
+local function flowerFor(foliage, worldX, worldZ)
+  local types = foliage.flowerTypes
+  if not types or #types == 0 then return nil end
+
+  -- Quantizing the selector makes nearby flowers favour the same species,
+  -- producing recognisable beds instead of evenly distributed confetti.
+  local patchX = math.floor(worldX / 5)
+  local patchZ = math.floor(worldZ / 5)
+  local index = 1 + math.floor(hash2(patchX, patchZ, 919) * #types)
+  return blocks[types[index]]
+end
 
 local function isPlantAir(id)
   return id == nil or id == blocks.air or id == 0
@@ -1134,14 +1550,23 @@ local function populateGrassFoliage(chunk, offsetX, offsetZ, width, depth, maxHe
       local worldZ = offsetZ + z
       local column = terrain.columnAt(worldX, worldZ, maxHeight)
       local foliage = foliageProfiles[column.biome]
-      if foliage then
+      if foliage and not column.waterLevel then
         local groundY, groundId = surfaceYForFoliage(chunk, x, z, maxHeight)
         if groundY and groundId == blocks.grass and groundY + 1 <= maxHeight and isPlantAir(chunk:getBlock(x, groundY + 1, z)) then
           local waterClearance = 1.0 - clamp(math.max(column.river or 0.0, column.lake or 0.0) * 1.7, 0.0, 1.0)
           local patchNoise = fbm(worldX + 2600.0, worldZ - 1300.0, 887, 2, 0.055)
           local meadowNoise = fbm(worldX - 9800.0, worldZ + 4300.0, 889, 3, 0.0065)
-          local density = foliage.grass * lerp(0.35, 1.45, patchNoise) * lerp(0.65, 1.22, meadowNoise) * waterClearance
-          if hash2(worldX, worldZ, 881) < density then
+          local lushness = settings.grassDensity or 1.0
+          local density = clamp(foliage.grass * lushness * lerp(0.42, 1.55, patchNoise) *
+            lerp(0.72, 1.28, meadowNoise) * waterClearance, 0.0, 0.94)
+          local flowerPatch = fbm(worldX + 5700.0, worldZ - 8100.0, 911, 3, 0.021)
+          local flowerDensity = (foliage.flowers or 0.0) * math.sqrt(lushness) *
+            lerp(0.08, 2.15, edge(flowerPatch, 0.38, 0.76)) * waterClearance
+          local flowerId = flowerFor(foliage, worldX, worldZ)
+
+          if flowerId and hash2(worldX, worldZ, 913) < flowerDensity then
+            chunk:setBlock(x, groundY + 1, z, flowerId)
+          elseif hash2(worldX, worldZ, 881) < density then
             if doubleLowerId and doubleUpperId and groundY + 2 <= maxHeight and isPlantAir(chunk:getBlock(x, groundY + 2, z)) and hash2(worldX, worldZ, 883) < foliage.doubleGrass then
               chunk:setBlock(x, groundY + 1, z, doubleLowerId)
               chunk:setBlock(x, groundY + 2, z, doubleUpperId)
@@ -1326,42 +1751,101 @@ end
 function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, options)
   options = options or {}
   local step = options.yieldStep
-  if options.generatorType == "superflat" then
-    fillSuperflatChunk(chunk, width, depth, maxHeight, options.superflatLayers, step)
+  if options.generatorType == "superflat" or options.generatorType == "showcase" then
+    local profileLayers = terrain.activeProfile.generation and terrain.activeProfile.generation.superflatLayers
+    fillSuperflatChunk(chunk, width, depth, maxHeight, options.superflatLayers or profileLayers, step)
+    if options.generatorType == "showcase" then
+      showcase.decorateChunk(chunk, offsetX, offsetZ, width, depth, maxHeight)
+    end
+    chunk.environment = {
+      world = terrain.activeWorldId,
+      biome = options.generatorType == "showcase" and "showcase" or
+        (terrain.activeWorldId == "mars" and "mars_lowlands" or "superflat"),
+      landform = "plain",
+      averageElevation = 3
+    }
     return
   end
 
+  chunk.environment = worldgen:sampleChunkEnvironment(offsetX, offsetZ, width, depth, maxHeight)
+  chunk.waterSurface = {}
+
   local waterId = blocks.water or blocks.water_still
+
+  -- Density is (column.height - y) plus noise that cannot exceed
+  -- DENSITY_NOISE_BOUND, so outside a band of that width around the surface the
+  -- sign is already decided and evaluating the noise cannot change the result.
+  -- Skipping those levels is exact, not an approximation.
+  local mountainBound = terrain.DENSITY_NOISE_BOUND
+  local flatBound = terrain.DENSITY_NOISE_BOUND_FLAT
+  local mountainThreshold = terrain.DENSITY_MOUNTAIN_THRESHOLD
+
+  -- A whole x-slice was one step, which is several ms of work. The frame budget
+  -- can only stop between steps, so it overshot by that much every time it hit
+  -- the cap. Yielding every few columns makes the cap tight.
+  local sinceYield = 0
 
   for x = 0, width - 1 do
     for z = 0, depth - 1 do
       local worldX = x + offsetX
       local worldZ = z + offsetZ
       local column = terrain.columnAt(worldX, worldZ, maxHeight)
+      if column.waterLevel then
+        chunk.waterSurface[x + z * 16 + 1] = column.waterLevel - 0.35
+      end
+      local bound = (column.mountain or 0.0) > mountainThreshold and mountainBound or flatBound
+      local bandLow = column.height - bound
+      local bandHigh = column.height + bound
 
       for y = 0, maxHeight do
-        if y == 0 then
+        local solid
+        if y == 0 or y < bandLow then
+          solid = true
+        elseif y > bandHigh then
+          solid = false
+        else
+          solid = terrainDensityAt(worldX, y, worldZ, maxHeight, column) > 0.0
+        end
+
+        -- Density noise must not rebuild rock through a channel after the
+        -- hydrology stage carved it. Rivers and lakes own local water levels.
+        if column.waterLevel and y > column.height and y <= column.waterLevel then
+          solid = false
+        end
+
+        if solid then
           chunk:setBlock(x, y, z, blocks.stone)
-        elseif terrainDensityAt(worldX, y, worldZ, maxHeight, column) > 0.0 then
-          chunk:setBlock(x, y, z, blocks.stone)
-        elseif y <= terrain.SEA_LEVEL and waterId then
-          chunk:setBlock(x, y, z, waterId)
+        elseif column.waterLevel and y <= column.waterLevel and waterId then
+          if y == column.waterLevel and column.freezeWater and blocks.ice then
+            chunk:setBlock(x, y, z, blocks.ice)
+          else
+            chunk:setBlock(x, y, z, waterId)
+          end
         end
       end
+
+      sinceYield = sinceYield + 1
+      if step and sinceYield >= DENSITY_YIELD_COLUMNS then
+        sinceYield = 0
+        step()
+      end
     end
-    if step then step() end
   end
 
   applySurfaceReplacement(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
-  populateOres(chunk, offsetX, offsetZ)
+  local generation = terrain.activeProfile.generation or {}
+  if generation.ores ~= false then populateOres(chunk, offsetX, offsetZ) end
   if step then step() end
-  carveChunkCaves(chunk, offsetX, offsetZ, maxHeight)
+  if generation.caves ~= false then carveChunkCaves(chunk, offsetX, offsetZ, maxHeight) end
   if step then step() end
 
-  for x = -3, width + 2 do
-    for z = -3, depth + 2 do
-      local treeX = offsetX + x
-      local treeZ = offsetZ + z
+  if generation.vegetation ~= false then
+    -- The authored ceiba and jungle crowns can reach eighteen blocks from the
+    -- trunk. Include that overlap so a tree remains whole across chunk edges.
+    local candidates = treeCandidates(
+      offsetX - 18, offsetZ - 18, offsetX + width + 17, offsetZ + depth + 17)
+    for i = 1, #candidates do
+      local treeX, treeZ = candidates[i].x, candidates[i].z
       local column = terrain.columnAt(treeX, treeZ, maxHeight)
       local lx = treeX - offsetX
       local lz = treeZ - offsetZ
@@ -1379,14 +1863,33 @@ function terrain.fillChunk(chunk, offsetX, offsetZ, width, depth, maxHeight, opt
         groundY = column.height
       end
 
-      if groundY and groundY > terrain.SEA_LEVEL + 1 and isTreeCenter(treeX, treeZ, column.biome) then
+      if groundY and not column.waterLevel and groundY >= terrain.SEA_LEVEL + 1 and
+          isTreeCenter(treeX, treeZ, column.biome) then
         addTree(chunk, offsetX, offsetZ, treeX, treeZ, groundY, column.biome, maxHeight)
       end
+      if step and i % 8 == 0 then step() end
     end
-    if step then step() end
+    populateGrassFoliage(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
   end
+end
 
-  populateGrassFoliage(chunk, offsetX, offsetZ, width, depth, maxHeight, step)
+-- Stable development interface for field maps, F3 information and future
+-- editor overlays. Callers do not need to know which pipeline stage owns a
+-- value, so modules can be replaced without changing the visualisation tools.
+function terrain.debugFieldsAt(x, z, maxHeight)
+  return worldgen:debugFieldsAt(x, z, maxHeight or 127)
+end
+
+function terrain.debugColorAt(mode, x, z, maxHeight)
+  return worldgen:debugColorAt(mode, x, z, maxHeight or 127)
+end
+
+function terrain.heightExplanationAt(x, z, maxHeight)
+  return worldgen:heightExplanationAt(x, z, maxHeight or 127)
+end
+
+function terrain.chunkEnvironmentAt(offsetX, offsetZ, width, depth, maxHeight)
+  return worldgen:sampleChunkEnvironment(offsetX, offsetZ, width or 16, depth or 16, maxHeight or 127)
 end
 
 return terrain

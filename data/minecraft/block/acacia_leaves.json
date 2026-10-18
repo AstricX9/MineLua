@@ -1,0 +1,11 @@
+{
+  "name": "Acacia Leaves",
+  "texture": "./textures/blocks/leaves_acacia.png",
+  "colormap": "./textures/colormap/foliage.png",
+  "biomeTint": true,
+  "hardness": 0.2,
+  "properties": {
+    "solid": true, "cutout": true, "leaves": true,
+    "doubleSided": true, "drop": "stick", "soundMaterial": "grass"
+  }
+}

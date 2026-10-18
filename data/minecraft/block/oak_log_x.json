@@ -1,0 +1,14 @@
+{
+  "name": "Oak Log (X Axis)",
+  "texture": {
+    "top": "./textures/blocks/log_oak_top.png",
+    "bottom": "./textures/blocks/log_oak_top.png",
+    "side": "./textures/blocks/log_oak.png"
+  },
+  "properties": {
+    "solid": true,
+    "logAxis": "x",
+    "hidden": true,
+    "drop": "oak_log"
+  }
+}

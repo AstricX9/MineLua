@@ -1,8 +1,0 @@
-{
-  "name": "Lava",
-  "texture": "./textures/blocks/lava_still.png",
-  "properties": {
-    "solid": false,
-    "liquid": true
-  }
-}

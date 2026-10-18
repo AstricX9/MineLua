@@ -1,0 +1,124 @@
+{
+  "format": "minelua-player",
+  "savedAt": 1787903804000,
+  "state": {
+    "camera": {
+      "acceleration": 55,
+      "airAcceleration": 14,
+      "airFriction": 2,
+      "allowFlight": true,
+      "bobPhase": 209.34811388438,
+      "bodyRadius": 0.3,
+      "coyoteTime": 0.1,
+      "coyoteTimer": 0,
+      "crouchEyeHeight": 1.24,
+      "crouchSpeed": 2.4,
+      "crouching": false,
+      "eyeHeight": 1.62,
+      "firstMouse": false,
+      "flightToggleWasDown": false,
+      "flyAcceleration": 24,
+      "flyFriction": 18,
+      "flySpeed": 9.5,
+      "flying": false,
+      "fovOffset": 1.324225903219e-129,
+      "gravity": 15.5,
+      "groundFriction": 46,
+      "groundSnap": 0.36,
+      "grounded": false,
+      "invertMouse": false,
+      "jumpBuffer": 0,
+      "jumpBufferTime": 0.12,
+      "jumpSpeed": 6.6,
+      "jumpWasDown": false,
+      "landingViewOffset": 0,
+      "lastX": 2416,
+      "lastY": 1181,
+      "mouseSensitivity": 0.085,
+      "mouseSmoothing": 42,
+      "mouseTurnVelocity": -9.2552923513207e-14,
+      "moveInputX": 0,
+      "moveInputZ": 0,
+      "pitch": -52.045115286889,
+      "position": [
+        -365.78282457532,
+        64.235910991773,
+        -250.97185377859
+      ],
+      "reach": 8,
+      "sprintSpeed": 7.2,
+      "sprinting": false,
+      "standEyeHeight": 1.62,
+      "stepHeight": 0.6,
+      "stepViewOffset": 0,
+      "swimAcceleration": 18,
+      "swimSinkSpeed": 0.65,
+      "swimUpSpeed": 4.6,
+      "targetPitch": -52.045115286889,
+      "targetYaw": -984.00716118064,
+      "velocity": [
+        0.17568668119258,
+        -41.66753195,
+        0.017980295961313
+      ],
+      "velocityY": -41.66753195,
+      "viewBobPitch": 0,
+      "viewBobX": 0,
+      "viewBobY": 0,
+      "viewBobbingEnabled": true,
+      "viewRoll": 0.027692333620599,
+      "walkSpeed": 5.1,
+      "yaw": -984.00716118064
+    },
+    "inventory": {
+      "crafting": {
+      },
+      "craftingGridSize": 2,
+      "furnace": {
+        "burnTime": 0,
+        "burnTotal": 0,
+        "cookTime": 0,
+        "cookTotal": 10
+      },
+      "gameMode": "creative",
+      "recipeHint": "Break gravel for flint, then gather sticks from leaves or wood.",
+      "search": "eee",
+      "selected": 9,
+      "slots": [
+        {
+          "count": 64,
+          "item": "grass"
+        },
+        {
+          "count": 64,
+          "item": "dirt"
+        },
+        {
+          "count": 64,
+          "item": "stone"
+        },
+        {
+          "count": 64,
+          "item": "sand"
+        },
+        {
+          "count": 64,
+          "item": "gravel"
+        },
+        {
+          "count": 64,
+          "item": "cobblestone"
+        },
+        {
+          "count": 64,
+          "item": "oak_planks"
+        },
+        {
+          "count": 64,
+          "item": "oak_log"
+        }
+      ]
+    }
+  },
+  "version": 1
+}

@@ -1,0 +1,14 @@
+{
+  "name": "Red Tulip",
+  "texture": "./textures/blocks/flower_tulip_red.png",
+  "properties": {
+    "solid": false,
+    "cutout": true,
+    "plant": true,
+    "flower": true,
+    "cross": true,
+    "replaceable": true,
+    "breakable": true,
+    "targetable": true
+  }
+}
